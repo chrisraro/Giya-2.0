@@ -1,0 +1,81 @@
+# 22 — Schema: Catalog (Menus, Products, Variants, Add-ons)
+
+Conventions per `20-data-model.md`; `-- +audit` = standard audit + soft-delete columns. RLS pattern P1 throughout (staff owner/manager write; public read of active rows) unless noted.
+
+```sql
+-- ============================================================ menu_categories
+create table public.menu_categories (
+  id           uuid primary key default uuid_generate_v7(),
+  business_id  uuid not null references public.businesses(id) on delete cascade,
+  name         text not null check (char_length(name) between 1 and 80),
+  description  text,
+  sort         integer not null default 0,
+  is_active    boolean not null default true,
+  unique (business_id, name)
+  -- +audit, +deleted_at
+);
+create index menu_categories_biz_idx on public.menu_categories (business_id, sort)
+  where deleted_at is null;
+
+-- ============================================================ products
+create table public.products (
+  id             uuid primary key default uuid_generate_v7(),
+  business_id    uuid not null references public.businesses(id) on delete cascade,
+  category_id    uuid references public.menu_categories(id) on delete set null,
+  name           text not null check (char_length(name) between 1 and 120),
+  description    text check (char_length(description) <= 1000),
+  base_price_centavos integer not null check (base_price_centavos >= 0),
+  images         jsonb not null default '[]',      -- [{url, sort}] bucket: products
+  status         text not null default 'active' check (status in ('active','hidden','sold_out')),
+  is_available   boolean not null default true,    -- inventory flag (quick toggle)
+  availability   jsonb not null default '{}',      -- optional day/time windows {days:[1..7], from:"11:00", to:"14:00"}
+  sort           integer not null default 0,
+  search_tsv     tsvector generated always as (
+                   to_tsvector('simple', unaccent(coalesce(name,'') || ' ' || coalesce(description,'')))
+                 ) stored
+  -- +audit, +deleted_at
+);
+create index products_biz_cat_idx on public.products (business_id, category_id, sort)
+  where deleted_at is null;
+create index products_tsv_idx on public.products using gin (search_tsv);
+create index products_name_trgm on public.products using gin (name gin_trgm_ops); -- receipt line-item matching (36)
+
+-- ============================================================ product_variants
+-- e.g. sizes: Small/Medium/Large. Price is absolute, not delta (simpler math, fewer bugs).
+create table public.product_variants (
+  id           uuid primary key default uuid_generate_v7(),
+  business_id  uuid not null references public.businesses(id) on delete cascade,  -- denormalized (12)
+  product_id   uuid not null references public.products(id) on delete cascade,
+  name         text not null check (char_length(name) between 1 and 60),
+  price_centavos integer not null check (price_centavos >= 0),
+  is_available boolean not null default true,
+  sort         integer not null default 0,
+  unique (product_id, name)
+  -- +audit, +deleted_at
+);
+create index product_variants_product_idx on public.product_variants (product_id);
+
+-- ============================================================ product_addons
+-- e.g. pearls +15, extra shot +25. Price is a delta.
+create table public.product_addons (
+  id           uuid primary key default uuid_generate_v7(),
+  business_id  uuid not null references public.businesses(id) on delete cascade,
+  product_id   uuid not null references public.products(id) on delete cascade,
+  name         text not null check (char_length(name) between 1 and 60),
+  price_delta_centavos integer not null default 0 check (price_delta_centavos >= 0),
+  is_available boolean not null default true,
+  sort         integer not null default 0,
+  unique (product_id, name)
+  -- +audit, +deleted_at
+);
+create index product_addons_product_idx on public.product_addons (product_id);
+```
+
+## Design notes
+
+- **Menus are catalogs, not orders.** There is no cart/order model in v1.0 — the catalog exists for the consumer business page, the menu QR, receipt line-item matching (`36`), and RAG grounding (`38`). When ordering arrives `[SCALE]`, orders reference `products`/`product_variants` — additive.
+- **Variant pricing is absolute** (`price_centavos`), add-ons are deltas — matches how SME menus are actually priced and keeps the display price = `variant.price + Σ addons`.
+- **Availability windows** live as JSONB (validated by Zod schema `availabilityWindows`) rather than a table: they are display/AI-answer hints, not booking constraints. If they ever drive money (happy-hour pricing `[SCALE]`), they graduate to a table.
+- **`sold_out` vs `is_available`:** `status='sold_out'` is a merchandising state (shows greyed-out); `is_available=false` hides instantly (staff quick toggle). Both exist because SMEs use them differently.
+- **Images** carry no separate table: max 6 per product (Zod-enforced), pre-sized variants generated by the image-processing queue on upload (`39`).
+- **RAG dependency:** any write to `products`, `product_variants`, `product_addons`, `menu_categories` emits `catalog.updated` → embeddings refresh job for that business (`38-ai-rag-platform.md`). This is wired in the catalog service, not triggers, so it's visible in application code.
