@@ -227,4 +227,23 @@ describe("SignupPage submit", () => {
 
     expect(await screen.findByText("Email address already in use")).toBeInTheDocument();
   });
+
+  it("shows neutral copy instead of the raw message when the email is already registered", async () => {
+    authMocks.signUp.mockResolvedValueOnce({
+      data: { user: null, session: null },
+      error: { message: "User already registered" },
+    });
+    render(<SignupPage />);
+    fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Jamie Cruz" } });
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: "jamie@shop.com" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "secret123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+
+    expect(
+      await screen.findByText(
+        "If that email is new to Giya, we just sent it a confirmation link. If you already have an account, sign in instead.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("User already registered")).not.toBeInTheDocument();
+  });
 });

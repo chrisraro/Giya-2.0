@@ -172,7 +172,15 @@ export default function SignupPage() {
     setSubmitting(false);
 
     if (error) {
-      setFormError(error.message);
+      // Supabase's raw message ("User already registered") confirms to an
+      // attacker that a given email has an account (an enumeration leak),
+      // so this one case gets a neutral, dual-purpose copy instead of the
+      // pass-through below.
+      setFormError(
+        /already registered/i.test(error.message)
+          ? "If that email is new to Giya, we just sent it a confirmation link. If you already have an account, sign in instead."
+          : error.message,
+      );
       return;
     }
 
