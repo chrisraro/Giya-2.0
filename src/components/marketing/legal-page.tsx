@@ -2,7 +2,7 @@ export function LegalPage({ title, children }: { title: string; children: React.
   return (
     <main className="mx-auto max-w-[70ch] px-4 py-16">
       <h1 className="text-display-s">{title}</h1>
-      <div className="mt-4 rounded-md3-md bg-tertiary-container/40 p-4">
+      <div className="mt-4 rounded-md3-md bg-secondary-container p-4">
         <p className="text-body-m text-on-surface">
           <strong>Draft for review.</strong> This document has not yet been reviewed by counsel. Effective date: to be set at launch.
         </p>
