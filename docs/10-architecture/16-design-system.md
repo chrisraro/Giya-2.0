@@ -66,7 +66,7 @@ New components follow MD3 anatomy, live in `src/components/ui`, and are added to
 
 ## Adaptive rules
 
-Window size classes: compact < 600px, medium 600-840px, expanded > 840px. Every screen spec declares behavior per class. Ergonomics: 48px targets with 8px gaps; primary actions in thumb zone on compact; destructive never adjacent to primary. PWA chrome: safe-area insets, `theme-color` = surface per scheme (see `src/app/manifest.ts`), maskable icons.
+Window size classes: compact < 600px, medium 600-840px, expanded > 840px. Every screen spec declares behavior per class. Ergonomics: 48px targets with 8px gaps; primary actions in thumb zone on compact; destructive never adjacent to primary. PWA chrome: safe-area insets, `theme-color` = surface per scheme (see `src/app/layout.tsx` viewport + `src/app/manifest.ts`), maskable icons.
 
 ## Accessibility
 
