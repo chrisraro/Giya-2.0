@@ -13,6 +13,24 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  {
+    files: ["src/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "Literal[value=/#[0-9a-fA-F]{3,8}\\b/]",
+          message:
+            "Raw hex colors are banned in src/. Use MD3 tokens (docs/10-architecture/16-design-system.md).",
+        },
+        {
+          selector: "TemplateElement[value.raw=/#[0-9a-fA-F]{6}\\b/]",
+          message:
+            "Raw hex colors are banned in src/. Use MD3 tokens (docs/10-architecture/16-design-system.md).",
+        },
+      ],
+    },
+  },
 ]);
 
 export default eslintConfig;
