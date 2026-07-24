@@ -1,4 +1,4 @@
-needed-- ============================================================================
+-- ============================================================================
 -- 0002_identity.sql
 -- Identity domain: reference tables, profiles, consumers, platform_admins,
 -- businesses, staff, verification, documents, CRM rows, devices, consents.

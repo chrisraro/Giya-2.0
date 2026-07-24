@@ -9,9 +9,17 @@ supabase/
     0001_foundations.sql    extensions, private schema, UUIDv7, claim helpers
     0002_identity.sql       identity tables, RLS policies, ref-table seeds
     0003_auth_plumbing.sql  signup trigger, register_business RPC, JWT hook
+    0004_business_staff_self_select.sql   read own memberships without claims
+    0005_businesses_staff_table_select.sql  staff table-truth read (superseded)
+    0006_fix_businesses_staff_table_select.sql  scope-qualification fix of 0005
   tests/
     rls_identity_smoke.sql  pgTAP smoke suite (transaction-wrapped, rolls back)
 ```
+
+Live-ledger note: the hosted project's migration history also contains two
+pre-0001 cleanup entries (`drop_legacy_*`) that removed an unrelated app's
+tables before Giya's chain was applied. They are intentionally not in this
+directory; a fresh replay needs no cleanup.
 
 ## How migrations are applied
 
@@ -24,7 +32,7 @@ supabase/
   pending migrations on merge to `main`. File naming stays compatible: the CLI
   accepts the `NNNN_name.sql` prefix ordering used here.
 
-## Manual dashboard step: enable the token hook (required)
+## Manual dashboard step: enable the token hook (recommended fast path)
 
 Migration 0003 creates `private.custom_access_token_hook`, but Supabase only
 runs it after it is enabled in the dashboard:
@@ -35,9 +43,14 @@ runs it after it is enabled in the dashboard:
    **`private.custom_access_token_hook`**.
 4. Click **Enable**.
 
-Until this is done, JWTs are issued without the `biz` / `is_platform_admin`
-claims and every staff/admin RLS policy evaluates to false (deny). Consumers
-(P2 self policies) are unaffected.
+Since 0004-0006, core reads no longer depend on the hook: users always read
+their own memberships (0004) and staff read their businesses through a table
+check (0006), and the portal layout enforces membership from the table, not
+claims. The hook remains the fast path and is still REQUIRED for the
+claims-only surfaces: `business_verifications` / `business_documents` staff
+reads, staff updates on `businesses` / `business_customers`, roster reads
+beyond your own row, and admin policies. Enable it before shipping those
+surfaces.
 
 After changing hook configuration, existing sessions keep their old claims
 until the next token refresh (up to 1 hour); sign out and back in to see new
@@ -81,6 +94,8 @@ simulate end users. Via MCP, the file body can be run with `execute_sql`
 
 - `private.jwt_biz_role()` keeps doc 12's table-lookup fallback for `biz_overflow` users (>20 memberships). Under RLS this recurses (policy -> helper -> same table) and Postgres aborts the query for those users. [SCALE]-only surface; fixing requires a security definer lookup variant and an ADR against the Locked doc 12. Do not ship overflow accounts before that ADR.
 - The custom access token hook runs as `supabase_auth_admin` with explicit grants/policies (current Supabase-documented pattern) instead of doc 12's literal `security definer` wording. Functionally equivalent; noted as doc drift.
+- Column-granularity gaps (follow-up migration owed before these columns become load-bearing): self-update policies do not column-restrict, so today a user could clear their own `is_suspended` / `scan_blocked_until` or write `lifetime_points_earned`; owner updates could touch `businesses.status` / `verified_at` / `plan`; `business_customers` staff updates can write balance columns (service-layer enforced for now); roster reads expose `invite_token` (must be column-restricted before the invites module ships).
+- Policy deviation vs doc 21 (record in doc 26 next docs pass): `business_verifications` / `business_documents` are staff READ-only with service-role writes (doc 21 said owner insert/read); tightened deliberately for TIN-adjacent data.
 
 ## Advisor acceptances (2026-07-25)
 
