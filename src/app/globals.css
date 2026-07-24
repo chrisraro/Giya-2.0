@@ -1,26 +1,89 @@
 @import "tailwindcss";
+@import "../styles/md3-tokens.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  /* MD3 color roles -> Tailwind color utilities */
+  --color-primary: var(--md-sys-color-primary);
+  --color-on-primary: var(--md-sys-color-on-primary);
+  --color-primary-container: var(--md-sys-color-primary-container);
+  --color-on-primary-container: var(--md-sys-color-on-primary-container);
+  --color-secondary: var(--md-sys-color-secondary);
+  --color-on-secondary: var(--md-sys-color-on-secondary);
+  --color-secondary-container: var(--md-sys-color-secondary-container);
+  --color-on-secondary-container: var(--md-sys-color-on-secondary-container);
+  --color-tertiary: var(--md-sys-color-tertiary);
+  --color-on-tertiary: var(--md-sys-color-on-tertiary);
+  --color-tertiary-container: var(--md-sys-color-tertiary-container);
+  --color-on-tertiary-container: var(--md-sys-color-on-tertiary-container);
+  --color-error: var(--md-sys-color-error);
+  --color-on-error: var(--md-sys-color-on-error);
+  --color-error-container: var(--md-sys-color-error-container);
+  --color-on-error-container: var(--md-sys-color-on-error-container);
+  --color-surface: var(--md-sys-color-surface);
+  --color-on-surface: var(--md-sys-color-on-surface);
+  --color-surface-variant: var(--md-sys-color-surface-variant);
+  --color-on-surface-variant: var(--md-sys-color-on-surface-variant);
+  --color-surface-dim: var(--md-sys-color-surface-dim);
+  --color-surface-bright: var(--md-sys-color-surface-bright);
+  --color-surface-container-lowest: var(--md-sys-color-surface-container-lowest);
+  --color-surface-container-low: var(--md-sys-color-surface-container-low);
+  --color-surface-container: var(--md-sys-color-surface-container);
+  --color-surface-container-high: var(--md-sys-color-surface-container-high);
+  --color-surface-container-highest: var(--md-sys-color-surface-container-highest);
+  --color-outline: var(--md-sys-color-outline);
+  --color-outline-variant: var(--md-sys-color-outline-variant);
+  --color-inverse-surface: var(--md-sys-color-inverse-surface);
+  --color-inverse-on-surface: var(--md-sys-color-inverse-on-surface);
+  --color-inverse-primary: var(--md-sys-color-inverse-primary);
+  --color-scrim: var(--md-sys-color-scrim);
+  --color-shadow: var(--md-sys-color-shadow);
+
+  /* Shape scale */
+  --radius-md3-xs: 4px;
+  --radius-md3-sm: 8px;
+  --radius-md3-md: 12px;
+  --radius-md3-lg: 16px;
+  --radius-md3-xl: 28px;
+
+  /* Motion */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.05, 0.7, 0.1, 1);
+
+  /* Fonts (variables provided by next/font in layout.tsx) */
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+/* MD3 type scale (Geist Sans) */
+@utility text-display-l { font-size: 3.5625rem; line-height: 4rem; letter-spacing: -0.015625rem; font-weight: 400; }
+@utility text-display-m { font-size: 2.8125rem; line-height: 3.25rem; font-weight: 400; }
+@utility text-display-s { font-size: 2.25rem; line-height: 2.75rem; font-weight: 400; }
+@utility text-headline-l { font-size: 2rem; line-height: 2.5rem; font-weight: 500; }
+@utility text-headline-m { font-size: 1.75rem; line-height: 2.25rem; font-weight: 500; }
+@utility text-headline-s { font-size: 1.5rem; line-height: 2rem; font-weight: 500; }
+@utility text-title-l { font-size: 1.375rem; line-height: 1.75rem; font-weight: 500; }
+@utility text-title-m { font-size: 1rem; line-height: 1.5rem; letter-spacing: 0.009375rem; font-weight: 600; }
+@utility text-title-s { font-size: 0.875rem; line-height: 1.25rem; letter-spacing: 0.00625rem; font-weight: 600; }
+@utility text-body-l { font-size: 1rem; line-height: 1.5rem; letter-spacing: 0.03125rem; font-weight: 400; }
+@utility text-body-m { font-size: 0.875rem; line-height: 1.25rem; letter-spacing: 0.015625rem; font-weight: 400; }
+@utility text-body-s { font-size: 0.75rem; line-height: 1rem; letter-spacing: 0.025rem; font-weight: 400; }
+@utility text-label-l { font-size: 0.875rem; line-height: 1.25rem; letter-spacing: 0.00625rem; font-weight: 500; }
+@utility text-label-m { font-size: 0.75rem; line-height: 1rem; letter-spacing: 0.03125rem; font-weight: 500; }
+@utility text-label-s { font-size: 0.6875rem; line-height: 1rem; letter-spacing: 0.03125rem; font-weight: 500; }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--md-sys-color-surface);
+  color: var(--md-sys-color-on-surface);
+  font-family: var(--font-sans);
+}
+
+/* Material Symbols base */
+.material-symbols-rounded {
+  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
+  user-select: none;
+}
+.material-symbols-rounded.is-filled {
+  font-variation-settings: "FILL" 1, "wght" 400, "GRAD" 0, "opsz" 24;
 }
