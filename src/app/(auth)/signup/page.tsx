@@ -5,14 +5,26 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AuthCard } from "@/components/auth/auth-card";
 import { SocialButtons } from "@/components/auth/social-buttons";
+import { CheckEmail } from "@/components/auth/check-email";
 import { PasswordField } from "@/components/auth/password-field";
 import { TextField } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { createClient } from "@/lib/supabase/client";
 
 const EMAIL_RE = /^\S+@\S+\.\S+$/;
 
 type Role = "consumer" | "business";
+type SocialProvider = "google" | "facebook";
+
+const PROVIDER_LABEL: Record<SocialProvider, string> = {
+  google: "Google",
+  facebook: "Facebook",
+};
+
+function destinationFor(role: Role): string {
+  return role === "consumer" ? "/onboarding" : "/business/onboarding";
+}
 
 const ROLES: { id: Role; icon: string; title: string; body: string }[] = [
   {
@@ -98,6 +110,10 @@ export default function SignupPage() {
   const [nameError, setNameError] = React.useState("");
   const [emailError, setEmailError] = React.useState("");
   const [passwordError, setPasswordError] = React.useState("");
+  const [formError, setFormError] = React.useState("");
+  const [socialError, setSocialError] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [confirmationEmail, setConfirmationEmail] = React.useState("");
   const roleCardRefs = React.useRef<Record<Role, HTMLDivElement | null>>({
     consumer: null,
     business: null,
@@ -111,7 +127,7 @@ export default function SignupPage() {
     roleCardRefs.current[next.id]?.focus();
   }
 
-  function handleSubmit(event: React.FormEvent) {
+  async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     let hasError = false;
 
@@ -141,13 +157,59 @@ export default function SignupPage() {
 
     if (hasError) return;
 
-    // TODO(auth): wire Supabase
-    router.push(role === "consumer" ? "/onboarding" : "/business/onboarding");
+    setFormError("");
+    setSubmitting(true);
+    const supabase = createClient();
+    const next = destinationFor(role);
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { full_name: name, intended_role: role },
+        emailRedirectTo: `${window.location.origin}/auth/callback?next=${next}`,
+      },
+    });
+    setSubmitting(false);
+
+    if (error) {
+      setFormError(error.message);
+      return;
+    }
+
+    if (data.user && !data.session) {
+      setConfirmationEmail(email);
+      return;
+    }
+
+    router.push(next);
   }
 
-  function handleSocialStub() {
-    // TODO(auth): wire Supabase
-    router.push(role === "consumer" ? "/onboarding" : "/business/onboarding");
+  async function handleResend() {
+    const supabase = createClient();
+    const { error } = await supabase.auth.resend({ type: "signup", email: confirmationEmail });
+    return { error: error ? error.message : null };
+  }
+
+  async function handleSocial(provider: SocialProvider) {
+    setSocialError("");
+    const supabase = createClient();
+    const next = destinationFor(role);
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider,
+      options: { redirectTo: `${window.location.origin}/auth/callback?next=${next}` },
+    });
+
+    if (error) {
+      setSocialError(`${PROVIDER_LABEL[provider]} sign-in is not configured yet.`);
+    }
+  }
+
+  if (confirmationEmail) {
+    return (
+      <div className="flex min-h-dvh items-center justify-center p-4">
+        <CheckEmail email={confirmationEmail} onResend={handleResend} />
+      </div>
+    );
   }
 
   return (
@@ -225,8 +287,13 @@ export default function SignupPage() {
           }}
           {...(passwordError ? { errorText: passwordError } : {})}
         />
-        <Button type="submit" variant="filled" size="touch" className="w-full">
-          Create account
+        {formError ? (
+          <p role="alert" className="text-body-s text-error">
+            {formError}
+          </p>
+        ) : null}
+        <Button type="submit" variant="filled" size="touch" className="w-full" disabled={submitting}>
+          {submitting ? "Creating account..." : "Create account"}
         </Button>
       </form>
       <div className="flex items-center gap-3 text-label-m text-on-surface-variant" aria-hidden>
@@ -234,7 +301,15 @@ export default function SignupPage() {
         or
         <span className="h-px flex-1 bg-outline-variant" />
       </div>
-      <SocialButtons onGoogle={handleSocialStub} onFacebook={handleSocialStub} />
+      <SocialButtons
+        onGoogle={() => handleSocial("google")}
+        onFacebook={() => handleSocial("facebook")}
+      />
+      {socialError ? (
+        <p role="alert" className="text-body-s text-error">
+          {socialError}
+        </p>
+      ) : null}
     </AuthCard>
   );
 }
