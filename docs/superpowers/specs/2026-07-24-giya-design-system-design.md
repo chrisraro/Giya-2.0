@@ -32,12 +32,14 @@ Warm and vibrant Filipino: friendly, energetic, community-feel. Consumer-app war
 
 Three seeds, each expanded through MD3 tonal-palette generation into the full role set (`primary`, `on-primary`, `primary-container`, `on-primary-container`, `surface-container-*`, `outline`, `inverse-*`, etc.) for light and dark schemes:
 
-| Role | Name | Seed (approx.) | Job |
+| Role | Name | Seed (definitive) | Job |
 |---|---|---|---|
 | Primary | Giya Coral | `#E8563F` | Main actions, FAB accents, active navigation, the mark |
 | Secondary | Deep Teal | `#00696D` | Trust counterweight; leads in business/admin portals |
 | Tertiary | Mango Gold | `#F2A93B` | Reward language ONLY: points, stars, stamps, celebrations |
 | Error | MD3 standard red | (MD3 default) | Errors; never re-themed by dynamic color |
+
+These seeds are the definitive build-script inputs. Changing a seed is a design-system change: it updates this table and `16-design-system.md` in the same PR that regenerates the tokens.
 
 Rules:
 - Neutrals derive from the coral-tinted MD3 neutral palette (warm surfaces). No pure `#000` / `#FFF`.
@@ -108,7 +110,7 @@ Every data view ships: skeleton loading matching final layout (no raw spinners o
   - **Scanner:** full-screen immersive surface: camera, scrim, corner-bracket guide, capture, crop, then optimistic pending state animating into the wallet. Completes in under 15 seconds of user effort (vision doc requirement).
   - **Redemption QR:** full-brightness, high-contrast surface; the 5-minute token TTL is visualized as an MD3 progress ring.
 - **Theming behavior:** light and dark ship day one, both generated from the same seeds; follows `prefers-color-scheme` with an in-app override.
-- **Accessibility:** WCAG AA contrast minimum everywhere; AA+ target on money/points figures; all expressive animation collapses to instant state changes under `prefers-reduced-motion`.
+- **Accessibility:** WCAG AA contrast (4.5:1 body, 3:1 large text/UI) minimum everywhere; AAA (7:1) target on money and points figures; all expressive animation collapses to instant state changes under `prefers-reduced-motion`.
 
 ## 6. Deliverables & Governance
 
