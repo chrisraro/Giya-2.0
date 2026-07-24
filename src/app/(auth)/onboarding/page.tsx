@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 import { Stepper } from "@/components/auth/stepper";
 import { OptInSwitch } from "@/components/auth/opt-in-switch";
 import { Chip } from "@/components/ui/chip";
@@ -292,11 +292,16 @@ export default function OnboardingPage() {
     cityRefs.current[next]?.focus();
   }
 
-  const variants = {
-    enter: (dir: 1 | -1) => (reduce ? {} : { x: dir > 0 ? 24 : -24, opacity: 0 }),
-    center: { x: 0, opacity: 1 },
-    exit: (dir: 1 | -1) => (reduce ? {} : { x: dir > 0 ? -24 : 24, opacity: 0 }),
-  };
+  // Entrance-only animation: exit animations under AnimatePresence mode="wait"
+  // deadlocked in production (old step never unmounted, next step never
+  // mounted), so each step slides in on mount and the old one unmounts
+  // instantly. Reduced motion collapses to no movement.
+  const stepMotion = reduce
+    ? { initial: false as const }
+    : {
+        initial: { x: direction > 0 ? 24 : -24, opacity: 0 },
+        animate: { x: 0, opacity: 1 },
+      };
 
   return (
     <div className="flex w-full max-w-md flex-col gap-6">
@@ -312,14 +317,9 @@ export default function OnboardingPage() {
       </div>
 
       <div className="relative overflow-hidden">
-        <AnimatePresence mode="wait" custom={direction} initial={false}>
           <motion.div
             key={step}
-            custom={direction}
-            variants={variants}
-            initial="enter"
-            animate="center"
-            exit="exit"
+            {...stepMotion}
             transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 300, damping: 30 }}
             className="flex flex-col gap-6"
           >
@@ -342,7 +342,6 @@ export default function OnboardingPage() {
               <NotificationsStep checked={notifications} onChange={setNotifications} />
             )}
           </motion.div>
-        </AnimatePresence>
       </div>
 
       {error ? (
