@@ -96,3 +96,5 @@ Constraints beat application checks: enums as `check` constraints or PG enums, F
 - [ ] Docs updated (module doc + schema doc if touched)
 - [ ] Sentry shows no new error class in preview
 - [ ] Feature flag if risky (`25-schema-platform.md` flags)
+- [ ] Design tokens only (no raw color values); component follows `16-design-system.md`
+- [ ] Both themes (light/dark) checked on touched screens

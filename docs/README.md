@@ -28,6 +28,7 @@
 | [13-api-standards.md](10-architecture/13-api-standards.md) | Envelope, pagination, errors, idempotency, versioning |
 | [14-development-standards.md](10-architecture/14-development-standards.md) | Repo layout, feature-first architecture, coding/DB/commit standards |
 | [15-security.md](10-architecture/15-security.md) | Threat model, authn/authz, headers, rate limits, audit logging |
+| [16-design-system.md](10-architecture/16-design-system.md) | Brand, MD3 token system, component registry, surface profiles, adaptive rules |
 
 ### 20-data — The canonical schema
 | File | Contents |
