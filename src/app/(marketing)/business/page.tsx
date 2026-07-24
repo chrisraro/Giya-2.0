@@ -38,7 +38,7 @@ export default function BusinessPage() {
         </Reveal>
       </section>
 
-      <section className="bg-secondary-container py-20 text-on-secondary-container">
+      <section className="bg-secondary py-20 text-on-secondary">
         <div className="mx-auto max-w-6xl px-4">
           <Reveal><h2 className="text-headline-l">Everything a repeat-customer machine needs</h2></Reveal>
           <div className="mt-10 grid gap-x-10 gap-y-12 sm:grid-cols-2">

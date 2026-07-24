@@ -87,7 +87,7 @@ export default function LandingPage() {
       </section>
 
       {/* FOR BUSINESSES: teal band */}
-      <section className="bg-secondary-container py-20 text-on-secondary-container">
+      <section className="bg-secondary py-20 text-on-secondary">
         <div className="mx-auto grid max-w-6xl items-center gap-10 px-4 md:grid-cols-[1.2fr_0.8fr]">
           <Reveal>
             <div>
@@ -98,7 +98,7 @@ export default function LandingPage() {
             </div>
           </Reveal>
           <Reveal delay={0.1} className="md:justify-self-end">
-            <Link href="/business" className={buttonVariants({ variant: "filled", size: "touch" })}>For businesses</Link>
+            <Link href="/business" className={buttonVariants({ variant: "elevated", size: "touch" })}>For businesses</Link>
           </Reveal>
         </div>
       </section>
