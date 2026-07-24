@@ -51,6 +51,11 @@ $$;
 
 revoke execute on function private.handle_new_user() from public;
 
+-- The wiped legacy app left its own on_auth_user_created trigger on auth.users
+-- pointing at a dropped public.handle_new_user(); replace it with ours.
+drop trigger if exists on_auth_user_created on auth.users;
+drop function if exists public.handle_new_user();
+
 create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function private.handle_new_user();
