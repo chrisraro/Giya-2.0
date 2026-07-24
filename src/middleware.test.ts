@@ -15,6 +15,12 @@ beforeAll(async () => {
   ({ hasBusinessMembership, copySessionCookies } = await import("./middleware"));
 });
 
+// hasBusinessMembership is no longer used to gate /business/* portal
+// routes in middleware() itself (see src/middleware.ts comment above the
+// export); the portal layout does the authoritative business_staff check
+// server-side instead. There were no middleware-level membership-redirect
+// tests here to convert or remove; this file only ever unit tested the
+// helper below in isolation, which still applies unchanged.
 describe("hasBusinessMembership", () => {
   it("is true when biz is a non-empty map", () => {
     expect(hasBusinessMembership({ biz: { "biz-1": "owner" } })).toBe(true);

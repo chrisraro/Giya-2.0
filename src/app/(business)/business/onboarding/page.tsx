@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/brand/logo";
 import { cn } from "@/lib/utils";
 import { registerBusiness } from "@/features/identity/actions";
+import { createClient } from "@/lib/supabase/client";
 
 const STEP_LABELS = ["Basics", "Location & hours", "Verification"];
 
@@ -339,7 +340,7 @@ export default function BusinessOnboardingPage() {
   // TODO(api): wire hours + documents once the schema supports them
 
   const [error, setError] = React.useState<string | null>(null);
-  const [pending, setPending] = React.useState(false);
+  const [submitting, setSubmitting] = React.useState(false);
 
   function handleHourChange(key: keyof HoursState, value: string) {
     setHours((prev) => ({ ...prev, [key]: value }));
@@ -360,14 +361,24 @@ export default function BusinessOnboardingPage() {
   const isLastStep = step === STEP_LABELS.length - 1;
 
   async function finish() {
+    // Guards against the Finish button firing the RPC twice (verified
+    // live: a fast double click/tap can invoke this handler again before
+    // React commits the `disabled` attribute from the first call).
+    if (submitting) return;
     setError(null);
-    setPending(true);
+    setSubmitting(true);
     const result = await registerBusiness({ name, type: businessType, city, address });
-    setPending(false);
     if (!result.ok) {
+      setSubmitting(false);
       setError(result.message);
       return;
     }
+    // Refresh the session before navigating so the client picks up a fresh
+    // token once the custom access token hook is enabled and stamps `biz`
+    // claims for the business just registered; the token issued at
+    // sign-up/sign-in predates this business_staff row and won't carry it.
+    const supabase = createClient();
+    await supabase.auth.refreshSession();
     router.push("/business/dashboard");
   }
 
@@ -440,10 +451,10 @@ export default function BusinessOnboardingPage() {
             variant={isLastStep ? "filled" : "tonal"}
             size="touch"
             className="flex-1"
-            disabled={!canContinue || pending}
+            disabled={!canContinue || submitting}
             onClick={goNext}
           >
-            {isLastStep ? (pending ? "Registering..." : "Go to dashboard") : "Continue"}
+            {isLastStep ? (submitting ? "Setting up..." : "Go to dashboard") : "Continue"}
           </Button>
         </div>
       </div>

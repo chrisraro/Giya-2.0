@@ -228,6 +228,9 @@ export default function OnboardingPage() {
   const canContinue = step !== 1 || city !== null;
 
   async function finish() {
+    // Guards against Finish/Skip firing the completion RPC twice (same
+    // fast double click/tap race as the business registration flow).
+    if (pending) return;
     setPending(true);
     const result = await completeConsumerOnboarding({ cityName: city, pushEnabled: notifications });
     setPending(false);
@@ -256,6 +259,10 @@ export default function OnboardingPage() {
   }
 
   async function handleSkip() {
+    // Same double-submit guard as finish(): idempotent-ish either way, but
+    // this keeps behavior consistent and rate-safe.
+    if (pending) return;
+    setPending(true);
     if (city !== null) {
       const result = await completeConsumerOnboarding({
         cityName: city,
@@ -266,6 +273,7 @@ export default function OnboardingPage() {
         setError(result.message);
       }
     }
+    setPending(false);
     router.push("/home");
   }
 
@@ -310,7 +318,8 @@ export default function OnboardingPage() {
         <button
           type="button"
           onClick={handleSkip}
-          className="flex h-12 shrink-0 items-center rounded-md3-sm px-3 text-label-l text-on-surface-variant outline-none transition-colors duration-200 ease-standard hover:text-on-surface focus-visible:ring-2 focus-visible:ring-primary"
+          disabled={pending}
+          className="flex h-12 shrink-0 items-center rounded-md3-sm px-3 text-label-l text-on-surface-variant outline-none transition-colors duration-200 ease-standard hover:text-on-surface focus-visible:ring-2 focus-visible:ring-primary disabled:pointer-events-none disabled:opacity-40"
         >
           Skip for now
         </button>

@@ -10,6 +10,7 @@ import { TextField } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
 import { getSafeRedirect } from "@/lib/auth/safe-redirect";
+import { toErrorMessage } from "@/lib/auth/error-message";
 
 const EMAIL_RE = /^\S+@\S+\.\S+$/;
 
@@ -66,10 +67,13 @@ function LoginPageInner() {
     setSubmitting(false);
 
     if (error) {
+      // Live E2E showed a non-Error rejection rendering as "{}"; route
+      // through toErrorMessage so this always ends up a real string.
+      const message = toErrorMessage(error);
       setFormError(
-        error.message.toLowerCase().includes("invalid login credentials")
+        message.toLowerCase().includes("invalid login credentials")
           ? "Email or password is incorrect."
-          : error.message,
+          : message,
       );
       return;
     }

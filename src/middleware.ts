@@ -2,6 +2,14 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { updateSession, type BizClaims } from "@/lib/supabase/middleware";
 
+// Fast-path helper only, NOT wired into portal enforcement below anymore.
+// Doc 12: claims are hints, tables are truth. A just-registered owner's JWT
+// lacks the biz claim (the token hook stamps it at issuance, but may not
+// even be enabled), so gating on claims here bounce-loops real owners back
+// to onboarding. The authoritative check now lives in the portal layout,
+// which queries business_staff directly. This is kept exported (and unit
+// tested) as a candidate for a future cheap client-side hint or
+// cache-warming shortcut once the hook is reliably enabled.
 export function hasBusinessMembership(claims: BizClaims): boolean {
   const biz = claims.biz;
   const hasBiz = !!biz && typeof biz === "object" && Object.keys(biz).length > 0;
@@ -32,15 +40,18 @@ function isBusinessOnboardingRoute(pathname: string): boolean {
 }
 
 export async function middleware(request: NextRequest) {
-  const { response, user, claims } = await updateSession(request);
+  const { response, user } = await updateSession(request);
   const { pathname } = request.nextUrl;
 
   const onOnboardingRoute = isOnboardingRoute(pathname) || isBusinessOnboardingRoute(pathname);
 
-  // Business portal routes require both a user and membership claims.
-  // The exact marketing page `/business` and `/business/onboarding` are
-  // excluded here so they can be handled by the onboarding rule above (or,
-  // for `/business` itself, stay fully public).
+  // Business portal routes require only a session here. The exact
+  // marketing page `/business` and `/business/onboarding` are excluded so
+  // they can be handled by the onboarding rule above (or, for `/business`
+  // itself, stay fully public). Membership enforcement (does this user
+  // actually belong to a business?) is NOT done here anymore; it happens
+  // server-side in the portal layout via a business_staff table query,
+  // since claims are hints and tables are truth (doc 12).
   const isBusinessPortalRoute =
     pathname.startsWith("/business/") && !isBusinessOnboardingRoute(pathname);
 
@@ -48,13 +59,6 @@ export async function middleware(request: NextRequest) {
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("next", pathname);
     return copySessionCookies(response, NextResponse.redirect(loginUrl));
-  }
-
-  if (isBusinessPortalRoute && user && !hasBusinessMembership(claims)) {
-    return copySessionCookies(
-      response,
-      NextResponse.redirect(new URL("/business/onboarding", request.url)),
-    );
   }
 
   return response;

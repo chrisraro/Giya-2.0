@@ -11,6 +11,7 @@ import { TextField } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
+import { toErrorMessage } from "@/lib/auth/error-message";
 
 const EMAIL_RE = /^\S+@\S+\.\S+$/;
 
@@ -172,14 +173,17 @@ export default function SignupPage() {
     setSubmitting(false);
 
     if (error) {
+      // Live E2E showed a non-Error rejection rendering as "{}"; route
+      // through toErrorMessage so this always ends up a real string.
+      const message = toErrorMessage(error);
       // Supabase's raw message ("User already registered") confirms to an
       // attacker that a given email has an account (an enumeration leak),
       // so this one case gets a neutral, dual-purpose copy instead of the
       // pass-through below.
       setFormError(
-        /already registered/i.test(error.message)
+        /already registered/i.test(message)
           ? "If that email is new to Giya, we just sent it a confirmation link. If you already have an account, sign in instead."
-          : error.message,
+          : message,
       );
       return;
     }
@@ -195,7 +199,7 @@ export default function SignupPage() {
   async function handleResend() {
     const supabase = createClient();
     const { error } = await supabase.auth.resend({ type: "signup", email: confirmationEmail });
-    return { error: error ? error.message : null };
+    return { error: error ? toErrorMessage(error) : null };
   }
 
   async function handleSocial(provider: SocialProvider) {
