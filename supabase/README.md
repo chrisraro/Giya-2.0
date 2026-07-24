@@ -76,3 +76,8 @@ simulate end users. Via MCP, the file body can be run with `execute_sql`
 - Policies cite their pattern (P1-P4 per `docs/10-architecture/12-multi-tenancy-rls.md`).
 - Deviations from the schema docs are marked with `-- amendment:` comments.
 - Seeds are idempotent (`on conflict do nothing`) keyed on stable natural keys.
+
+## Known limitations (tracked)
+
+- `private.jwt_biz_role()` keeps doc 12's table-lookup fallback for `biz_overflow` users (>20 memberships). Under RLS this recurses (policy -> helper -> same table) and Postgres aborts the query for those users. [SCALE]-only surface; fixing requires a security definer lookup variant and an ADR against the Locked doc 12. Do not ship overflow accounts before that ADR.
+- The custom access token hook runs as `supabase_auth_admin` with explicit grants/policies (current Supabase-documented pattern) instead of doc 12's literal `security definer` wording. Functionally equivalent; noted as doc drift.

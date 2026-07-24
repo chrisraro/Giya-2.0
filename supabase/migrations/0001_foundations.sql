@@ -4,6 +4,12 @@
 -- Source docs: docs/20-data/20-data-model.md, docs/10-architecture/12-multi-tenancy-rls.md
 -- ============================================================================
 
+-- The claim helpers below reference public.business_staff, which is created in
+-- 0002. SQL function bodies are validated at CREATE when check_function_bodies
+-- is on, so disable validation for this migration; names resolve at first call,
+-- by which point 0002 has been applied.
+set check_function_bodies = off;
+
 -- ---------------------------------------------------------------- extensions
 -- Hosted Supabase installs extensions into the `extensions` schema.
 -- amendment: doc 20 names pg_uuidv7; the extension is not available on hosted
