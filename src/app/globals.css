@@ -76,7 +76,6 @@
 body {
   background: var(--md-sys-color-surface);
   color: var(--md-sys-color-on-surface);
-  font-family: var(--font-sans);
 }
 
 /* Material Symbols base */
