@@ -4,6 +4,7 @@ import { BarChart } from "@/components/business/bar-chart";
 import { VerificationBanner } from "@/components/business/verification-banner";
 import { EmptyState } from "@/components/consumer/empty-state";
 import { MOCK_KPIS, MOCK_WEEK_VISITS, MOCK_ACTIVITY } from "@/lib/mock/business"; // TODO(api): replace mock
+import { createClient } from "@/lib/supabase/server";
 
 const FULL_DAY_NAMES: Record<string, string> = {
   Mon: "Monday",
@@ -23,10 +24,45 @@ function busiestDayLabel(data: { day: string; value: number }[]) {
   return `Visits per day this week, highest ${fullName}`;
 }
 
-export default function BusinessDashboardPage() {
+// The banner needs the caller's business verification status, which only
+// the server client can read safely (RLS-scoped to the signed-in user).
+// This page is already a server component, so it fetches directly here
+// instead of threading the value through (portal)/layout.tsx: that layout
+// renders PortalShell, a client component, and `children` there is already
+// the resolved page element by the time the layout runs, so there is no
+// clean prop-injection point above this page for a single-route value.
+async function getBusinessStatus(): Promise<string | null> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return null;
+
+  const { data: membership } = await supabase
+    .from("business_staff")
+    .select("business_id")
+    .eq("user_id", user.id)
+    .eq("status", "active")
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (!membership) return null;
+
+  const { data: business } = await supabase
+    .from("businesses")
+    .select("status")
+    .eq("id", membership.business_id)
+    .maybeSingle();
+
+  return business?.status ?? null;
+}
+
+export default async function BusinessDashboardPage() {
+  const businessStatus = await getBusinessStatus();
+
   return (
     <div className="flex flex-col gap-6">
-      <VerificationBanner />
+      <VerificationBanner status={businessStatus} />
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         {MOCK_KPIS.map((kpi) => (

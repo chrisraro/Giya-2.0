@@ -10,6 +10,7 @@ import { TextField } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/brand/logo";
 import { cn } from "@/lib/utils";
+import { completeConsumerOnboarding } from "@/features/identity/actions";
 
 const STEP_COUNT = 4;
 
@@ -215,6 +216,8 @@ export default function OnboardingPage() {
   const [citySearch, setCitySearch] = React.useState("");
   const [interests, setInterests] = React.useState<Set<string>>(new Set());
   const [notifications, setNotifications] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [pending, setPending] = React.useState(false);
   const cityRefs = React.useRef<Record<string, HTMLDivElement | null>>({});
 
   const filteredCities = React.useMemo(
@@ -224,14 +227,23 @@ export default function OnboardingPage() {
 
   const canContinue = step !== 1 || city !== null;
 
-  function finish() {
-    // TODO(api): replace mock
+  async function finish() {
+    setPending(true);
+    const result = await completeConsumerOnboarding({ cityName: city, pushEnabled: notifications });
+    setPending(false);
+    if (!result.ok) {
+      // v0 tolerance: onboarding is non-blocking, so a save failure still
+      // navigates the user forward. The inline error only has this instant
+      // to be seen before the route change unmounts the page; a real toast
+      // system would let it persist across navigation.
+      setError(result.message);
+    }
     router.push("/home");
   }
 
   function goNext() {
     if (step === STEP_COUNT - 1) {
-      finish();
+      void finish();
       return;
     }
     setDirection(1);
@@ -243,7 +255,17 @@ export default function OnboardingPage() {
     setStep((s) => Math.max(0, s - 1));
   }
 
-  function handleSkip() {
+  async function handleSkip() {
+    if (city !== null) {
+      const result = await completeConsumerOnboarding({
+        cityName: city,
+        pushEnabled: notifications,
+      });
+      if (!result.ok) {
+        // Same v0 tolerance as finish(): non-blocking, still navigates.
+        setError(result.message);
+      }
+    }
     router.push("/home");
   }
 
@@ -323,6 +345,12 @@ export default function OnboardingPage() {
         </AnimatePresence>
       </div>
 
+      {error ? (
+        <p role="alert" className="text-body-s text-error">
+          {error}
+        </p>
+      ) : null}
+
       <div className="flex items-center gap-3">
         {step > 0 && (
           <Button type="button" variant="text" size="touch" onClick={goBack}>
@@ -334,7 +362,7 @@ export default function OnboardingPage() {
           variant="filled"
           size="touch"
           className="flex-1"
-          disabled={!canContinue}
+          disabled={!canContinue || pending}
           onClick={goNext}
         >
           {step === STEP_COUNT - 1 ? "Finish" : "Continue"}

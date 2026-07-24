@@ -3,15 +3,25 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
+const VISIBLE_STATUSES = new Set(["draft", "pending_verification"]);
+
 /**
- * Informational banner shown while a business's verification documents are
- * pending review. Dismiss is a client-only stub: it just hides the banner
- * for the current session, nothing is persisted.
- * TODO(api): replace mock (wire to real verification status + persist dismissal)
+ * Informational banner shown while a business's verification status is
+ * `draft` or `pending_verification`. `status` is fetched server-side (the
+ * dashboard page reads the caller's first active business_staff membership)
+ * and passed down as a prop. Dismiss is still a client-only stub: it just
+ * hides the banner for the current session.
+ * TODO(api): persist dismissal instead of resetting it on every reload
  */
-export function VerificationBanner({ className }: { className?: string }) {
+export function VerificationBanner({
+  status,
+  className,
+}: {
+  status: string | null;
+  className?: string;
+}) {
   const [dismissed, setDismissed] = React.useState(false);
-  if (dismissed) return null;
+  if (dismissed || !status || !VISIBLE_STATUSES.has(status)) return null;
 
   return (
     <div

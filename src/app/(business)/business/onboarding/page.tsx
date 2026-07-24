@@ -8,6 +8,7 @@ import { TextField } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/brand/logo";
 import { cn } from "@/lib/utils";
+import { registerBusiness } from "@/features/identity/actions";
 
 const STEP_LABELS = ["Basics", "Location & hours", "Verification"];
 
@@ -333,6 +334,13 @@ export default function BusinessOnboardingPage() {
   // Step 3: verification
   const [files, setFiles] = React.useState<File[]>([]);
 
+  // Hours and documents remain client-only for now; there is no server
+  // column for them yet.
+  // TODO(api): wire hours + documents once the schema supports them
+
+  const [error, setError] = React.useState<string | null>(null);
+  const [pending, setPending] = React.useState(false);
+
   function handleHourChange(key: keyof HoursState, value: string) {
     setHours((prev) => ({ ...prev, [key]: value }));
   }
@@ -351,10 +359,21 @@ export default function BusinessOnboardingPage() {
   const canContinue = step !== 0 || step1Complete;
   const isLastStep = step === STEP_LABELS.length - 1;
 
+  async function finish() {
+    setError(null);
+    setPending(true);
+    const result = await registerBusiness({ name, type: businessType, city, address });
+    setPending(false);
+    if (!result.ok) {
+      setError(result.message);
+      return;
+    }
+    router.push("/business/dashboard");
+  }
+
   function goNext() {
     if (isLastStep) {
-      // TODO(api): replace mock
-      router.push("/business/dashboard");
+      void finish();
       return;
     }
     setStep((s) => Math.min(STEP_LABELS.length - 1, s + 1));
@@ -404,6 +423,12 @@ export default function BusinessOnboardingPage() {
           />
         )}
 
+        {error ? (
+          <p role="alert" className="text-body-s text-error">
+            {error}
+          </p>
+        ) : null}
+
         <div className="flex items-center gap-3">
           {step > 0 && (
             <Button type="button" variant="text" size="touch" onClick={goBack}>
@@ -415,10 +440,10 @@ export default function BusinessOnboardingPage() {
             variant={isLastStep ? "filled" : "tonal"}
             size="touch"
             className="flex-1"
-            disabled={!canContinue}
+            disabled={!canContinue || pending}
             onClick={goNext}
           >
-            {isLastStep ? "Go to dashboard" : "Continue"}
+            {isLastStep ? (pending ? "Registering..." : "Go to dashboard") : "Continue"}
           </Button>
         </div>
       </div>
