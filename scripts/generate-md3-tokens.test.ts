@@ -7,7 +7,7 @@ const css = () => readFileSync(join(process.cwd(), "src/styles/md3-tokens.css"),
 describe("md3-tokens.css", () => {
   it("exists and defines light scheme on :root and dark on .dark", () => {
     const c = css();
-    expect(c).toContain(":root {");
+    expect(c).toContain(":root, .light {");
     expect(c).toContain(".dark {");
   });
 
@@ -33,7 +33,7 @@ describe("md3-tokens.css", () => {
 
   it("light primary is tone 40 of the coral seed palette", () => {
     // Deterministic: derived from seed #E8563F via HCT; assert format only + not the raw seed
-    const m = css().match(/:root {[^}]*--md-sys-color-primary:\s*(#[0-9a-f]{6})/is);
+    const m = css().match(/:root, \.light \{[^}]*--md-sys-color-primary:\s*(#[0-9a-f]{6})/is);
     expect(m).not.toBeNull();
     expect(m![1]).toMatch(/^#[0-9a-f]{6}$/i);
     expect(m![1].toLowerCase()).not.toBe("#e8563f"); // tonal mapping, not raw seed

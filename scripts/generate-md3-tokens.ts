@@ -65,7 +65,7 @@ const line = (role: string, palette: TonalPalette, tone: number) =>
   `  --md-sys-color-${role}: ${hexFromArgb(palette.tone(tone)).toLowerCase()};`;
 
 const css = `/* GENERATED FILE - do not edit. Run \`npm run gen:tokens\`. Seeds: coral ${SEEDS.primary}, teal ${SEEDS.secondary}, mango ${SEEDS.tertiary}. */
-:root {
+:root, .light {
 ${ROWS.map(([r, pal, l]) => line(r, pal, l)).join("\n")}
 }
 

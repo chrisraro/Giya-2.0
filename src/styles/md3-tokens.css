@@ -1,5 +1,5 @@
 /* GENERATED FILE - do not edit. Run `npm run gen:tokens`. Seeds: coral #E8563F, teal #00696D, mango #F2A93B. */
-:root {
+:root, .light {
   --md-sys-color-primary: #b02e1c;
   --md-sys-color-on-primary: #ffffff;
   --md-sys-color-primary-container: #ffdad4;
