@@ -12,7 +12,7 @@ const buttonVariants = cva(
     "disabled:pointer-events-none disabled:opacity-40",
     "active:scale-[0.98]",
     "after:absolute after:inset-0 after:rounded-full after:bg-current after:opacity-0 after:transition-opacity",
-    "hover:after:opacity-[0.08] active:after:opacity-[0.10]",
+    "hover:after:opacity-[0.08] focus-visible:after:opacity-[0.10] active:after:opacity-[0.10]",
   ],
   {
     variants: {

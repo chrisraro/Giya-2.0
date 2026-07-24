@@ -11,6 +11,7 @@ Material Design 3 is the design language. Implementation is Tailwind CSS v4 toke
 
 - **Logo:** compass-G monogram ("giya" = guide); counter forms a NE compass needle. Four sanctioned lockups: full, mark-only, wordmark-only, circular stamp. Assets: `public/brand/`; in-app rendering via `<Logo />` (`src/components/brand/logo.tsx`), always `currentColor`.
 - **Tagline:** "Every receipt counts."
+- **Brand board:** presentation board (Canva) + candidate links and touch-up notes in `docs/brand/brand-board-notes.md`.
 - **Voice:** warm, plain-language, EN/Filipino friendly. No jargon in consumer copy.
 
 ## Color

@@ -1,13 +1,5 @@
 import type { MetadataRoute } from "next";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
-function tokenHex(name: string): string {
-  const css = readFileSync(join(process.cwd(), "src/styles/md3-tokens.css"), "utf8");
-  const m = css.match(new RegExp(`:root {[^}]*--md-sys-color-${name}:\\s*(#[0-9a-f]{6})`, "is"));
-  if (!m?.[1]) throw new Error(`token ${name} missing`);
-  return m[1];
-}
+import { tokenHex } from "@/lib/md3-token-hex";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {

@@ -12,7 +12,8 @@ const DESTINATIONS = [
 ] as const;
 
 function NavItem({ href, label, icon }: (typeof DESTINATIONS)[number]) {
-  const active = usePathname().startsWith(href);
+  const pathname = usePathname();
+  const active = pathname === href || pathname.startsWith(`${href}/`);
   return (
     <Link
       href={href}
