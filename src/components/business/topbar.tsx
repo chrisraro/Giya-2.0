@@ -27,6 +27,7 @@ export function Topbar({ title, onMenuClick, menuButtonRef }: TopbarProps) {
       <h1 className="min-w-0 flex-1 truncate text-title-l text-on-surface">{title}</h1>
       <ThemeToggle />
       <span
+        role="img"
         aria-label="Ramon Dela Cruz"
         className="flex size-9 shrink-0 items-center justify-center rounded-full bg-secondary-container text-label-m text-on-secondary-container"
       >

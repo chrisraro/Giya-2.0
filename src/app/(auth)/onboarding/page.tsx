@@ -283,7 +283,7 @@ export default function OnboardingPage() {
         <button
           type="button"
           onClick={handleSkip}
-          className="shrink-0 rounded-md3-sm px-1 text-label-l text-on-surface-variant outline-none transition-colors duration-200 ease-standard hover:text-on-surface focus-visible:ring-2 focus-visible:ring-primary"
+          className="flex h-12 shrink-0 items-center rounded-md3-sm px-3 text-label-l text-on-surface-variant outline-none transition-colors duration-200 ease-standard hover:text-on-surface focus-visible:ring-2 focus-visible:ring-primary"
         >
           Skip for now
         </button>

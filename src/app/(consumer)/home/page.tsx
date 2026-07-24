@@ -4,14 +4,17 @@ import { LoyaltyStrip } from "@/components/consumer/loyalty-strip";
 import { BusinessCard } from "@/components/consumer/business-card";
 import { MOCK_USER, MOCK_BALANCES, MOCK_BUSINESSES } from "@/lib/mock/consumer"; // TODO(api): replace mock
 
-const TODAY_CAPTION = new Intl.DateTimeFormat("en-PH", {
-  weekday: "long",
-  month: "long",
-  day: "numeric",
-}).format(new Date());
+// Rendered per-request so the greeting date is always current (Manila time).
+export const dynamic = "force-dynamic";
 
 export default function HomePage() {
   // TODO(api): replace mock: fetch signed-in user, balances, and nearby businesses
+  const todayCaption = new Intl.DateTimeFormat("en-PH", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    timeZone: "Asia/Manila",
+  }).format(new Date());
   const totalPoints = MOCK_BALANCES.reduce((sum, balance) => sum + balance.points, 0);
 
   return (
@@ -21,7 +24,7 @@ export default function HomePage() {
           <p className="text-headline-s text-on-surface">
             Magandang umaga, {MOCK_USER.firstName}
           </p>
-          <p className="mt-0.5 text-body-s text-on-surface-variant">{TODAY_CAPTION}</p>
+          <p className="mt-0.5 text-body-s text-on-surface-variant">{todayCaption}</p>
         </div>
         <Logo variant="mark" className="text-primary" />
       </header>
