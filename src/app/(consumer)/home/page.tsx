@@ -11,7 +11,7 @@ const TODAY_CAPTION = new Intl.DateTimeFormat("en-PH", {
 }).format(new Date());
 
 export default function HomePage() {
-  // TODO(api): replace mock — fetch signed-in user, balances, and nearby businesses
+  // TODO(api): replace mock: fetch signed-in user, balances, and nearby businesses
   const totalPoints = MOCK_BALANCES.reduce((sum, balance) => sum + balance.points, 0);
 
   return (

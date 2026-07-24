@@ -5,7 +5,7 @@ import type { MockBalance } from "@/lib/mock/consumer";
 
 /**
  * Horizontal scroll-snap row of per-business stamp progress cards.
- * Mango (tertiary) is reserved for the stamp row — it's the reward figure here.
+ * Mango (tertiary) is reserved for the stamp row: it's the reward figure here.
  */
 export function LoyaltyStrip({ balances }: { balances: MockBalance[] }) {
   return (

@@ -5,7 +5,7 @@ import { EmptyState } from "@/components/consumer/empty-state";
 import { MOCK_REWARDS } from "@/lib/mock/consumer"; // TODO(api): replace mock
 
 export default function RewardsPage() {
-  // TODO(api): replace mock — fetch available and claimed rewards from the API
+  // TODO(api): replace mock: fetch available and claimed rewards from the API
   const available = MOCK_REWARDS.filter((reward) => reward.status === "available");
   const claimed = MOCK_REWARDS.filter((reward) => reward.status === "claimed");
 

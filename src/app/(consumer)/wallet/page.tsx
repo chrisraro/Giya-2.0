@@ -8,7 +8,7 @@ const TRANSACTION_ICON: Record<"earn" | "redeem", string> = {
 };
 
 export default function WalletPage() {
-  // TODO(api): replace mock — fetch balances and transaction history from the API
+  // TODO(api): replace mock: fetch balances and transaction history from the API
   return (
     <main className="mx-auto max-w-md px-4 pt-6 pb-8">
       <h1 className="text-headline-m text-on-surface">Wallet</h1>

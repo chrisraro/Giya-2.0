@@ -9,7 +9,7 @@ const SETTINGS_ROWS = [
 ] as const;
 
 export default function ProfilePage() {
-  // TODO(api): replace mock — fetch signed-in profile from the API
+  // TODO(api): replace mock: fetch signed-in profile from the API
   return (
     <main className="mx-auto max-w-md px-4 pt-6 pb-8">
       <h1 className="text-headline-m text-on-surface">Profile</h1>
