@@ -9,10 +9,9 @@ export interface OptInSwitchProps {
   label: string;
 }
 
-// Local switch: role="switch" with a 48px hit target (h-12 w-12) wrapping a
-// smaller visual track, so the touch target meets spec without an oversized
-// track. No Switch primitive exists yet in ui/; promote this if a second
-// consumer shows up.
+// Local switch: role="switch" with a 64x48px hit target fully containing the
+// 56x32px visual track, so every visible pixel is tappable. No Switch
+// primitive exists yet in ui/; promote this if a second consumer shows up.
 export function OptInSwitch({ id, checked, onChange, label }: OptInSwitchProps) {
   return (
     <button
@@ -23,7 +22,7 @@ export function OptInSwitch({ id, checked, onChange, label }: OptInSwitchProps) 
       aria-label={label}
       onClick={() => onChange(!checked)}
       className={cn(
-        "flex size-12 shrink-0 items-center justify-center rounded-full",
+        "flex h-12 w-16 shrink-0 items-center justify-center rounded-full",
         "outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface",
       )}
     >
