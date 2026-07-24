@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- G ring: open at the east, crossbar into center -->
+  <path d="M52.5 20.5A24 24 0 1 0 56 32v-1.5H38" stroke="currentColor" stroke-width="9" stroke-linecap="round"/>
+  <!-- Compass needle pointing north-east inside the counter -->
+  <path d="M45 15 L31.5 22.5 L28 34 L41.5 26.5 Z" fill="currentColor"/>
+</svg>

@@ -8,6 +8,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 export const metadata: Metadata = {
   title: "Giya",
   description: "Turn every receipt into rewards. Giya is the loyalty and rewards app for Philippine food and retail.",
+  icons: { icon: "/brand/icon.svg" },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
