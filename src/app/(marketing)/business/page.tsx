@@ -2,10 +2,14 @@ import type { Metadata } from "next";
 import { buttonVariants } from "@/components/ui/button";
 import { Reveal } from "@/components/marketing/reveal";
 
+const TITLE = "Giya for Businesses | Loyalty without the hardware";
+const DESCRIPTION =
+  "Campaigns, points, rewards, and customer intelligence from the receipts you already print. Join the Giya pilot for Philippine food and retail SMEs.";
+
 export const metadata: Metadata = {
-  title: "Giya for Businesses | Loyalty without the hardware",
-  description:
-    "Campaigns, points, rewards, and customer intelligence from the receipts you already print. Join the Giya pilot for Philippine food and retail SMEs.",
+  title: TITLE,
+  description: DESCRIPTION,
+  openGraph: { title: TITLE, description: DESCRIPTION, type: "website" },
 };
 
 const MAILTO = "mailto:teamocsph@gmail.com?subject=Giya%20pilot%20application";
@@ -19,7 +23,7 @@ const PROPS = [
 
 const PILOT_STEPS = [
   { title: "Apply", body: "Email us about your business. We onboard a small pilot cohort personally." },
-  { title: "Verify", body: "Submit your permit and business details in the portal. We verify within days." },
+  { title: "Verify", body: "Submit your permit and business details in the portal. We typically verify within days." },
   { title: "Launch", body: "Pick a template campaign and go live. Your customers start scanning the same week." },
 ] as const;
 
@@ -59,13 +63,13 @@ export default function BusinessPage() {
         <Reveal><h2 className="text-headline-l">How the pilot works</h2></Reveal>
         <ol className="mt-10 grid gap-8 md:grid-cols-3">
           {PILOT_STEPS.map((s, i) => (
-            <Reveal key={s.title} delay={i * 0.08}>
-              <li className="rounded-md3-xl border border-outline-variant p-6">
+            <li key={s.title} className="rounded-md3-xl border border-outline-variant p-6">
+              <Reveal delay={i * 0.08}>
                 <p className="font-mono text-label-l text-secondary">{String(i + 1).padStart(2, "0")}</p>
                 <h3 className="mt-2 text-title-l">{s.title}</h3>
                 <p className="mt-2 text-body-m text-on-surface-variant">{s.body}</p>
-              </li>
-            </Reveal>
+              </Reveal>
+            </li>
           ))}
         </ol>
         <Reveal delay={0.2}>

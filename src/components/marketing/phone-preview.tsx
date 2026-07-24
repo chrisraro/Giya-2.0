@@ -12,7 +12,7 @@ const NAV_ITEMS = [
 
 export function PhonePreview({ className }: { className?: string }) {
   return (
-    <div className={cn("relative mx-auto w-[290px] select-none rounded-[2.25rem] border-8 border-inverse-surface bg-surface shadow-xl", className)}>
+    <div aria-hidden className={cn("relative mx-auto w-[290px] select-none rounded-[2.25rem] border-8 border-inverse-surface bg-surface shadow-xl", className)}>
       <div className="space-y-4 px-4 pb-20 pt-8">
         <div className="flex items-center justify-between">
           <p className="text-title-m">Magandang umaga, Mia</p>

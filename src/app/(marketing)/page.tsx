@@ -5,10 +5,14 @@ import { Reveal } from "@/components/marketing/reveal";
 import { cn } from "@/lib/utils";
 import type { Metadata } from "next";
 
+const TITLE = "Giya | Turn every receipt into rewards";
+const DESCRIPTION =
+  "Scan the receipts you already get, earn points at your favorite Philippine food and retail spots, and redeem real rewards. Free for consumers.";
+
 export const metadata: Metadata = {
-  title: "Giya | Turn every receipt into rewards",
-  description:
-    "Scan the receipts you already get, earn points at your favorite Philippine food and retail spots, and redeem real rewards. Free for consumers.",
+  title: TITLE,
+  description: DESCRIPTION,
+  openGraph: { title: TITLE, description: DESCRIPTION, type: "website" },
 };
 
 const STEPS = [
@@ -45,15 +49,15 @@ export default function LandingPage() {
           <Reveal><h2 className="text-headline-l">How it works</h2></Reveal>
           <ol className="relative mt-10 max-w-2xl space-y-12 border-l-2 border-outline-variant pl-8 md:pl-10">
             {STEPS.map((s, i) => (
-              <Reveal key={s.title} delay={i * 0.08}>
-                <li className="relative">
-                  <span className="absolute -left-[55px] flex size-11 items-center justify-center rounded-full bg-primary text-on-primary md:-left-[63px]">
-                    <span aria-hidden className="material-symbols-rounded">{s.icon}</span>
-                  </span>
+              <li key={s.title} className="relative">
+                <span className="absolute -left-[55px] flex size-11 items-center justify-center rounded-full bg-primary text-on-primary md:-left-[63px]">
+                  <span aria-hidden className="material-symbols-rounded">{s.icon}</span>
+                </span>
+                <Reveal delay={i * 0.08}>
                   <h3 className="text-title-l">{s.title}</h3>
                   <p className="mt-2 max-w-md text-body-l text-on-surface-variant">{s.body}</p>
-                </li>
-              </Reveal>
+                </Reveal>
+              </li>
             ))}
           </ol>
         </div>

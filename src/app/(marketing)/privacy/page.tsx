@@ -1,9 +1,13 @@
 import type { Metadata } from "next";
 import { LegalPage, LegalSection } from "@/components/marketing/legal-page";
 
+const TITLE = "Privacy Policy | Giya";
+const DESCRIPTION = "How Giya collects, uses, and protects your personal data under the Philippine Data Privacy Act.";
+
 export const metadata: Metadata = {
-  title: "Privacy Policy | Giya",
-  description: "How Giya collects, uses, and protects your personal data under the Philippine Data Privacy Act.",
+  title: TITLE,
+  description: DESCRIPTION,
+  openGraph: { title: TITLE, description: DESCRIPTION, type: "website" },
 };
 
 export default function PrivacyPage() {
@@ -72,8 +76,8 @@ export default function PrivacyPage() {
         <p>
           We keep your personal data only for as long as your account is active, plus any additional period required
           by law, such as tax or accounting rules. We protect data with encryption both while it is being transmitted
-          and while it is stored. Sensitive identifiers, such as a business&apos;s tax identification number or government
-          issued IDs submitted for verification, are stored encrypted.
+          and while it is stored. Sensitive identifiers, such as a business&apos;s tax identification number or government-issued
+          IDs submitted for verification, are stored encrypted.
         </p>
       </LegalSection>
 

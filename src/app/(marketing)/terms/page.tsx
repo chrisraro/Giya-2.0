@@ -1,9 +1,13 @@
 import type { Metadata } from "next";
 import { LegalPage, LegalSection } from "@/components/marketing/legal-page";
 
+const TITLE = "Terms of Service | Giya";
+const DESCRIPTION = "The terms that govern your use of the Giya loyalty and rewards platform.";
+
 export const metadata: Metadata = {
-  title: "Terms of Service | Giya",
-  description: "The terms that govern your use of the Giya loyalty and rewards platform.",
+  title: TITLE,
+  description: DESCRIPTION,
+  openGraph: { title: TITLE, description: DESCRIPTION, type: "website" },
 };
 
 export default function TermsPage() {
@@ -40,7 +44,7 @@ export default function TermsPage() {
         <p>
           Points have no cash value. They cannot be transferred to another person or exchanged for cash, and they can
           only be redeemed for the rewards offered in the app. Points can expire according to the rules of each
-          loyalty program, which are shown in the app before you redeem them.
+          loyalty program, which are shown in the app for each program.
         </p>
       </LegalSection>
 
