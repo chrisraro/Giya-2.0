@@ -65,22 +65,58 @@ function NavList({
 /**
  * Business portal navigation. Desktop renders a fixed 240px left rail.
  * Mobile renders a slide-in drawer (controlled by `mobileOpen`, triggered
- * from the Topbar hamburger) with a scrim, Escape-to-close, and focus
- * returning to the trigger via `onMobileClose`.
+ * from the Topbar hamburger) with a scrim, Escape-to-close, a Tab focus trap
+ * scoped to the drawer, body scroll lock while open, and focus returning to
+ * the trigger via `onMobileClose`.
  */
 export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
   const pathname = usePathname();
   const reduce = useReducedMotion();
   const closeButtonRef = React.useRef<HTMLButtonElement>(null);
+  const panelRef = React.useRef<HTMLElement>(null);
 
+  // Escape closes the drawer; Tab/Shift+Tab is trapped among the drawer's
+  // own focusable elements so keyboard focus cannot escape into the page
+  // behind the scrim while the drawer is open.
   React.useEffect(() => {
     if (!mobileOpen) return;
+
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onMobileClose();
+      if (event.key === "Escape") {
+        onMobileClose();
+        return;
+      }
+      if (event.key !== "Tab" || !panelRef.current) return;
+
+      const focusables = panelRef.current.querySelectorAll<HTMLElement>(
+        "a[href], button:not([disabled])",
+      );
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (!first || !last) return;
+
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
+
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [mobileOpen, onMobileClose]);
+
+  // Lock body scroll while the drawer is open; restore whatever it was on close/unmount.
+  React.useEffect(() => {
+    if (!mobileOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [mobileOpen]);
 
   React.useEffect(() => {
     if (mobileOpen) closeButtonRef.current?.focus();
@@ -122,6 +158,7 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
             />
             <motion.nav
               key="sidebar-panel"
+              ref={panelRef}
               aria-label="Business"
               role="dialog"
               aria-modal="true"

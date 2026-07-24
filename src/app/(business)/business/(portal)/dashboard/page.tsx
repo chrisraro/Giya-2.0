@@ -3,13 +3,24 @@ import { KpiCard } from "@/components/business/kpi-card";
 import { BarChart } from "@/components/business/bar-chart";
 import { VerificationBanner } from "@/components/business/verification-banner";
 import { EmptyState } from "@/components/consumer/empty-state";
-import { MOCK_KPIS, MOCK_WEEK_VISITS, MOCK_ACTIVITY } from "@/lib/mock/business";
+import { MOCK_KPIS, MOCK_WEEK_VISITS, MOCK_ACTIVITY } from "@/lib/mock/business"; // TODO(api): replace mock
+
+const FULL_DAY_NAMES: Record<string, string> = {
+  Mon: "Monday",
+  Tue: "Tuesday",
+  Wed: "Wednesday",
+  Thu: "Thursday",
+  Fri: "Friday",
+  Sat: "Saturday",
+  Sun: "Sunday",
+};
 
 function busiestDayLabel(data: { day: string; value: number }[]) {
   const first = data[0];
   if (!first) return "Visits per day this week";
   const busiest = data.reduce((max, current) => (current.value > max.value ? current : max), first);
-  return `Visits per day this week, highest ${busiest.day}`;
+  const fullName = FULL_DAY_NAMES[busiest.day] ?? busiest.day;
+  return `Visits per day this week, highest ${fullName}`;
 }
 
 export default function BusinessDashboardPage() {
