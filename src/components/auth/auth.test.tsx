@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { SocialButtons } from "./social-buttons";
 import SignupPage from "@/app/(auth)/signup/page";
@@ -32,5 +32,37 @@ describe("SignupPage", () => {
     expect(radios).toHaveLength(2);
     expect(screen.getByText("Earn rewards")).toBeInTheDocument();
     expect(screen.getByText("Grow my business")).toBeInTheDocument();
+  });
+
+  it("moves selection to the other role on arrow key and focuses it", () => {
+    render(<SignupPage />);
+    const earnRewards = screen.getByText("Earn rewards").closest('[role="radio"]') as HTMLElement;
+    const growBusiness = screen.getByText("Grow my business").closest('[role="radio"]') as HTMLElement;
+
+    earnRewards.focus();
+    expect(earnRewards).toHaveFocus();
+
+    fireEvent.keyDown(earnRewards, { key: "ArrowRight" });
+
+    expect(growBusiness).toHaveAttribute("aria-checked", "true");
+    expect(earnRewards).toHaveAttribute("aria-checked", "false");
+    expect(growBusiness).toHaveFocus();
+  });
+});
+
+describe("LoginPage validation", () => {
+  it("shows an error on empty submit and clears the email error as the user retypes", () => {
+    render(<LoginPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts.length).toBeGreaterThan(0);
+    expect(screen.getByText("Email is required")).toBeInTheDocument();
+
+    const emailInput = screen.getByLabelText("Email");
+    fireEvent.change(emailInput, { target: { value: "a" } });
+
+    expect(screen.queryByText("Email is required")).not.toBeInTheDocument();
   });
 });

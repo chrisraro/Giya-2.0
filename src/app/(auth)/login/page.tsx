@@ -75,7 +75,10 @@ export default function LoginPage() {
           type="email"
           autoComplete="email"
           value={email}
-          onChange={(event) => setEmail(event.target.value)}
+          onChange={(event) => {
+            setEmail(event.target.value);
+            if (emailError) setEmailError("");
+          }}
           {...(emailError ? { errorText: emailError } : {})}
         />
         <div className="flex flex-col gap-2">
@@ -84,7 +87,10 @@ export default function LoginPage() {
             label="Password"
             autoComplete="current-password"
             value={password}
-            onChange={(event) => setPassword(event.target.value)}
+            onChange={(event) => {
+              setPassword(event.target.value);
+              if (passwordError) setPasswordError("");
+            }}
             {...(passwordError ? { errorText: passwordError } : {})}
           />
           <Link href="#" className="self-end text-label-l text-primary hover:underline">

@@ -33,21 +33,36 @@ function RoleCard({
   role,
   selected,
   onSelect,
+  onArrowKey,
+  cardRef,
 }: {
   role: (typeof ROLES)[number];
   selected: boolean;
   onSelect: () => void;
+  onArrowKey: () => void;
+  cardRef: (el: HTMLDivElement | null) => void;
 }) {
   return (
     <div
+      ref={cardRef}
       role="radio"
       aria-checked={selected}
-      tabIndex={0}
+      tabIndex={selected ? 0 : -1}
       onClick={onSelect}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           onSelect();
+          return;
+        }
+        if (
+          event.key === "ArrowLeft" ||
+          event.key === "ArrowRight" ||
+          event.key === "ArrowUp" ||
+          event.key === "ArrowDown"
+        ) {
+          event.preventDefault();
+          onArrowKey();
         }
       }}
       className={cn(
@@ -83,6 +98,18 @@ export default function SignupPage() {
   const [nameError, setNameError] = React.useState("");
   const [emailError, setEmailError] = React.useState("");
   const [passwordError, setPasswordError] = React.useState("");
+  const roleCardRefs = React.useRef<Record<Role, HTMLDivElement | null>>({
+    consumer: null,
+    business: null,
+  });
+
+  function handleRoleArrowKey() {
+    const currentIndex = ROLES.findIndex((r) => r.id === role);
+    const next = ROLES[(currentIndex + 1) % ROLES.length];
+    if (!next) return;
+    setRole(next.id);
+    roleCardRefs.current[next.id]?.focus();
+  }
 
   function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -151,7 +178,16 @@ export default function SignupPage() {
     >
       <div role="radiogroup" aria-label="I want to" className="flex gap-3">
         {ROLES.map((r) => (
-          <RoleCard key={r.id} role={r} selected={role === r.id} onSelect={() => setRole(r.id)} />
+          <RoleCard
+            key={r.id}
+            role={r}
+            selected={role === r.id}
+            onSelect={() => setRole(r.id)}
+            onArrowKey={handleRoleArrowKey}
+            cardRef={(el) => {
+              roleCardRefs.current[r.id] = el;
+            }}
+          />
         ))}
       </div>
       <form className="flex flex-col gap-4" onSubmit={handleSubmit} noValidate>
@@ -160,7 +196,10 @@ export default function SignupPage() {
           label="Full name"
           autoComplete="name"
           value={name}
-          onChange={(event) => setName(event.target.value)}
+          onChange={(event) => {
+            setName(event.target.value);
+            if (nameError) setNameError("");
+          }}
           {...(nameError ? { errorText: nameError } : {})}
         />
         <TextField
@@ -169,7 +208,10 @@ export default function SignupPage() {
           type="email"
           autoComplete="email"
           value={email}
-          onChange={(event) => setEmail(event.target.value)}
+          onChange={(event) => {
+            setEmail(event.target.value);
+            if (emailError) setEmailError("");
+          }}
           {...(emailError ? { errorText: emailError } : {})}
         />
         <PasswordField
@@ -177,7 +219,10 @@ export default function SignupPage() {
           label="Password"
           autoComplete="new-password"
           value={password}
-          onChange={(event) => setPassword(event.target.value)}
+          onChange={(event) => {
+            setPassword(event.target.value);
+            if (passwordError) setPasswordError("");
+          }}
           {...(passwordError ? { errorText: passwordError } : {})}
         />
         <Button type="submit" variant="filled" size="touch" className="w-full">
