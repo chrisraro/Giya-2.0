@@ -1,6 +1,12 @@
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/consumer/empty-state";
+import {
+  WalletReceiptActivity,
+  WALLET_RECEIPT_LIMIT,
+} from "@/features/receipts/components/wallet-receipt-activity";
+import { listMyReceipts } from "@/features/receipts/server/repo";
 import { getMyBalances, listMyLedger } from "@/features/rewards/server/repo";
+import { createClient } from "@/lib/supabase/server";
 import { cn } from "@/lib/utils";
 
 // RLS-scoped to the signed-in consumer; rendered per-request so a fresh
@@ -29,7 +35,24 @@ function formatTxnDate(iso: string): string {
 }
 
 export default async function WalletPage() {
-  const [balances, ledger] = await Promise.all([getMyBalances(), listMyLedger()]);
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  const [balances, ledger, receipts] = await Promise.all([
+    getMyBalances(),
+    listMyLedger(),
+    // Doc 36's wallet UX contract: the pending "Processing receipt" entry.
+    // Read from the database rather than mirrored from the submit response,
+    // because by the time POST /api/v1/receipts has answered 202 the row
+    // already exists at status='queued' and this page is force-dynamic. See
+    // the note at the top of WalletReceiptActivity for why that is the better
+    // source of truth than an optimistic local entry.
+    user
+      ? listMyReceipts({ userId: user.id, limit: WALLET_RECEIPT_LIMIT, cursor: null })
+      : Promise.resolve({ rows: [] }),
+  ]);
   // LedgerEntryDTO only carries businessId; balances (from every business
   // the caller has a business_customers row with) is the cheapest source
   // for the display name without a second per-row lookup.
@@ -68,6 +91,13 @@ export default async function WalletPage() {
           ))
         )}
       </section>
+
+      {user ? (
+        <WalletReceiptActivity
+          userId={user.id}
+          initialReceipts={receipts.rows.slice(0, WALLET_RECEIPT_LIMIT)}
+        />
+      ) : null}
 
       <section className="mt-8">
         <h2 className="text-title-m text-on-surface">Activity</h2>

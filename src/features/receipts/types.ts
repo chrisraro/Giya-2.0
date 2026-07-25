@@ -62,3 +62,75 @@ export type RouteOutcome =
   | { status: "approved" }
   | { status: "review" }
   | { status: "rejected"; reason: ReceiptRejectReason };
+
+// ---------------------------------------------------------------------------
+// Consumer read surfaces (status screen, history list, GET /me/receipts)
+// ---------------------------------------------------------------------------
+
+// Exactly the receipts.status check constraint (0017_receipts.sql), which is
+// doc 36's state machine: queued -> processing -> approved | review |
+// rejected, with review -> approved | rejected on a human decision.
+export type ReceiptStatus = "queued" | "processing" | "review" | "approved" | "rejected";
+
+/**
+ * One receipt as the consumer sees it.
+ *
+ * Every field here is derived from a column 0017 actually grants to
+ * `authenticated`. There is deliberately NO field for reject_note,
+ * parse_meta, match_confidence, parse_confidence, sha256 or image_hash: those
+ * columns are not readable by a client at all, and adding a field for one
+ * would be the first step toward a query that raises 42501 in production.
+ *
+ * `pointsAwarded` is null when no `earn` ledger row references this receipt
+ * yet. Null is NOT zero: "we have not awarded anything yet" and "this receipt
+ * earned nothing" are different sentences and the UI says different things.
+ */
+export interface ReceiptListItemDTO {
+  receiptId: string;
+  businessId: string | null;
+  businessName: string | null;
+  status: ReceiptStatus;
+  rejectReason: ReceiptRejectReason | null;
+  merchantName: string | null;
+  receiptNumber: string | null;
+  /** ISO-8601, the date printed on the receipt (not the submission time). */
+  receiptDate: string | null;
+  totalCentavos: number | null;
+  /** ISO-8601 submission time. The list's sort key. */
+  createdAt: string;
+  processedAt: string | null;
+  pointsAwarded: number | null;
+}
+
+/** A parsed line item. Analytics enrichment, never a gate on approval (doc 36 Stage 7). */
+export interface ReceiptLineItemDTO {
+  id: string;
+  rawText: string;
+  qty: number | null;
+  unitPriceCentavos: number | null;
+  lineTotalCentavos: number | null;
+  sort: number;
+}
+
+/** GET /api/v1/me/receipts/{id}: the list shape plus its line items. */
+export interface ReceiptDetailDTO extends ReceiptListItemDTO {
+  lineItems: ReceiptLineItemDTO[];
+}
+
+/**
+ * The shape a Supabase Realtime `postgres_changes` payload carries for a
+ * receipts row.
+ *
+ * Every field is optional because WALRUS strips columns the subscribing role
+ * cannot SELECT, and 0017's column grant means a consumer receives only the
+ * 13 granted ones. Consumers of this type must treat every field as
+ * possibly-absent rather than assuming the full row arrives.
+ */
+export interface ReceiptRealtimeRow {
+  id: string;
+  user_id: string;
+  status: string;
+  reject_reason: string | null;
+  business_id: string | null;
+  processed_at: string | null;
+}

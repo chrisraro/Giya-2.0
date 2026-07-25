@@ -185,8 +185,20 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0017_receipts.sql | 20260725111658 | 0017_receipts |
 | 0018_award_receipt_points.sql | 20260725114121 | 0018_award_receipt_points |
 | 0019_receipts_storage.sql | 20260725113309 | 0019_receipts_storage |
+| 0020_realtime_receipts.sql | 20260725123010 | realtime_receipts |
 
 Notes:
+- **0020's live ledger name is `realtime_receipts`, without the ordinal
+  prefix**, unlike every row above it. Recorded rather than corrected: the
+  ledger name is what `supabase migration list` matches on, so editing it after
+  the fact would make the CLI believe the migration had never been applied. The
+  file keeps the `0020_` prefix for authoring order.
+- **0020 makes `receipts` a Realtime table.** Before it, the `supabase_realtime`
+  publication contained only `reward_claims` (added by 0014), so
+  `postgres_changes` subscriptions on `receipts` subscribed cleanly and then
+  never fired. Both Realtime tables now carry `replica identity full`. WALRUS
+  applies 0017's column-level grant to the payload, so a consumer still receives
+  only the 13 granted columns of their own rows.
 - `0000a`/`0000b` are historical one-time cleanups of an unrelated app that
   already occupied this Supabase project. They are `if exists` no-ops on a
   fresh database.

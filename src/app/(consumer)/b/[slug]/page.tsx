@@ -1,7 +1,10 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { Badge } from "@/components/ui/badge";
+import { buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { getBusinessBySlug, getPublicMenu, getPublicRewards } from "@/features/businesses/server/public-repo";
 import { PublicMenu } from "@/features/menu/components/public-menu";
 import { formatHoursSummary } from "@/lib/hours";
@@ -49,7 +52,9 @@ export default async function PublicBusinessPage({
   const caption = [business.businessTypeName, business.cityName].filter(Boolean).join(" · ");
 
   return (
-    <main className="mx-auto max-w-md pb-8">
+    // Bottom padding clears the sticky Scan CTA below, which sits above the
+    // consumer shell's bottom nav.
+    <main className="mx-auto max-w-md pb-32">
       <div className="relative h-40 w-full overflow-hidden bg-surface-container sm:h-48">
         {business.coverUrl ? (
           // eslint-disable-next-line @next/next/no-img-element -- external merchant-hosted image, next/image domain allowlisting not set up for this slice
@@ -105,6 +110,27 @@ export default async function PublicBusinessPage({
 
       <div className="mt-6 px-4">
         <PublicMenu groups={menuGroups} />
+      </div>
+
+      {/* Doc 33's business-page Scan CTA. The business id travels in the link,
+          so doc 36 Stage 5 verifies a merchant the consumer already chose
+          instead of inferring one from OCR text. Primary, not tertiary: mango
+          is reserved for rewards language and the shell's Scan FAB. */}
+      <div className="fixed inset-x-0 bottom-24 z-30 px-4">
+        <div className="mx-auto max-w-md">
+          <Link
+            href={`/scan?business=${business.id}`}
+            className={cn(
+              buttonVariants({ variant: "filled", size: "touch" }),
+              "w-full shadow-lg",
+            )}
+          >
+            <span aria-hidden className="material-symbols-rounded">
+              document_scanner
+            </span>
+            Scan receipt
+          </Link>
+        </div>
       </div>
     </main>
   );
