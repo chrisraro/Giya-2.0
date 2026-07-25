@@ -1,0 +1,291 @@
+{
+  "text": "KAPE DIARIA\nNaga City Branch\nTIN 123-456-789-000\nOFFICIAL RECEIPT\nOR# 004512\n07/26/2026 14:32\n2 Kapeng Barako 90.00\n1 Pandesal Bilao 45.00\n1 Turon\n15.00\nVATABLE SALES\n133.93\nVAT (12%)\n16.07\nTOTAL\n150.00\nCASH\n200.00\nCHANGE\n50.00\nTHIS SERVES AS AN OFFICIAL RECEIPT\nSalamat po!",
+  "pages": [
+    {
+      "width": 460,
+      "height": 620,
+      "confidence": 0.98076,
+      "blocks": [
+        {
+          "blockType": "TEXT",
+          "confidence": 0.98816,
+          "paragraphs": [
+            {
+              "confidence": 0.98816,
+              "words": [
+                {"confidence":0.98487,"boundingBox":{"vertices":[{"x":22,"y":22},{"x":45,"y":22},{"x":45,"y":29},{"x":22,"y":29}]},"symbols":[{"text":"K"},{"text":"A"},{"text":"P"},{"text":"E","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.99036,"boundingBox":{"vertices":[{"x":47,"y":22},{"x":79,"y":22},{"x":79,"y":29},{"x":47,"y":29}]},"symbols":[{"text":"D"},{"text":"I"},{"text":"A"},{"text":"R"},{"text":"I"},{"text":"A","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.98882,
+          "paragraphs": [
+            {
+              "confidence": 0.98428,
+              "words": [
+                {"confidence":0.98133,"boundingBox":{"vertices":[{"x":22,"y":46},{"x":44,"y":46},{"x":44,"y":59},{"x":22,"y":59}]},"symbols":[{"text":"N"},{"text":"a"},{"text":"g"},{"text":"a","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.99128,"boundingBox":{"vertices":[{"x":46,"y":46},{"x":65,"y":46},{"x":65,"y":58},{"x":46,"y":58}]},"symbols":[{"text":"C"},{"text":"i"},{"text":"t"},{"text":"y","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.98157,"boundingBox":{"vertices":[{"x":67,"y":46},{"x":100,"y":46},{"x":100,"y":58},{"x":67,"y":58}]},"symbols":[{"text":"B"},{"text":"r"},{"text":"a"},{"text":"n"},{"text":"c"},{"text":"h","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            },
+            {
+              "confidence": 0.99235,
+              "words": [
+                {"confidence":0.98318,"boundingBox":{"vertices":[{"x":22,"y":66},{"x":38,"y":66},{"x":38,"y":74},{"x":22,"y":74}]},"symbols":[{"text":"T"},{"text":"I"},{"text":"N","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.99419,"boundingBox":{"vertices":[{"x":42,"y":66},{"x":121,"y":66},{"x":121,"y":74},{"x":42,"y":74}]},"symbols":[{"text":"1"},{"text":"2"},{"text":"3"},{"text":"-"},{"text":"4"},{"text":"5"},{"text":"6"},{"text":"-"},{"text":"7"},{"text":"8"},{"text":"9"},{"text":"-"},{"text":"0"},{"text":"0"},{"text":"0","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.99342,
+          "paragraphs": [
+            {
+              "confidence": 0.99342,
+              "words": [
+                {"confidence":0.99355,"boundingBox":{"vertices":[{"x":21,"y":98},{"x":66,"y":98},{"x":66,"y":106},{"x":21,"y":106}]},"symbols":[{"text":"O"},{"text":"F"},{"text":"F"},{"text":"I"},{"text":"C"},{"text":"I"},{"text":"A"},{"text":"L","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.99328,"boundingBox":{"vertices":[{"x":69,"y":98},{"x":109,"y":98},{"x":109,"y":106},{"x":69,"y":106}]},"symbols":[{"text":"R"},{"text":"E"},{"text":"C"},{"text":"E"},{"text":"I"},{"text":"P"},{"text":"T","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.9678,
+          "paragraphs": [
+            {
+              "confidence": 0.9678,
+              "words": [
+                {"confidence":0.93352,"boundingBox":{"vertices":[{"x":21,"y":118},{"x":34,"y":118},{"x":34,"y":126},{"x":21,"y":126}]},"symbols":[{"text":"O"},{"text":"R"}]},
+                {"confidence":0.9211,"boundingBox":{"vertices":[{"x":35,"y":118},{"x":40,"y":118},{"x":40,"y":126},{"x":35,"y":126}]},"symbols":[{"text":"#","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.98701,"boundingBox":{"vertices":[{"x":41,"y":118},{"x":77,"y":118},{"x":77,"y":126},{"x":41,"y":126}]},"symbols":[{"text":"0"},{"text":"0"},{"text":"4"},{"text":"5"},{"text":"1"},{"text":"2","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.97388,
+          "paragraphs": [
+            {
+              "confidence": 0.97388,
+              "words": [
+                {"confidence":0.97477,"boundingBox":{"vertices":[{"x":21,"y":136},{"x":75,"y":136},{"x":75,"y":144},{"x":21,"y":144}]},"symbols":[{"text":"0"},{"text":"7"},{"text":"/"},{"text":"2"},{"text":"6"},{"text":"/"},{"text":"2"},{"text":"0"},{"text":"2"},{"text":"6","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.97212,"boundingBox":{"vertices":[{"x":81,"y":136},{"x":106,"y":136},{"x":106,"y":144},{"x":81,"y":144}]},"symbols":[{"text":"1"},{"text":"4"},{"text":":"},{"text":"3"},{"text":"2","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.97888,
+          "paragraphs": [
+            {
+              "confidence": 0.97898,
+              "words": [
+                {"confidence":0.96698,"boundingBox":{"vertices":[{"x":21,"y":194},{"x":27,"y":194},{"x":27,"y":204},{"x":21,"y":204}]},"symbols":[{"text":"2","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.97731,"boundingBox":{"vertices":[{"x":31,"y":193},{"x":66,"y":192},{"x":66,"y":202},{"x":31,"y":203}]},"symbols":[{"text":"K"},{"text":"a"},{"text":"p"},{"text":"e"},{"text":"n"},{"text":"g","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.98747,"boundingBox":{"vertices":[{"x":69,"y":192},{"x":100,"y":191},{"x":100,"y":202},{"x":69,"y":203}]},"symbols":[{"text":"B"},{"text":"a"},{"text":"r"},{"text":"a"},{"text":"k"},{"text":"o","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.9732,"boundingBox":{"vertices":[{"x":116,"y":195},{"x":142,"y":195},{"x":142,"y":203},{"x":116,"y":203}]},"symbols":[{"text":"9"},{"text":"0"},{"text":"."},{"text":"0"},{"text":"0","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            },
+            {
+              "confidence": 0.97878,
+              "words": [
+                {"confidence":0.9778,"boundingBox":{"vertices":[{"x":22,"y":214},{"x":27,"y":214},{"x":27,"y":222},{"x":22,"y":222}]},"symbols":[{"text":"1","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.99186,"boundingBox":{"vertices":[{"x":32,"y":214},{"x":74,"y":214},{"x":74,"y":222},{"x":32,"y":222}]},"symbols":[{"text":"P"},{"text":"a"},{"text":"n"},{"text":"d"},{"text":"e"},{"text":"s"},{"text":"a"},{"text":"l","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.97936,"boundingBox":{"vertices":[{"x":76,"y":214},{"x":98,"y":214},{"x":98,"y":222},{"x":76,"y":222}]},"symbols":[{"text":"B"},{"text":"i"},{"text":"l"},{"text":"a"},{"text":"o","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.95748,"boundingBox":{"vertices":[{"x":112,"y":213},{"x":135,"y":213},{"x":135,"y":222},{"x":112,"y":222}]},"symbols":[{"text":"4"},{"text":"5"},{"text":"."},{"text":"0"},{"text":"0","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.98305,
+          "paragraphs": [
+            {
+              "confidence": 0.98305,
+              "words": [
+                {"confidence":0.96439,"boundingBox":{"vertices":[{"x":22,"y":234},{"x":26,"y":234},{"x":26,"y":242},{"x":22,"y":242}]},"symbols":[{"text":"1","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.98679,"boundingBox":{"vertices":[{"x":31,"y":234},{"x":59,"y":234},{"x":59,"y":242},{"x":31,"y":242}]},"symbols":[{"text":"T"},{"text":"u"},{"text":"r"},{"text":"o"},{"text":"n","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.96791,
+          "paragraphs": [
+            {
+              "confidence": 0.96791,
+              "words": [
+                {"confidence":0.96791,"boundingBox":{"vertices":[{"x":93,"y":234},{"x":118,"y":235},{"x":118,"y":243},{"x":93,"y":242}]},"symbols":[{"text":"1"},{"text":"5"},{"text":"."},{"text":"0"},{"text":"0","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.99256,
+          "paragraphs": [
+            {
+              "confidence": 0.99256,
+              "words": [
+                {"confidence":0.99079,"boundingBox":{"vertices":[{"x":21,"y":288},{"x":64,"y":288},{"x":64,"y":296},{"x":21,"y":296}]},"symbols":[{"text":"V"},{"text":"A"},{"text":"T"},{"text":"A"},{"text":"B"},{"text":"L"},{"text":"E","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.99504,"boundingBox":{"vertices":[{"x":66,"y":288},{"x":97,"y":288},{"x":97,"y":296},{"x":66,"y":296}]},"symbols":[{"text":"S"},{"text":"A"},{"text":"L"},{"text":"E"},{"text":"S","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.96615,
+          "paragraphs": [
+            {
+              "confidence": 0.96615,
+              "words": [
+                {"confidence":0.96615,"boundingBox":{"vertices":[{"x":116,"y":288},{"x":148,"y":288},{"x":148,"y":296},{"x":116,"y":296}]},"symbols":[{"text":"1"},{"text":"3"},{"text":"3"},{"text":"."},{"text":"9"},{"text":"3","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.96432,
+          "paragraphs": [
+            {
+              "confidence": 0.96432,
+              "words": [
+                {"confidence":0.97547,"boundingBox":{"vertices":[{"x":22,"y":308},{"x":39,"y":308},{"x":39,"y":316},{"x":22,"y":316}]},"symbols":[{"text":"V"},{"text":"A"},{"text":"T","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.97478,"boundingBox":{"vertices":[{"x":41,"y":308},{"x":45,"y":308},{"x":45,"y":316},{"x":41,"y":316}]},"symbols":[{"text":"("}]},
+                {"confidence":0.96033,"boundingBox":{"vertices":[{"x":45,"y":308},{"x":56,"y":308},{"x":56,"y":316},{"x":45,"y":316}]},"symbols":[{"text":"1"},{"text":"2"}]},
+                {"confidence":0.92671,"boundingBox":{"vertices":[{"x":56,"y":308},{"x":64,"y":308},{"x":64,"y":316},{"x":56,"y":316}]},"symbols":[{"text":"%"}]},
+                {"confidence":0.96599,"boundingBox":{"vertices":[{"x":63,"y":308},{"x":67,"y":308},{"x":67,"y":316},{"x":63,"y":316}]},"symbols":[{"text":")","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.97901,
+          "paragraphs": [
+            {
+              "confidence": 0.97901,
+              "words": [
+                {"confidence":0.97901,"boundingBox":{"vertices":[{"x":98,"y":307},{"x":122,"y":306},{"x":122,"y":315},{"x":98,"y":316}]},"symbols":[{"text":"1"},{"text":"6"},{"text":"."},{"text":"0"},{"text":"7","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.99263,
+          "paragraphs": [
+            {
+              "confidence": 0.99263,
+              "words": [
+                {"confidence":0.99263,"boundingBox":{"vertices":[{"x":22,"y":331},{"x":52,"y":331},{"x":52,"y":339},{"x":22,"y":339}]},"symbols":[{"text":"T"},{"text":"O"},{"text":"T"},{"text":"A"},{"text":"L","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.97311,
+          "paragraphs": [
+            {
+              "confidence": 0.97311,
+              "words": [
+                {"confidence":0.97311,"boundingBox":{"vertices":[{"x":89,"y":332},{"x":120,"y":332},{"x":120,"y":340},{"x":89,"y":340}]},"symbols":[{"text":"1"},{"text":"5"},{"text":"0"},{"text":"."},{"text":"0"},{"text":"0","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.98816,
+          "paragraphs": [
+            {
+              "confidence": 0.98816,
+              "words": [
+                {"confidence":0.98816,"boundingBox":{"vertices":[{"x":21,"y":356},{"x":47,"y":356},{"x":47,"y":363},{"x":21,"y":363}]},"symbols":[{"text":"C"},{"text":"A"},{"text":"S"},{"text":"H","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.98402,
+          "paragraphs": [
+            {
+              "confidence": 0.98402,
+              "words": [
+                {"confidence":0.98402,"boundingBox":{"vertices":[{"x":87,"y":356},{"x":117,"y":356},{"x":117,"y":363},{"x":87,"y":363}]},"symbols":[{"text":"2"},{"text":"0"},{"text":"0"},{"text":"."},{"text":"0"},{"text":"0","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.99278,
+          "paragraphs": [
+            {
+              "confidence": 0.99278,
+              "words": [
+                {"confidence":0.99278,"boundingBox":{"vertices":[{"x":21,"y":376},{"x":64,"y":376},{"x":64,"y":385},{"x":21,"y":385}]},"symbols":[{"text":"C"},{"text":"H"},{"text":"A"},{"text":"N"},{"text":"G"},{"text":"E","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.96457,
+          "paragraphs": [
+            {
+              "confidence": 0.96457,
+              "words": [
+                {"confidence":0.96457,"boundingBox":{"vertices":[{"x":99,"y":376},{"x":125,"y":376},{"x":125,"y":384},{"x":99,"y":384}]},"symbols":[{"text":"5"},{"text":"0"},{"text":"."},{"text":"0"},{"text":"0","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.99284,
+          "paragraphs": [
+            {
+              "confidence": 0.99284,
+              "words": [
+                {"confidence":0.98893,"boundingBox":{"vertices":[{"x":22,"y":436},{"x":45,"y":436},{"x":45,"y":444},{"x":22,"y":444}]},"symbols":[{"text":"T"},{"text":"H"},{"text":"I"},{"text":"S","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.99024,"boundingBox":{"vertices":[{"x":47,"y":436},{"x":83,"y":436},{"x":83,"y":444},{"x":47,"y":444}]},"symbols":[{"text":"S"},{"text":"E"},{"text":"R"},{"text":"V"},{"text":"E"},{"text":"S","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.99219,"boundingBox":{"vertices":[{"x":84,"y":436},{"x":97,"y":436},{"x":97,"y":444},{"x":84,"y":444}]},"symbols":[{"text":"A"},{"text":"S","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.99604,"boundingBox":{"vertices":[{"x":99,"y":436},{"x":112,"y":436},{"x":112,"y":444},{"x":99,"y":444}]},"symbols":[{"text":"A"},{"text":"N","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.99499,"boundingBox":{"vertices":[{"x":115,"y":436},{"x":158,"y":436},{"x":158,"y":444},{"x":115,"y":444}]},"symbols":[{"text":"O"},{"text":"F"},{"text":"F"},{"text":"I"},{"text":"C"},{"text":"I"},{"text":"A"},{"text":"L","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.9941,"boundingBox":{"vertices":[{"x":162,"y":436},{"x":202,"y":436},{"x":202,"y":444},{"x":162,"y":444}]},"symbols":[{"text":"R"},{"text":"E"},{"text":"C"},{"text":"E"},{"text":"I"},{"text":"P"},{"text":"T","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        },
+        {
+          "blockType": "TEXT",
+          "confidence": 0.98308,
+          "paragraphs": [
+            {
+              "confidence": 0.98308,
+              "words": [
+                {"confidence":0.98539,"boundingBox":{"vertices":[{"x":22,"y":456},{"x":58,"y":456},{"x":58,"y":465},{"x":22,"y":465}]},"symbols":[{"text":"S"},{"text":"a"},{"text":"l"},{"text":"a"},{"text":"m"},{"text":"a"},{"text":"t","property":{"detectedBreak":{"type":"SPACE"}}}]},
+                {"confidence":0.98545,"boundingBox":{"vertices":[{"x":60,"y":456},{"x":71,"y":456},{"x":71,"y":465},{"x":60,"y":465}]},"symbols":[{"text":"p"},{"text":"o"}]},
+                {"confidence":0.96211,"boundingBox":{"vertices":[{"x":71,"y":456},{"x":75,"y":456},{"x":75,"y":465},{"x":71,"y":465}]},"symbols":[{"text":"!","property":{"detectedBreak":{"type":"LINE_BREAK"}}}]}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

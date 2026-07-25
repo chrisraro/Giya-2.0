@@ -251,6 +251,34 @@ export function parseCentavos(text: string): number | null {
   return tokens[0]?.centavos ?? null;
 }
 
+/** One money token this parser recognised, stripped of its position. */
+export interface AmountToken {
+  centavos: number;
+  /** A peso marker or a decimal fraction was present. A bare integer run is
+   * only money on a handwritten pad (`handwriting.digits_only_amounts`). */
+  explicit: boolean;
+}
+
+/**
+ * Every money token in `text`, in reading order, under exactly the rule the
+ * deterministic tiers use.
+ *
+ * Exported for the LLM parse-assist tier (./extract.ts). Its verbatim-presence
+ * rail has to answer "is this candidate a number THIS parser would itself have
+ * read as money, at a position it would have read it?", and the only honest
+ * way to answer that is with this tokenizer. Comparing digit substrings
+ * instead would let a candidate be "found" inside a TIN or a phone number,
+ * whereas the token lookarounds refuse to start or stop inside a dashed run.
+ */
+export function findAmountTokens(text: string): AmountToken[] {
+  return text
+    .slice(0, MAX_TEXT_LENGTH)
+    .split(/\r?\n/)
+    .slice(0, MAX_LINES)
+    .flatMap((line) => findMoneyTokens(line.slice(0, MAX_LINE_LENGTH)))
+    .map(({ centavos, explicit }) => ({ centavos, explicit }));
+}
+
 // ---------------------------------------------------------------------------
 // Lines and layout regions
 // ---------------------------------------------------------------------------
@@ -421,7 +449,7 @@ const GENERIC_RECEIPT_NO_PATTERN =
  * the partial unique index `receipts_number_unique`, where "04821" and "4821"
  * must remain two different receipts.
  */
-function normalizeReceiptNumber(value: string): string | null {
+export function normalizeReceiptNumber(value: string): string | null {
   const normalized = value.toUpperCase().replace(/[^A-Z0-9]+/g, "");
   return normalized.length > 0 ? normalized : null;
 }
@@ -858,6 +886,76 @@ function vatTolerance(expected: number): number {
   return Math.max(5, Math.abs(expected) * 0.005);
 }
 
+/** The three amounts the PH VAT-inclusive relations are tested over. */
+export interface VatSanityInput {
+  subtotalCentavos: number | null;
+  taxCentavos: number | null;
+  totalCentavos: number | null;
+}
+
+export interface VatSanityResult extends VatSanityInput {
+  /** The check actually RAN: a total and a tax figure were both present.
+   * Distinguishes "the VAT block did not add up" from "there is no VAT
+   * block", which both leave `consistent` false. */
+  checked: boolean;
+  consistent: boolean;
+}
+
+/**
+ * The PH 12% VAT-inclusive sanity check of doc 36 Stage 7, over amounts the
+ * caller already has: `tax ~= total x 12/112` AND `subtotal + tax ~= total`,
+ * tolerance plus or minus 5 centavos or 0.5 percent, whichever is larger.
+ *
+ * On failure the TOTAL IS ALWAYS KEPT - it is authoritative for the points
+ * award - and only the sub-field that failed to corroborate it comes back
+ * null. Tax is corroborated by the 12/112 ratio alone. Subtotal is
+ * corroborated either directly (total x 100/112) or through a tax figure that
+ * itself survived; a subtotal whose only support is a tax we just discarded is
+ * borrowing its credibility from a discredited number, so it goes too. We
+ * never DERIVE a missing sub-field from the total: an invented subtotal that
+ * looks plausible is worse than a null one, because analytics would believe
+ * it.
+ *
+ * Pass a null total or tax to skip the check; the inputs come straight back.
+ * That is how a non-VAT template (empty `tax_keywords`) opts out. Exported so
+ * the LLM parse-assist tier (./extract.ts) applies the identical rule to a
+ * model's candidate amounts rather than inventing a second one.
+ */
+export function checkVatSanity(input: VatSanityInput): VatSanityResult {
+  const totalCentavos = input.totalCentavos;
+  const tax = input.taxCentavos;
+  let subtotalCentavos = input.subtotalCentavos;
+  let taxCentavos = tax;
+
+  if (totalCentavos === null || tax === null) {
+    return { subtotalCentavos, taxCentavos, totalCentavos, checked: false, consistent: false };
+  }
+
+  // The expected values are floats on purpose: they exist only to be compared
+  // against a tolerance and never reach the output, where every amount stays
+  // the integer centavo value that was printed.
+  const expectedTax = (totalCentavos * 12) / 112;
+  const expectedSubtotal = (totalCentavos * 100) / 112;
+  const ratioOk = Math.abs(tax - expectedTax) <= vatTolerance(expectedTax);
+  // The sum check needs a subtotal; with none present the ratio alone
+  // decides, since that is all the evidence there is.
+  const sumOk =
+    subtotalCentavos === null
+      ? true
+      : Math.abs(subtotalCentavos + tax - totalCentavos) <= vatTolerance(totalCentavos);
+  const subtotalOk =
+    subtotalCentavos === null
+      ? true
+      : Math.abs(subtotalCentavos - expectedSubtotal) <= vatTolerance(expectedSubtotal);
+
+  const consistent = ratioOk && sumOk;
+  if (!consistent) {
+    if (!ratioOk) taxCentavos = null;
+    if (!subtotalOk && !(sumOk && ratioOk)) subtotalCentavos = null;
+  }
+  return { subtotalCentavos, taxCentavos, totalCentavos, checked: true, consistent };
+}
+
 /**
  * Subtotal, tax and total in integer centavos, plus whether the PH 12%
  * VAT-inclusive relations hold (doc 36 Stage 7).
@@ -934,8 +1032,8 @@ function extractAmountsDetailed(input: ParseInput): DetailedAmounts {
     }
   });
 
-  let subtotalCentavos = bestHit(subtotalHits);
-  let taxCentavos = vatApplies ? bestHit(taxHits) : null;
+  const subtotalHit = bestHit(subtotalHits);
+  const taxHit = vatApplies ? bestHit(taxHits) : null;
   let totalCentavos = bestHit(totalHits);
 
   // Tier 2 last resort (doc 36 Stage 7): the largest amount near the foot of
@@ -954,42 +1052,20 @@ function extractAmountsDetailed(input: ParseInput): DetailedAmounts {
 
   // VAT-inclusive arithmetic is meaningless without both a total to anchor it
   // and a tax figure to test, so those two decide whether the check runs at
-  // all. The expected values below are floats on purpose: they exist only to
-  // be compared against a tolerance and never reach the output, where every
-  // amount stays the integer centavo value that was printed.
-  const checkTotal = vatApplies ? totalCentavos : null;
-  const checkTax = vatApplies ? taxCentavos : null;
-  const vatChecked = checkTotal !== null && checkTax !== null;
+  // all. A non-VAT template already zeroed `taxHit`, which skips it.
+  const vat = checkVatSanity({
+    subtotalCentavos: subtotalHit,
+    taxCentavos: taxHit,
+    totalCentavos: vatApplies ? totalCentavos : null,
+  });
 
-  let vatConsistent = false;
-  if (checkTotal !== null && checkTax !== null) {
-    const expectedTax = (checkTotal * 12) / 112;
-    const expectedSubtotal = (checkTotal * 100) / 112;
-    const ratioOk = Math.abs(checkTax - expectedTax) <= vatTolerance(expectedTax);
-    // The sum check needs a subtotal; with none present the ratio alone
-    // decides, since that is all the evidence there is.
-    const sumOk =
-      subtotalCentavos === null
-        ? true
-        : Math.abs(subtotalCentavos + checkTax - checkTotal) <= vatTolerance(checkTotal);
-    const subtotalOk =
-      subtotalCentavos === null
-        ? true
-        : Math.abs(subtotalCentavos - expectedSubtotal) <= vatTolerance(expectedSubtotal);
-
-    vatConsistent = ratioOk && sumOk;
-    if (!vatConsistent) {
-      // Null only what the total fails to corroborate. Tax is corroborated by
-      // the 12/112 ratio alone. Subtotal is corroborated either directly
-      // (total x 100/112) or through a tax figure that itself survived; a
-      // subtotal whose only support is a tax we just discarded is borrowing
-      // its credibility from a discredited number, so it goes too.
-      if (!ratioOk) taxCentavos = null;
-      if (!subtotalOk && !(sumOk && ratioOk)) subtotalCentavos = null;
-    }
-  }
-
-  return { subtotalCentavos, taxCentavos, totalCentavos, vatConsistent, vatChecked };
+  return {
+    subtotalCentavos: vat.subtotalCentavos,
+    taxCentavos: vat.taxCentavos,
+    totalCentavos,
+    vatConsistent: vat.consistent,
+    vatChecked: vat.checked,
+  };
 }
 
 // ---------------------------------------------------------------------------

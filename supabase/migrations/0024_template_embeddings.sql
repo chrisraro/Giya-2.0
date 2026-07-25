@@ -1,0 +1,277 @@
+-- ============================================================================
+-- 0024_template_embeddings.sql
+-- pgvector template retrieval: receipt_templates.layout_text (the VLM's
+-- verbatim transcription of the merchant's master receipt) and
+-- receipt_templates.embedding (the 384-dim vector of that layout).
+--
+-- WHY THIS EXISTS. doc 36 Stage 6 selects a template with a hand-rolled
+-- heuristic (footer-anchor fraction plus a source_kind guess), which is
+-- unreliable on handwritten pads where there are no anchors to count. The
+-- OCR+RAG spec section 2.2 replaces that with cosine similarity against the
+-- merchant's own master layout, scoped INSIDE the already-identified business.
+-- Retrieval never decides WHICH business a receipt belongs to (spec section 3:
+-- two cafes on the same POS software have near-identical layouts, so a
+-- cross-tenant nearest-neighbour is decided by noise and would award one
+-- merchant's points against another merchant's budget). It decides only which
+-- of that one business's templates supplies parse_config.
+--
+-- Source docs:
+--   * docs/superpowers/specs/2026-07-26-ocr-rag-extraction-design.md
+--     section 7 "Database" (the columns), section 3 (retrieval is scoped within
+--     the identified business), section 2.2 (why vectors beat the heuristic)
+--   * docs/superpowers/plans/2026-07-26-ocr-rag-extraction.md task T1
+--   * docs/20-data/24-schema-receipts-ai.md (the `embeddings` table this file
+--     deliberately does not use; see the first amendment below)
+--   * docs/10-architecture/12-multi-tenancy-rls.md (P1)
+--   * docs/00-product/01-personas-roles.md ("Manage receipt templates" is
+--     owner/manager, which is what 0017 already encoded)
+--
+-- Conventions per 0017/0022/0023: no PG enums, deviations from the schema docs
+-- marked `-- amendment:`, policies cite their P-pattern, every fence says which
+-- of the three layers it is (policy / privilege / trigger).
+--
+-- THIS FILE ADDS NO POLICY AND NO TABLE. 0017's three P1 policies on
+-- receipt_templates already govern every row of this table, and a column is not
+-- a row: adding one changes nothing about who can reach it. What the column DOES
+-- change is what a reader who already passes those policies gets to see, and
+-- that is the privilege layer, checked explicitly below.
+-- ============================================================================
+
+-- ---------------------------------------------------------------- extension
+-- 0001_foundations.sql already installs pgvector, in the `extensions` schema
+-- like every other extension on hosted Supabase:
+--   create extension if not exists vector with schema extensions;
+-- Verified live before writing this file (0.8.2, schema `extensions`). The
+-- statement is restated here because spec section 7 lists the extension as part
+-- of this migration and because every file in this directory is meant to state
+-- its own dependencies rather than assume a reader knows 0001 by heart. It is an
+-- exact no-op on a database where 0001 has run, and on a fresh replay 0001 runs
+-- first anyway.
+--
+-- The schema matters and is not cosmetic: `extensions` is on the search_path
+-- Supabase gives postgres and on PostgREST's db_extra_search_path, so the type
+-- name `vector`, the `<=>` operator and the vector I/O functions all resolve for
+-- API callers without qualification. Installing into `public` instead would put
+-- extension-owned objects inside the schema PostgREST exposes.
+create extension if not exists vector with schema extensions;
+
+-- ---------------------------------------------------------------- columns
+-- amendment: doc 24 specifies a single polymorphic `embeddings` table
+-- (halfvec(1024), model bge-m3, deny-all RLS, hnsw index) and this migration
+-- puts the template vector on receipt_templates instead. Four reasons, in
+-- descending order of weight:
+--
+--   1. IT IS A DIFFERENT VECTOR SPACE. doc 24's table pins halfvec(1024) and
+--      bge-m3; this slice pins vector(384) and all-MiniLM-L6-v2, measured
+--      against the live HF account (spec "Verified against Hugging Face"). Two
+--      models cannot share one column, and one shared table holding two
+--      dimensions means either a nullable second vector column or a second
+--      table wearing the first one's name. doc 24's own hnsw index is declared
+--      `halfvec_cosine_ops`, so it could not index a 384-dim MiniLM row at all.
+--   2. THE DOC'S source_type ENUM DOES NOT CONTAIN THIS. Its eight values are
+--      product / promotion / business_info / faq / policy / document / hours /
+--      reward: the doc 38 consumer-assistant RAG corpus. A receipt layout is
+--      not in that corpus and adding it would widen a check constraint on a
+--      table this slice otherwise never touches.
+--   3. CARDINALITY IS 1:1, NOT 1:N. The doc's table exists because one product
+--      chunks into many rows, which is what makes `chunk_index`, `content_hash`
+--      and the polymorphic `source_id` earn their keep. A template has exactly
+--      one master layout and exactly one vector. A separate table would buy a
+--      join, a nullable orphan window and a `source_id` with no foreign key, in
+--      exchange for nothing.
+--   4. RLS FALLS OUT FOR FREE AND CORRECTLY. doc 24 marks `embeddings`
+--      deny-all/service-layer-only. But the business template UI (plan T7) is a
+--      client surface: the owner uploads a master receipt, reads the
+--      transcription back, edits parse_config and re-runs it. On this table
+--      that read is already governed by 0017's P1 owner/manager policies and by
+--      the composite tenancy those policies trust. On a deny-all table it would
+--      need a fresh policy set, or a service-role round trip, for data whose
+--      audience is identical to parse_config's.
+--
+-- doc 24's `embeddings` table is NOT cancelled by this. It remains the right
+-- home for the doc 38 assistant corpus (many chunks, many source types, one
+-- shared index) and lands with that slice. Recorded for the next docs pass as an
+-- amendment to doc 24 rather than a replacement of it.
+
+alter table public.receipt_templates
+  add column if not exists layout_text text,
+  -- ==========================================================================
+  -- THE 384 IS PINNED TO A MODEL. READ THIS BEFORE CHANGING IT.
+  --
+  -- 384 is the output width of `sentence-transformers/all-MiniLM-L6-v2`, the
+  -- value of HF_EMBED_MODEL (spec section 7 "Env"). It is not a tuning knob and
+  -- it is not a capacity choice.
+  --
+  -- A vector is only comparable to vectors produced by the SAME model. Cosine
+  -- distance between a MiniLM vector and a vector from any other model is a
+  -- number, not a similarity: it is arithmetic over two unrelated coordinate
+  -- systems, and it will return a confident nearest neighbour that means
+  -- nothing. So changing HF_EMBED_MODEL INVALIDATES EVERY VECTOR ALREADY
+  -- STORED IN THIS COLUMN, including the ones whose dimension still happens to
+  -- fit. A different 384-dim model is the WORST case, not the easiest one:
+  -- nothing raises, no constraint fires, retrieval silently starts picking the
+  -- wrong template, and the wrong parse_config then feeds the extraction tier
+  -- that touches money.
+  --
+  -- Therefore: changing the model is a RE-EMBEDDING MIGRATION, never an ALTER.
+  -- The minimum honest sequence is
+  --   1. null out public.receipt_templates.embedding for every row,
+  --   2. alter the column type to the new model's width (a no-op if equal),
+  --   3. re-embed every row from layout_text with the new model,
+  --   4. ship the HF_EMBED_MODEL change and the migration together, because a
+  --      deploy that lands either one alone is the silent-wrong-match state
+  --      above.
+  -- Step 3 is why layout_text is stored beside the vector and why the check
+  -- constraint below refuses a vector without it: without the source text there
+  -- is nothing to re-embed FROM, and the only recovery would be re-running the
+  -- VLM over every merchant's master image.
+  --
+  -- Deliberately no `model` column, unlike doc 24's embeddings.model. One model
+  -- is pinned platform-wide by one env var; a per-row model column would imply
+  -- rows may legitimately disagree, which is exactly the mixed-space state the
+  -- paragraph above says must never exist. If per-row models ever become real,
+  -- that column and a per-model index arrive together, with the re-embedding
+  -- sweep, as their own migration.
+  -- ==========================================================================
+  add column if not exists embedding extensions.vector(384);
+
+comment on column public.receipt_templates.layout_text is
+  'Verbatim VLM transcription of the master receipt at sample_path (spec 2026-07-26 OCR+RAG section 7). The source text `embedding` is computed from; kept so a model change can be repaired by re-embedding rather than by re-running the VLM over every master image.';
+
+comment on column public.receipt_templates.embedding is
+  'Layout embedding of layout_text. DIMENSION 384 IS PINNED TO HF_EMBED_MODEL = sentence-transformers/all-MiniLM-L6-v2. Vectors are only comparable within one model, so changing the model invalidates every stored vector even if the width matches: it requires a re-embedding migration (null the column, re-embed from layout_text, ship with the env change), never a bare ALTER.';
+
+-- amendment: not in any doc. An embedding whose source text is gone cannot be
+-- re-embedded, cannot be explained to a reviewer asking why a template matched,
+-- and cannot be checked against the model it was produced by. Since the whole
+-- recovery story for a model change is "re-embed from layout_text", a row that
+-- has the vector but not the text is a row that silently opts out of that
+-- recovery. The converse IS allowed and is the normal intermediate state: T7
+-- transcribes first and embeds second, and a template with layout_text and no
+-- vector simply is not retrievable yet.
+alter table public.receipt_templates
+  drop constraint if exists receipt_templates_embedding_needs_layout_text;
+alter table public.receipt_templates
+  add constraint receipt_templates_embedding_needs_layout_text
+    check (embedding is null or layout_text is not null);
+
+-- ---------------------------------------------------------------- index: none
+-- DELIBERATELY NO ivfflat AND NO hnsw INDEX ON public.receipt_templates.embedding.
+-- Spec section 7 says "an ivfflat or hnsw index on the embedding, scoped by
+-- business_id in queries". Taking that literally is wrong at this shape, and
+-- this comment is the amendment.
+--
+-- THE QUERY THIS COLUMN EXISTS FOR. Every retrieval is
+--
+--   select id, parse_config
+--     from public.receipt_templates
+--    where business_id = $1
+--      and is_active and deleted_at is null
+--    order by embedding <=> $2
+--    limit 1;
+--
+-- The business is ALREADY KNOWN when this runs (spec section 3: the MVP consumer
+-- flow is pre-bound, the consumer opens the shop and scans from that page, and
+-- section 3 forbids the vector from establishing identity in the first place).
+-- So the candidate set is never "all templates", it is "one merchant's
+-- templates", and a merchant realistically has one to five: a POS slip, maybe a
+-- handwritten pad, maybe a second branch's printer.
+--
+-- WHY AN ANN INDEX LOSES HERE, on four counts:
+--
+--   1. There is nothing to approximate. `receipt_templates_biz_idx` (0017,
+--      non-partial, business_id leading) turns the WHERE clause into a handful
+--      of rows, and 1 to 5 exact 384-dim distance computations are on the order
+--      of microseconds. The pipeline step this sits inside already spends ~1.8s
+--      in a VLM call. An index that saves nothing measurable is pure cost.
+--   2. ANN indexes do not compose with a tenant filter the way this query needs.
+--      pgvector's index scan walks the vector index and the business_id
+--      predicate is applied as a filter AFTER candidate selection. With
+--      ivfflat's default probes = 1 the scanned lists are dominated by other
+--      tenants' rows, so the correct template for THIS business can be filtered
+--      out entirely and the query returns fewer rows than the LIMIT, or the
+--      wrong one. Recall loss here is not a slightly worse ranking, it is the
+--      wrong parse_config feeding the extraction tier.
+--   3. ivfflat cannot even be built usefully yet. Its lists are k-means
+--      centroids trained on the data present AT BUILD TIME, and this column is
+--      empty on every existing row. An index built now is trained on nothing and
+--      would have to be rebuilt after the first real population, which is a
+--      second migration nobody would remember to write. hnsw has no training
+--      step but pays a real per-row build cost on every insert and update of a
+--      table that the T7 UI rewrites whenever an owner re-runs a template test.
+--   4. Both need tuning that has no basis to be tuned from. ivfflat wants
+--      `lists` sized to row count and `probes` sized to recall tolerance; hnsw
+--      wants `m` and `ef_construction`, and `ef_search` at query time. Picking
+--      those numbers with no eval set produces a configuration nobody can defend
+--      and a false sense that retrieval was measured.
+--
+-- The exact scan is also the SAFER default for this specific consumer: it
+-- returns true distances, so the confidence attached to a template match is a
+-- real number rather than an approximation, and a threshold set on it means what
+-- it says.
+--
+-- WHAT WOULD HAVE TO CHANGE TO MAKE AN INDEX RIGHT. Precisely one thing: the
+-- query would have to stop being tenant-scoped, or the per-tenant set would have
+-- to stop being tiny.
+--   * The generic scan (no pre-bound business, doc 33 marks it [V1], spec
+--     section 3 permits vector search to PROPOSE candidates there) is the real
+--     trigger. That query has no business_id predicate, so it scans
+--     businesses x templates. Once that is a live path and the table passes
+--     roughly 100k rows, hnsw with (m = 16, ef_construction = 64) is the right
+--     answer, matching doc 24's embeddings index so both vector surfaces are
+--     tuned the same way. It should land WITH that feature and with a recall
+--     measurement, not before it.
+--   * The per-tenant path would only justify an index if a single merchant held
+--     thousands of templates, which would mean the template model had changed
+--     shape (per-branch, per-shift, per-printer) rather than that this table
+--     grew.
+-- Until one of those is true, adding an index here would be adding tuning
+-- surface, build cost and a recall risk to a query that scans five rows.
+-- The pgTAP suite asserts that no ANN index exists on this table, so bringing
+-- one back is a deliberate edit to a failing test rather than a quiet commit.
+
+-- ---------------------------------------------------------------- read fence
+-- VERIFIED, not assumed: 0017 left receipt_templates with TABLE-LEVEL grants and
+-- no column allowlist (confirmed against pg_attribute.attacl live: every column
+-- of this table has a null column ACL). A table-level privilege covers columns
+-- added later, so layout_text and embedding are readable and writable today by
+-- exactly the audience that already reads and writes parse_config, and by nobody
+-- else. That is the intended outcome, and it is the CONSISTENT one:
+--
+--   * layout_text is a merchant's receipt layout. 0017's own words for
+--     parse_config apply verbatim: "anti-fraud configuration (regexes, TIN,
+--     amount sanity bounds) that counter staff never need". The layout is the
+--     document a forger would reproduce to defeat tier 1 parsing, so it belongs
+--     in the same family and gets the same audience.
+--   * That audience is owner/manager of the owning tenant, via
+--     receipt_templates_staff_select (P1, 0017). Marketing and counter staff are
+--     already denied the whole table, consumers have no policy at all, and there
+--     is no cross-tenant read.
+--   * No column allowlist is added. receipts (0017) and audit_logs (0022) both
+--     carry one because those tables have TWO audiences sharing the single
+--     `authenticated` role, so the grant has to hold the safe intersection.
+--     receipt_templates has one audience, and every column on it is already
+--     owner/manager-only, so an allowlist would restate the policy in a second
+--     place and would then have to be edited by every future column.
+--
+-- amendment: `anon` still holds table-level SELECT on receipt_templates. 0017
+-- revoked insert/update/delete/truncate from anon and argued the case for doing
+-- so explicitly ("anon is not an audience of this table at any privilege
+-- level"), but left SELECT behind, which makes the anon row of doc 12's matrix
+-- RLS-only for reads and breaks that file's own three-layer rule. It has never
+-- leaked anything, because every policy on this table is `to authenticated` and
+-- anon therefore matches no rows. Close it now rather than later: this
+-- migration is what puts a merchant's verbatim receipt layout on the table, and
+-- a privilege whose only defence is "there is no policy" is one accidental
+-- `for select to public` away from being the defence that failed. Cost is zero
+-- (anon reads zero rows today either way); the gain is that an anon read now
+-- fails loudly with 42501 at the privilege layer instead of silently returning
+-- an empty set that looks like an empty table.
+revoke select on public.receipt_templates from anon;
+-- authenticated keeps its table-level SELECT, INSERT and UPDATE: those three ARE
+-- the client path the 0017 P1 policies gate, and the T7 template UI writes
+-- layout_text and embedding through them. An owner writing a nonsense vector
+-- into their own template degrades only their own tenant's retrieval, exactly as
+-- an owner writing a nonsense parse_config already can, and the business_id
+-- pinning in receipt_templates_staff_update keeps that blast radius inside the
+-- tenant. DELETE and TRUNCATE remain revoked from both roles by 0017.

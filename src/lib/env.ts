@@ -55,12 +55,60 @@ const serverEnvSchema = z.object({
   // exactly the pipeline that needs it.
   OCR_SERVICE_URL: z.string().url().optional(),
   OCR_SERVICE_TOKEN: z.string().min(1).optional(),
+  // The Supabase Edge Function OCR path (spec section 2.1), the second choice
+  // in the same selection ladder and optional for the same reasons. The URL is
+  // the function endpoint itself, e.g.
+  // https://{ref}.supabase.co/functions/v1/ocr.
+  //
+  // OCR_FUNCTION_SECRET is the shared secret the function authenticates on. It
+  // is deliberately NOT the service role key: the function needs no database
+  // access at all (doc 36 Stage 4: "stateless, no DB access, no business
+  // logic"), so authenticating it with the database god-key would spread our
+  // highest-privilege credential across every OCR request for a capability the
+  // function cannot use. A leaked OCR_FUNCTION_SECRET costs Hugging Face
+  // credits and rotates with one command.
+  //
+  // Not cross-validated here, exactly like the OCR_SERVICE pair above: the
+  // pairing rule lives in provider.ts where its blast radius is the receipts
+  // pipeline and not every getServerEnv() caller.
+  SUPABASE_EDGE_OCR_URL: z.string().url().optional(),
+  OCR_FUNCTION_SECRET: z.string().min(1).optional(),
   // Optional for the same reason: the service-role key is a credential and
   // credentials land at the end of the build. Server-side readers that need
   // it (the receipt settings loader, later the processing orchestrator)
   // degrade to documented defaults and log rather than throwing, so a
   // key-less dev environment still runs the pipeline.
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(20).optional(),
+  // Optional, and optional for the same "credentials land last" reason as the
+  // OCR pair above. HF_TOKEN authenticates two Hugging Face calls: the VLM
+  // transcription and the template layout embedding. With it unset,
+  // src/features/receipts/embed.ts returns null from embedText and template
+  // retrieval falls back to the existing heuristic selection, so the scan
+  // still completes. An embedding outage must never fail a receipt.
+  HF_TOKEN: z.string().min(1).optional(),
+  // Optional override for the embedding model. The DEFAULT lives in
+  // src/features/receipts/embed.ts, next to EMBEDDING_DIMENSIONS, because the
+  // model and the vector width are one decision and not two: setting this to a
+  // model with a different output dimension invalidates every embedding
+  // already stored in the vector(384) column. See that file's header.
+  HF_EMBED_MODEL: z.string().min(1).optional(),
+  // Optional, and it must stay optional. src/lib/ai/llm.ts is the single LLM
+  // entry point (docs/30-modules/38-ai-rag-platform.md section 1) and it fails
+  // soft by contract: with no key it returns null and the receipt pipeline's
+  // deterministic parse tiers stand alone, exactly as they do today. Making
+  // this required would take down auth, rewards and the whole app over a
+  // missing credential for an advisory feature, and would invert the one
+  // safety property that keeps the LLM from being load-bearing.
+  //
+  // Not cross-validated against GROQ_MODEL, for the same reason the OCR pair
+  // above is not: a refinement here throws for every getServerEnv() caller.
+  GROQ_API_KEY: z.string().min(20).optional(),
+  // The model id. Validated against the registry in src/lib/ai/models.ts
+  // rather than here: this schema has no business knowing which models exist,
+  // and an unregistered value there degrades to the task default with a
+  // warning instead of throwing. An unregistered model has no price, so
+  // accepting one silently would mean an unmetered call.
+  GROQ_MODEL: z.string().min(1).optional(),
 });
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;
@@ -84,7 +132,13 @@ export function getServerEnv(): ServerEnv {
     // for an optional key that must read as absent, not as an invalid URL.
     OCR_SERVICE_URL: emptyToUndefined(process.env.OCR_SERVICE_URL),
     OCR_SERVICE_TOKEN: emptyToUndefined(process.env.OCR_SERVICE_TOKEN),
+    SUPABASE_EDGE_OCR_URL: emptyToUndefined(process.env.SUPABASE_EDGE_OCR_URL),
+    OCR_FUNCTION_SECRET: emptyToUndefined(process.env.OCR_FUNCTION_SECRET),
     SUPABASE_SERVICE_ROLE_KEY: emptyToUndefined(process.env.SUPABASE_SERVICE_ROLE_KEY),
+    HF_TOKEN: emptyToUndefined(process.env.HF_TOKEN),
+    HF_EMBED_MODEL: emptyToUndefined(process.env.HF_EMBED_MODEL),
+    GROQ_API_KEY: emptyToUndefined(process.env.GROQ_API_KEY),
+    GROQ_MODEL: emptyToUndefined(process.env.GROQ_MODEL),
   });
 
   if (!parsed.success) {

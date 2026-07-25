@@ -1,0 +1,111 @@
+-- ============================================================================
+-- 0025_receipt_amount_ceiling.sql
+-- One settings row: `receipts.max_total_centavos`, the PLATFORM amount ceiling
+-- doc 36 Stage 8's amount-sanity rule falls back to when a merchant has
+-- configured no `amount_sanity` bounds of their own.
+--
+-- WHY THIS EXISTS. Stage 8's amount rule reads exactly one value today:
+-- `withinAmountSanity`, computed in src/features/receipts/parse.ts from the
+-- MATCHED TEMPLATE's `parse_config.amount_sanity`. That value is NULL when the
+-- template declared no bounds, and there is no template at all on the generic
+-- parse path. So an unconfigured merchant had no ceiling whatsoever on the
+-- deterministic tiers, and a printed line reading
+--
+--     TOTAL: PHP 99,999.00
+--
+-- was read straight off the page by the tier 1 keyword scan, cleared the Stage
+-- 9 confidence thresholds on the strength of an otherwise perfect slip, and
+-- auto-approved into an award. No model call was involved, so none of the
+-- OCR+RAG spec's 4.2 extraction rails were anywhere near it.
+--
+-- src/features/receipts/extract.ts had already given the LLM tier a default
+-- bound (LLM_DEFAULT_MIN_TOTAL_CENTAVOS / LLM_DEFAULT_MAX_TOTAL_CENTAVOS) for
+-- precisely this argument - "an unconfigured merchant would otherwise be an
+-- open door for exactly the injected-total attack" - which left the CHEAPER
+-- attack, the one needing no model at all, as the unguarded one. This row is
+-- the missing half.
+--
+-- Source docs:
+--   * docs/30-modules/36-receipt-ocr-pipeline.md Stage 8, the validation table.
+--     Amount sanity ROUTES TO REVIEW; it is not a rejection, and this key does
+--     not change that. The pipeline threads it through the same `forceReview`
+--     mechanism a blacklisted customer and an LLM-assisted field already use.
+--   * docs/30-modules/37-fraud-detection.md, S7 `amount_anomaly` - the signal
+--     the pipeline raises alongside the review so the queue item explains
+--     itself - and "Default settings registry", the pattern this key follows.
+--   * docs/20-data/26-schema-amendments.md "Non-DDL registrations", where
+--     `receipts.max_age_days` and the three `ocr.*` keys are already recorded.
+--
+-- Conventions per 0017/0022/0023/0024: no DDL where a row will do, deviations
+-- from the schema docs marked `-- amendment:`, and the seed idempotent so a
+-- replay never duplicates a key and never clobbers a tuned live value.
+--
+-- THIS FILE ADDS NO TABLE, NO COLUMN, NO POLICY AND NO PRIVILEGE CHANGE.
+-- `public.settings` and its three-layer fence are 0017's, unchanged: platform
+-- rows have NO client select policy at all (they are the fraud rulebook, and a
+-- ceiling an abuser can read is a ceiling an abuser can stay under), all writes
+-- are service-role only, and the typed reader in
+-- src/features/receipts/server/settings.ts is `server-only`.
+-- ============================================================================
+
+-- ------------------------------------------------------------------ the seed
+-- amendment: not in any doc's registry yet. Doc 36 Stage 8 states the amount
+-- rule in terms of the template's `amount_sanity` alone; this adds the platform
+-- fallback underneath it and is recorded for the next docs pass alongside doc
+-- 26's existing non-DDL registrations.
+--
+-- THE VALUE: PHP 20,000.00, as 2000000 integer centavos. Centavos, not pesos,
+-- so the row is directly comparable to `receipts.total_centavos` and to
+-- `parse_config.amount_sanity.max_total_centavos` with no unit conversion
+-- anywhere on the money path.
+--
+-- WHY 20,000 AND NOT extract.ts's 10,000. The two defaults DELIBERATELY DIFFER
+-- because they bound different populations and their false positives cost
+-- different things:
+--
+--   * The LLM bound guards a number a language model produced, on the small
+--     minority of receipts the deterministic tiers could not read. Refusing
+--     there merely leaves the field missing, and a receipt with no total was
+--     already headed for a human, so strictness is free.
+--   * This one guards a number PRINTED ON THE PAPER, on EVERY receipt the
+--     platform scans. A false positive here is a real customer waiting on a
+--     review queue for a purchase they actually made. At PHP 10,000 every
+--     large-party restaurant bill and every bulk resupply in the country would
+--     land in that queue.
+--
+-- PHP 20,000.00 is where a single transaction at a PH food-service or small
+-- retail SME - this platform's target market - stops being large and becomes
+-- unusual enough that a human should look before points are minted. It is also
+-- a fifth of the PHP 99,999 an injected total reaches for, so the attack above
+-- cannot clear it.
+--
+-- NO FLOOR KEY IS REGISTERED, and that asymmetry is deliberate. extract.ts
+-- pairs its ceiling with a PHP 1.00 minimum because a sub-peso total from a
+-- model is evidence the model grabbed the wrong token. The deterministic tiers
+-- read a money token that is genuinely printed, and the attack this row defends
+-- against is an INFLATED total: a deflated one awards the consumer FEWER points
+-- than they earned, so there is no attacker on that side. Meanwhile PHP 1.00
+-- and PHP 5.00 purchases are the ordinary case at a sari-sari store, so a floor
+-- would buy nothing on the money path and would queue the smallest and most
+-- frequent legitimate transactions on the platform.
+--
+-- A BUSINESS-SCOPE ROW MAY OVERRIDE THIS, UPWARD OR DOWNWARD. That is the whole
+-- reason the ceiling is a review trigger and not a business rule: a merchant
+-- who legitimately rings up more than PHP 20,000 inserts one
+-- `scope='business'` row (or sets `amount_sanity.max_total_centavos` on their
+-- template, which wins over this key in both directions) and stops queueing
+-- their own large sales. The reader in settings.ts resolves business scope over
+-- platform scope for this key exactly as it does for `receipts.max_age_days`.
+--
+-- Idempotent via `settings_platform_key_uniq` (0017), the same partial unique
+-- index 0017's own seed relies on: replaying this migration inserts nothing a
+-- second time and never overwrites a value an operator has tuned live.
+insert into public.settings (scope, key, value) values
+  ('platform', 'receipts.max_total_centavos', '2000000'::jsonb)
+on conflict do nothing;
+
+-- The typed reader keeps a hardcoded fallback equal to the number above
+-- (DEFAULT_MAX_TOTAL_CENTAVOS in src/features/receipts/server/settings.ts), so
+-- a deleted or unreachable row degrades to the documented default rather than
+-- to no ceiling at all. A vitest drift guard asserts the two are the same
+-- number, which is what stops this seed and that constant from separating.

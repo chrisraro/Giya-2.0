@@ -30,6 +30,26 @@ export interface HttpOcrProviderConfig {
   timeoutMs?: number;
   /** Injected in tests; defaults to the global fetch. */
   fetchImpl?: typeof fetch;
+  /**
+   * Recorded on the provider and, through it, traceable in logs. Defaults to
+   * "http". ./edge.ts passes "edge" so a Supabase Edge Function call is
+   * distinguishable from a container call even though both speak the identical
+   * doc 36 Stage 4 protocol.
+   */
+  providerName?: "http" | "edge";
+  /**
+   * The path appended to `baseUrl` for the OCR call. Defaults to doc 36 Stage
+   * 4's "/v1/ocr", which is where the container mounts it. A Supabase Edge
+   * Function's URL is already the endpoint, so ./edge.ts passes "".
+   *
+   * This knob exists so the two HTTP implementations share one body of
+   * request building, status mapping, timeout handling and response
+   * validation. Duplicating it would mean two copies of the retry decisions in
+   * `errorForStatus`, and those decisions are the part that must not drift:
+   * the whole reason `retryable` is an explicit field is that the answer is
+   * not guessable from the status.
+   */
+  ocrPath?: string;
 }
 
 // The documented 200 body. Validated rather than trusted: this is a separate
@@ -151,6 +171,8 @@ async function errorForStatus(response: Response): Promise<OcrError> {
 export function createHttpOcrProvider(config: HttpOcrProviderConfig): OcrProvider {
   const timeoutMs = config.timeoutMs ?? OCR_WORKER_TIMEOUT_MS;
   const doFetch = config.fetchImpl ?? fetch;
+  const providerName = config.providerName ?? "http";
+  const ocrPath = config.ocrPath ?? "/v1/ocr";
 
   async function send(url: string, init: RequestInit): Promise<Response> {
     // An AbortController plus an explicit flag rather than AbortSignal.timeout:
@@ -186,10 +208,10 @@ export function createHttpOcrProvider(config: HttpOcrProviderConfig): OcrProvide
   }
 
   return {
-    name: "http",
+    name: providerName,
 
     async ocr(request: OcrRequest): Promise<OcrResponse> {
-      const response = await send(joinUrl(config.baseUrl, "/v1/ocr"), {
+      const response = await send(joinUrl(config.baseUrl, ocrPath), {
         method: "POST",
         headers: {
           Authorization: `Bearer ${config.token}`,

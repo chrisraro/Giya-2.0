@@ -1,4 +1,6 @@
-// GENERATED FILE: Supabase types for project dcnpuvtbftpbcjcvfnlt.
+// GENERATED FILE: Supabase types for the LIVE project zlfxfzlnklqhajacngxf.
+// NOT dcnpuvtbftpbcjcvfnlt, which is retired but still exists and still
+// answers its keys. See supabase/README.md "Project history".
 // Regenerate after migrations (MCP generate_typescript_types). Do not edit by hand.
 export type Json =
   | string
@@ -1625,8 +1627,10 @@ export type Database = {
           created_at: string
           created_by: string | null
           deleted_at: string | null
+          embedding: string | null
           id: string
           is_active: boolean
+          layout_text: string | null
           name: string
           ocr_test_result: Json | null
           parse_config: Json
@@ -1642,8 +1646,10 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           deleted_at?: string | null
+          embedding?: string | null
           id?: string
           is_active?: boolean
+          layout_text?: string | null
           name: string
           ocr_test_result?: Json | null
           parse_config?: Json
@@ -1659,8 +1665,10 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           deleted_at?: string | null
+          embedding?: string | null
           id?: string
           is_active?: boolean
+          layout_text?: string | null
           name?: string
           ocr_test_result?: Json | null
           parse_config?: Json

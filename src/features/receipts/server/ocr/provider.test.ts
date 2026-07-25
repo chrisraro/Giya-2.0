@@ -15,6 +15,8 @@ import { OcrError, getOcrProvider } from "./provider";
 afterEach(() => {
   delete serverEnv.OCR_SERVICE_URL;
   delete serverEnv.OCR_SERVICE_TOKEN;
+  delete serverEnv.SUPABASE_EDGE_OCR_URL;
+  delete serverEnv.OCR_FUNCTION_SECRET;
   vi.restoreAllMocks();
 });
 
@@ -62,6 +64,54 @@ describe("getOcrProvider", () => {
     // Token-without-url is not ambiguous: nothing to call, so the stub is the
     // only possible reading and there is nothing to warn about.
     serverEnv.OCR_SERVICE_TOKEN = "ocr-service-token";
+
+    expect(getOcrProvider().name).toBe("stub");
+  });
+
+  it("selects the edge provider when the Edge Function pair is set", () => {
+    serverEnv.SUPABASE_EDGE_OCR_URL =
+      "https://zlfxfzlnklqhajacngxf.supabase.co/functions/v1/ocr";
+    serverEnv.OCR_FUNCTION_SECRET = "ocr-function-secret";
+
+    const provider = getOcrProvider();
+
+    expect(provider.name).toBe("edge");
+    expect(typeof provider.healthz).toBe("function");
+  });
+
+  it("prefers the container over the Edge Function when both are configured", () => {
+    // The container is the escape hatch from the metered third-party VLM.
+    // Switching to it must be one variable added, never two removed first.
+    serverEnv.OCR_SERVICE_URL = "https://ocr.example.dev";
+    serverEnv.OCR_SERVICE_TOKEN = "ocr-service-token";
+    serverEnv.SUPABASE_EDGE_OCR_URL =
+      "https://zlfxfzlnklqhajacngxf.supabase.co/functions/v1/ocr";
+    serverEnv.OCR_FUNCTION_SECRET = "ocr-function-secret";
+
+    expect(getOcrProvider().name).toBe("http");
+  });
+
+  it("throws rather than falling back when the Edge Function secret is missing", () => {
+    // Same rule as the container pair, same reason: a silent fall-through to
+    // the stub would feed the pipeline fabricated receipt text in production
+    // and award real points for receipts nobody photographed.
+    serverEnv.SUPABASE_EDGE_OCR_URL =
+      "https://zlfxfzlnklqhajacngxf.supabase.co/functions/v1/ocr";
+
+    expect(() => getOcrProvider()).toThrow(OcrError);
+    expect(() => getOcrProvider()).toThrow(/OCR_FUNCTION_SECRET/);
+
+    try {
+      getOcrProvider();
+      expect.unreachable("expected getOcrProvider to throw");
+    } catch (error) {
+      expect((error as OcrError).code).toBe("OCR_MISCONFIGURED");
+      expect((error as OcrError).retryable).toBe(false);
+    }
+  });
+
+  it("does not let a stray Edge Function secret change the stub default", () => {
+    serverEnv.OCR_FUNCTION_SECRET = "ocr-function-secret";
 
     expect(getOcrProvider().name).toBe("stub");
   });
