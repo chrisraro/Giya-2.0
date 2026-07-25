@@ -12,6 +12,7 @@ supabase/
     0004_business_staff_self_select.sql   read own memberships without claims
     0005_businesses_staff_table_select.sql  staff table-truth read (superseded)
     0006_fix_businesses_staff_table_select.sql  scope-qualification fix of 0005
+    0007_catalog.sql        menu_categories, products, product_variants, product_addons
   tests/
     rls_identity_smoke.sql  pgTAP smoke suite (transaction-wrapped, rolls back)
 ```
@@ -102,3 +103,8 @@ simulate end users. Via MCP, the file body can be run with `execute_sql`
 - WARN function_search_path_mutable on the three claim helpers: accepted. Every object reference inside them is schema-qualified, and pinning search_path would block SQL-function inlining that doc 12 requires for RLS hot paths.
 - WARN authenticated-callable SECURITY DEFINER public.register_business: accepted, it is the designed tenant-registration entry point (doc 12 tenant lifecycle).
 - Legacy note: the wiped pre-existing app left an on_auth_user_created trigger on auth.users; 0003 drops and replaces it.
+- Migration 0007 (catalog domain) added: no new ERROR advisors.
+
+## Manual dashboard steps (pending)
+
+- Enable leaked-password protection: Authentication -> Providers -> Email -> enable 'Leaked password protection' (advisor auth_leaked_password_protection; doc 15 requires it for production).
