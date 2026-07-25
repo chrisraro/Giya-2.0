@@ -18,16 +18,12 @@ import type { MatchCandidate } from "../matching";
 import { parseReceipt } from "../parse";
 import type { ParseConfig, ParsedReceipt } from "../parse";
 import { hammingDistance, phashBand } from "../phash";
-import type {
-  FieldSource,
-  FraudRejectReason,
-  ReceiptRejectReason,
-  RouteOutcome,
-} from "../types";
+import type { FieldSource, ReceiptRejectReason, RouteOutcome } from "../types";
 import { evaluateVelocity } from "../velocity";
 import type { VelocityCounts, VelocityWindow } from "../velocity";
 import { awardPoints, priceReceipt } from "./award";
 import type { AwardPlan } from "./award";
+import { applyCooldownIfEarned, isFraudFamilyRejectReason } from "./cooldown";
 import { getOcrProvider, OcrError } from "./ocr/provider";
 import type { OcrBlock, OcrProvider, OcrResponse } from "./ocr/provider";
 import { getReceiptSettings } from "./settings";
@@ -109,8 +105,6 @@ const PHASH_LOOKBACK_DAYS = 90;
  * recent rows because a replay attack reuses a recent image.
  */
 const PHASH_CANDIDATE_LIMIT = 500;
-/** Doc 37 consequences ladder step 2: strikes counted over 30 days. */
-const COOLDOWN_WINDOW_DAYS = 30;
 /** Doc 37 S7 round-number abuse: "last >= 5 approved receipts". */
 const ROUND_NUMBER_STREAK = 5;
 /** PHP 100.00. Doc 37 S7's `total_centavos % 10000 = 0`. */
@@ -122,17 +116,6 @@ const ROUND_NUMBER_MODULUS = 10_000;
  * is what makes honest resubmission after a rejection work.
  */
 const LIVE_STATUSES = ["approved", "review", "processing"] as const;
-
-/**
- * Doc 37 ladder step 2 counts "fraud-family rejections". These are exactly the
- * two reasons `fraudVerdict` can produce; `unreadable`, `too_old`,
- * `wrong_business` and `manual` are quality or matching outcomes and must
- * never accumulate toward a scan block.
- */
-const FRAUD_FAMILY_REJECT_REASONS: readonly ReceiptRejectReason[] = [
-  "duplicate",
-  "fraud_suspected",
-];
 
 /** Postgres unique_violation. */
 const UNIQUE_VIOLATION = "23505";
@@ -875,10 +858,12 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
     parseConfidence: confidence,
     parseMeta,
     outcome,
-    // The award RPC sets processed_at itself (0018 step 7), so the awarding
-    // path deliberately leaves it null here rather than writing it twice and
-    // having the two values disagree by a few milliseconds.
-    processedAt: award !== null && award.points > 0 ? null : now(),
+    // Both RPCs set processed_at themselves (0018 step 7 on the awarding path,
+    // 0023 step 3 on the zero-point visit path), so every priced approval
+    // leaves it null here rather than writing it twice and having the two
+    // values disagree by a few milliseconds. `award` is null on the review,
+    // rejected and unmatched paths, which reach no RPC and stamp it here.
+    processedAt: award !== null ? null : now(),
     now: now(),
   });
 
@@ -904,9 +889,11 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
   }
 
   // ---- Doc 37 consequences ladder step 2 ---------------------------------
+  // ./cooldown.ts, shared verbatim with the human review service, for the same
+  // reason the award path is shared: one rule, one implementation.
   if (
     finalOutcome.status === "rejected" &&
-    FRAUD_FAMILY_REJECT_REASONS.includes(finalOutcome.reason)
+    isFraudFamilyRejectReason(finalOutcome.reason)
   ) {
     await applyCooldownIfEarned(deps, receipt.user_id, settings);
   }
@@ -962,7 +949,7 @@ export function resolveOutcome(input: {
   const { routed, validationRejection, forceReview, matchedBusinessId } = input;
 
   let outcome: RouteOutcome = routed;
-  if (routed.status === "rejected" && isFraudFamily(routed.reason)) {
+  if (routed.status === "rejected" && isFraudFamilyRejectReason(routed.reason)) {
     outcome = routed;
   } else if (validationRejection !== null) {
     outcome = { status: "rejected", reason: validationRejection };
@@ -974,10 +961,6 @@ export function resolveOutcome(input: {
     return { status: "rejected", reason: "wrong_business" };
   }
   return outcome;
-}
-
-function isFraudFamily(reason: ReceiptRejectReason): reason is FraudRejectReason {
-  return reason === "duplicate" || reason === "fraud_suspected";
 }
 
 // ---------------------------------------------------------------------------
@@ -1888,86 +1871,4 @@ async function writeLineItems(
       error,
     );
   }
-}
-
-// ---------------------------------------------------------------------------
-// Doc 37 consequences ladder, step 2
-// ---------------------------------------------------------------------------
-
-/**
- * "3 fraud-family rejections / 30 days (`fraud.cooldown_strikes`) -> 24h scan
- * block (`fraud.cooldown_hours`)". Automatic, auto-expiring, audited.
- *
- * Doc 37's parenthetical says the strikes are "counted from
- * fraud_signals_consumer_idx", but a signal is not a rejection: an approved
- * receipt with three warn rows would otherwise strike a consumer who did
- * nothing wrong, and one rejection carrying four signals would strike them
- * four times over. The count is therefore taken over REJECTIONS - the noun the
- * sentence actually uses - reading `receipts` for this consumer's
- * `duplicate`/`fraud_suspected` rows inside the window. The receipt just
- * rejected is already written, so it counts itself, which is what makes the
- * third strike (not the fourth) fire the block.
- */
-async function applyCooldownIfEarned(
-  deps: ProcessReceiptDeps,
-  consumerId: string,
-  settings: ReceiptSettings,
-): Promise<void> {
-  const now = deps.now();
-
-  const { data, error } = await deps.supabase
-    .from("receipts")
-    .select("id")
-    .eq("user_id", consumerId)
-    .eq("status", "rejected")
-    .in("reject_reason", [...FRAUD_FAMILY_REJECT_REASONS])
-    .gte("created_at", daysAgo(now, COOLDOWN_WINDOW_DAYS))
-    // Only "did we reach the threshold" matters, so the read stops there.
-    .limit(settings.cooldownStrikes);
-
-  if (error !== null) {
-    console.error("[receipts/process] cooldown strike count failed", error);
-    return;
-  }
-
-  const strikes = (data ?? []).length;
-  if (strikes < settings.cooldownStrikes) return;
-
-  const blockedUntil = new Date(now.getTime() + settings.cooldownHours * 3_600_000);
-
-  const { data: consumer, error: readError } = await deps.supabase
-    .from("consumers")
-    .select("scan_blocked_until")
-    .eq("id", consumerId)
-    .maybeSingle<{ scan_blocked_until: string | null }>();
-
-  if (readError !== null) {
-    console.error("[receipts/process] could not read the existing cooldown", readError);
-    return;
-  }
-
-  // Never shorten an existing block. A longer cooldown may have been applied
-  // by an admin (ladder step 2 is also a manual action), and re-running the
-  // pipeline over an old receipt must not hand an abuser an early release.
-  const existing =
-    consumer?.scan_blocked_until === undefined || consumer.scan_blocked_until === null
-      ? null
-      : new Date(consumer.scan_blocked_until);
-  if (existing !== null && existing.getTime() >= blockedUntil.getTime()) return;
-
-  const { error: writeError } = await deps.supabase
-    .from("consumers")
-    .update({ scan_blocked_until: blockedUntil.toISOString() })
-    .eq("id", consumerId);
-
-  if (writeError !== null) {
-    console.error("[receipts/process] could not apply the scan cooldown", writeError);
-    return;
-  }
-
-  // TODO(audit): the jobs/platform slice adds `audit_logs`; doc 37 requires a
-  // `fraud.cooldown_applied` row here once that table exists.
-  console.warn(
-    `[receipts/process] consumer ${consumerId} hit ${strikes} fraud-family rejections in ${COOLDOWN_WINDOW_DAYS} days; scanning blocked until ${blockedUntil.toISOString()}`,
-  );
 }

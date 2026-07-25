@@ -481,7 +481,12 @@ describe("awardPoints", () => {
     expect(supabase.opsFor("receipts", "update")).toHaveLength(0);
   });
 
-  it("skips the RPC entirely at zero points, and does not throw", async () => {
+  it("skips the LEDGER at zero points and records the visit instead", async () => {
+    // The defect 0023 fixes: every business_customers counter used to be
+    // maintained only inside 0018 step 6, so a tenant with no active base rule
+    // kept approving receipts whose pair rows never advanced - and with
+    // visit_count stuck at 0, isFirstVisit stayed true for every one of its
+    // customers, so a later first_visit bonus would pay out to all of them.
     const supabase = createFakeSupabase({});
 
     const result = await awardPoints({
@@ -490,12 +495,16 @@ describe("awardPoints", () => {
       plan: plan({ points: 0 }),
     });
 
-    expect(supabase.rpcCalls).toHaveLength(0);
+    expect(supabase.rpcCalls).toHaveLength(1);
+    expect(supabase.rpcCalls[0]).toEqual({
+      name: "record_receipt_visit",
+      args: { p_receipt_id: RECEIPT_ID },
+    });
     expect(supabase.opsFor("receipts", "update")).toHaveLength(0);
     expect(result).toEqual({ kind: "skipped_zero_points" });
   });
 
-  it("skips the RPC on a negative price rather than sending a clawback through the earn door", async () => {
+  it("never sends a negative price through the earn door, and still records the visit", async () => {
     const supabase = createFakeSupabase({});
 
     const result = await awardPoints({
@@ -504,8 +513,70 @@ describe("awardPoints", () => {
       plan: plan({ points: -5 }),
     });
 
-    expect(supabase.rpcCalls).toHaveLength(0);
+    expect(supabase.rpcCalls.map((call) => call.name)).toEqual(["record_receipt_visit"]);
     expect(result).toEqual({ kind: "skipped_zero_points" });
+  });
+
+  it("does not call record_receipt_visit when points are awarded (0018 step 6b did it)", async () => {
+    const supabase = createFakeSupabase({});
+
+    await awardPoints({ deps: createDeps(supabase), receiptId: RECEIPT_ID, plan: plan() });
+
+    expect(supabase.rpcCalls.map((call) => call.name)).toEqual(["award_receipt_points"]);
+  });
+});
+
+// ===========================================================================
+// record_receipt_visit failures (0023), handled exactly as award failures are
+// ===========================================================================
+
+describe("record_receipt_visit error handling (0023)", () => {
+  // 0023 raises no message of its own: it reuses these three, so the severity
+  // map and the never-throw contract apply unchanged.
+  const VISIT_ERRORS = [
+    "RECEIPT_NOT_AWARDABLE",
+    "AWARD_RECEIPT_ID_REQUIRED",
+    "CUSTOMER_RECORD_MISSING",
+  ] as const;
+
+  for (const message of VISIT_ERRORS) {
+    it(`annotates the receipt with visit_failed:${message} and refuses`, async () => {
+      const supabase = createFakeSupabase({ rpc: { data: null, error: { message } } });
+
+      const result = await awardPoints({
+        deps: createDeps(supabase),
+        receiptId: RECEIPT_ID,
+        plan: plan({ points: 0 }),
+      });
+
+      const update = supabase.opsFor("receipts", "update")[0];
+      expect(update?.payload).toEqual({ reject_note: `visit_failed:${message}` });
+      expect(update?.filters).toEqual([{ method: "eq", args: ["id", RECEIPT_ID] }]);
+      expect(result).toEqual({
+        kind: "refused",
+        code: message,
+        severity: AWARD_ERROR_HANDLING[message],
+      });
+    });
+  }
+
+  it("does not throw when even the annotation write fails", async () => {
+    const supabase = createFakeSupabase({
+      rpc: { data: null, error: { message: "RECEIPT_NOT_AWARDABLE" } },
+      updateError: { message: "connection lost" },
+    });
+
+    await expect(
+      awardPoints({
+        deps: createDeps(supabase),
+        receiptId: RECEIPT_ID,
+        plan: plan({ points: 0 }),
+      }),
+    ).resolves.toEqual({
+      kind: "refused",
+      code: "RECEIPT_NOT_AWARDABLE",
+      severity: "warn",
+    });
   });
 });
 
@@ -516,7 +587,8 @@ describe("awardPoints", () => {
 describe("award RPC error handling (0018)", () => {
   // Verified line by line against supabase/migrations/0018_award_receipt_points
   // .sql: these six `raise exception ... message = '...'` strings are the
-  // complete set, and every one of them is mapped.
+  // complete set, and every one of them is mapped. 0023 adds no seventh: it
+  // reuses three of these so both RPCs share one taxonomy.
   const MIGRATION_ERRORS = [
     "AWARD_RECEIPT_ID_REQUIRED",
     "AWARD_POINTS_INVALID",
@@ -669,7 +741,10 @@ describe("awardApprovedReceipt", () => {
     });
   });
 
-  it("approves at zero points without touching the ledger", async () => {
+  it("approves at zero points without touching the ledger, but still records the visit", async () => {
+    // The review service's zero-point path: a manager approves a receipt of a
+    // tenant that has configured no earning. The CRM counters must still move,
+    // or that tenant's customer list stays frozen at zero visits.
     const supabase = createFakeSupabase({ pointsRules: [] });
 
     const result = await awardApprovedReceipt({
@@ -679,7 +754,9 @@ describe("awardApprovedReceipt", () => {
       isFirstVisit: false,
     });
 
-    expect(supabase.rpcCalls).toHaveLength(0);
+    expect(supabase.rpcCalls).toEqual([
+      { name: "record_receipt_visit", args: { p_receipt_id: RECEIPT_ID } },
+    ]);
     expect(supabase.opsFor("receipts", "update")).toHaveLength(0);
     expect(result).toEqual({ kind: "skipped_zero_points" });
   });

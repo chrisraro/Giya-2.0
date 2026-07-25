@@ -904,7 +904,7 @@ describe("the reject paths", () => {
 // ===========================================================================
 
 describe("pricing (doc 35)", () => {
-  it("approves without calling the RPC when the business has no active base rule", async () => {
+  it("approves without a ledger row when the business has no active base rule, and still records the visit", async () => {
     const world = createWorld({ pointsRules: [] });
     const harness = createHarness({ world });
 
@@ -912,12 +912,17 @@ describe("pricing (doc 35)", () => {
 
     const update = harness.receiptUpdate();
     expect(update?.status).toBe("approved");
-    // No RPC means nothing else will stamp processed_at, so this path must.
-    expect(update?.processed_at).toBe(NOW.toISOString());
-    expect(harness.supabase.rpcCalls).toHaveLength(0);
+    // 0023 stamps processed_at itself, exactly as 0018 does on the awarding
+    // path, so this write leaves it null rather than duplicating it.
+    expect(update?.processed_at).toBeNull();
+    // The defect 0023 fixes: this tenant has configured no earning, and before
+    // it the pair row's visit_count, spend and last_visit_at never advanced.
+    expect(harness.supabase.rpcCalls).toEqual([
+      { name: "record_receipt_visit", args: { p_receipt_id: RECEIPT_ID } },
+    ]);
   });
 
-  it("approves without calling the RPC when the rules price the receipt at zero", async () => {
+  it("approves without a ledger row when the rules price the receipt at zero", async () => {
     const world = createWorld({
       pointsRules: [
         {
@@ -933,7 +938,9 @@ describe("pricing (doc 35)", () => {
     await processReceipt(RECEIPT_ID, harness.deps);
 
     expect(harness.receiptUpdate()?.status).toBe("approved");
-    expect(harness.supabase.rpcCalls).toHaveLength(0);
+    expect(harness.supabase.rpcCalls).toEqual([
+      { name: "record_receipt_visit", args: { p_receipt_id: RECEIPT_ID } },
+    ]);
   });
 
   it("applies a live campaign multiplier and names its campaign on the ledger row", async () => {

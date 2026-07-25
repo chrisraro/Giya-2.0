@@ -56,12 +56,19 @@ import { RECEIPT_TIMEZONE } from "../parse";
 // An award function that also owned the status write would have to reproduce
 // both, which is the drift this extraction exists to prevent.
 //
+// WHO WRITES `processed_at` ON AN APPROVED RECEIPT: THE RPC, NOT THE CALLER.
+// Both RPCs stamp it (0018 step 7, 0023 step 3), so a caller that lands a
+// receipt on 'approved' with a business and a consumer must leave the column
+// null and let this module's call write it. Only the paths that never reach
+// an RPC (rejected, review, an OCR dead end) stamp it themselves. Two values a
+// few milliseconds apart would make doc 52's scan e2e latency ambiguous, and
+// `processed_at is null` on an approved row is what makes a failed award or a
+// failed visit record findable.
+//
 // `priceReceipt` is deliberately separable from `awardPoints` for the same
 // ordering reason: the pipeline must know whether the receipt prices above
-// zero BEFORE it writes the row, because the award RPC sets `processed_at`
-// itself (0018 step 7) and the non-awarding paths have to stamp it themselves.
-// `awardApprovedReceipt` composes the two for callers that do not need the
-// plan in advance.
+// zero BEFORE it writes the row. `awardApprovedReceipt` composes the two for
+// callers that do not need the plan in advance.
 //
 // Docs: docs/30-modules/35-points-engine.md (sections 2-3 award pipeline,
 // section 11 "one implementation of the rule math", section 12 error codes),
@@ -114,7 +121,14 @@ export interface AwardPlan {
 /** How loudly a refused award is logged, and whether it is benign. */
 export type AwardErrorSeverity = "info" | "warn" | "error";
 
-/** What happened at the ledger. Returned so the review service can audit it. */
+/**
+ * What happened at the ledger. Returned so the review service can audit it.
+ *
+ * `skipped_zero_points` means the LEDGER was skipped, not that nothing
+ * happened: the receipt's visit and spend were still recorded against the
+ * `business_customers` pair row by `record_receipt_visit` (0023). See
+ * `awardPoints`.
+ */
 export type AwardResult =
   | { kind: "awarded"; points: number; transactionId: string | null }
   | { kind: "skipped_zero_points" }
@@ -551,7 +565,7 @@ function enrichRuleSnapshot(input: {
 }
 
 // ---------------------------------------------------------------------------
-// The award RPC
+// The two RPCs
 // ---------------------------------------------------------------------------
 
 interface AwardReceiptPointsArgs {
@@ -562,28 +576,40 @@ interface AwardReceiptPointsArgs {
   p_expires_at: string | null;
 }
 
-/**
- * `award_receipt_points` landed in 0018, AFTER the last regeneration of
- * src/lib/supabase/types.ts (which already carries every 0017 table but no
- * 0018 function), so the generated `Database["public"]["Functions"]` union does
- * not name it yet. This structural type is the 0018 signature verbatim and is
- * the single place the client is narrowed; regenerating the types deletes it.
- */
-interface AwardRpcClient {
-  rpc(
-    name: "award_receipt_points",
-    args: AwardReceiptPointsArgs,
-  ): PromiseLike<{ data: unknown; error: PostgrestFailure | null }>;
+interface RecordReceiptVisitArgs {
+  p_receipt_id: string;
+}
+
+interface RpcResponse {
+  data: unknown;
+  error: PostgrestFailure | null;
 }
 
 /**
- * Every P0001 message 0018 raises, verified against the migration line by
- * line. Each one is a distinct operational fact, and none of them may take a
- * caller down: the receipt is already 'approved' in the database by the time
- * the RPC is called, so the worst case is an approved receipt whose award
- * needs support attention, which is recoverable, whereas a thrown error would
- * strand the whole job (or, for the review service, lose the reviewer's
- * decision after it was already persisted).
+ * `award_receipt_points` landed in 0018 and `record_receipt_visit` in 0023,
+ * both AFTER the last regeneration of src/lib/supabase/types.ts (which already
+ * carries every 0017 table but neither function), so the generated
+ * `Database["public"]["Functions"]` union does not name them yet. These
+ * structural overloads are the two signatures verbatim and are the single
+ * place the client is narrowed; regenerating the types deletes them.
+ */
+interface ReceiptRpcClient {
+  rpc(name: "award_receipt_points", args: AwardReceiptPointsArgs): PromiseLike<RpcResponse>;
+  rpc(name: "record_receipt_visit", args: RecordReceiptVisitArgs): PromiseLike<RpcResponse>;
+}
+
+/**
+ * Every P0001 message 0018 and 0023 raise, verified against the migrations
+ * line by line. 0023 deliberately introduces no new string: it reuses
+ * RECEIPT_NOT_AWARDABLE, AWARD_RECEIPT_ID_REQUIRED and CUSTOMER_RECORD_MISSING
+ * so both RPCs share one taxonomy and one severity map.
+ *
+ * Each one is a distinct operational fact, and none of them may take a caller
+ * down: the receipt is already 'approved' in the database by the time either
+ * RPC is called, so the worst case is an approved receipt that needs support
+ * attention, which is recoverable, whereas a thrown error would strand the
+ * whole job (or, for the review service, lose the reviewer's decision after it
+ * was already persisted).
  */
 export const AWARD_ERROR_HANDLING: Record<string, AwardErrorSeverity> = {
   // The idempotent case: a replayed job, or a race between two workers. The
@@ -603,6 +629,52 @@ export const AWARD_ERROR_HANDLING: Record<string, AwardErrorSeverity> = {
 };
 
 /**
+ * What a refused RPC costs, and how it is recorded. Shared by both calls
+ * because the consequences are identical: nothing was rolled back, the receipt
+ * keeps status='approved', and the operator needs to find it later.
+ *
+ * `notePrefix` is the only difference, and it exists so support can tell which
+ * half failed: `award_failed:` means no ledger row, `visit_failed:` means no
+ * CRM counter movement. Both leave `processed_at` null on an approved row,
+ * which 0018 calls the difference between "approved and paid" and "approved,
+ * award pending" and 0023 keeps meaning the same thing.
+ */
+async function refuseRpc(input: {
+  deps: AwardDeps;
+  receiptId: string;
+  error: PostgrestFailure;
+  notePrefix: string;
+}): Promise<AwardResult> {
+  const { deps, receiptId, error, notePrefix } = input;
+  const severity = AWARD_ERROR_HANDLING[error.message] ?? "error";
+  const line = `[receipts/award] ${notePrefix} for receipt ${receiptId}: ${error.message}`;
+  if (severity === "info") {
+    console.info(line);
+  } else if (severity === "warn") {
+    console.warn(line);
+  } else {
+    console.error(line, error);
+  }
+
+  // Only RECEIPT_ALREADY_AWARDED is benign; annotating it would put a scary
+  // reject_note on a receipt that is correctly paid.
+  if (severity !== "info") {
+    const { error: noteError } = await deps.supabase
+      .from("receipts")
+      .update({ reject_note: `${notePrefix}:${error.message}` })
+      .eq("id", receiptId);
+    if (noteError !== null) {
+      console.error(
+        `[receipts/award] could not annotate the failed ${notePrefix} of ${receiptId}`,
+        noteError,
+      );
+    }
+  }
+
+  return { kind: "refused", code: error.message, severity };
+}
+
+/**
  * The MONEY write. Everything before this point has been reversible; this is
  * the point where a consumer's balance changes.
  *
@@ -611,18 +683,25 @@ export const AWARD_ERROR_HANDLING: Record<string, AwardErrorSeverity> = {
  * lock and raises RECEIPT_NOT_AWARDABLE otherwise. See the module header for
  * why that write belongs to the caller.
  *
- * ZERO POINTS DELIBERATELY SKIPS THE RPC. 0018 step 1 raises
- * AWARD_POINTS_INVALID for `p_points <= 0`, and it is right to: a zero-point
- * earn row would violate the ledger's `points <> 0` check and would say
- * nothing. But zero is a legitimate outcome here, not a failure - a business
- * with no active base rule, an earning floor the receipt does not clear
- * (`min_amount_centavos`), or a tier table that stops below this amount all
- * price a real purchase at nothing. The receipt stays APPROVED because it is
- * approved: it is a genuine, validated purchase that belongs in the consumer's
- * history, in `receipts_biz_status_idx` reporting, and in the store's
- * analytics. Calling the RPC to have it refuse would turn a normal
- * configuration into an error log and, worse, would tempt someone to "fix" it
- * by rejecting the receipt.
+ * ZERO POINTS SKIPS THE LEDGER AND RECORDS THE VISIT INSTEAD. 0018 step 1
+ * raises AWARD_POINTS_INVALID for `p_points <= 0`, and it is right to: a
+ * zero-point earn row would violate the ledger's `points <> 0` check and would
+ * say nothing. But zero is a legitimate outcome here, not a failure - a
+ * business with no active base rule, an earning floor the receipt does not
+ * clear (`min_amount_centavos`), or a tier table that stops below this amount
+ * all price a real purchase at nothing. The receipt stays APPROVED because it
+ * is approved: it is a genuine, validated purchase that belongs in the
+ * consumer's history, in `receipts_biz_status_idx` reporting, and in the
+ * store's analytics.
+ *
+ * What it must NOT do is skip the CRM half. Every `business_customers` counter
+ * used to be maintained only inside 0018 step 6, so a tenant with no base rule
+ * accumulated approved receipts whose pair rows never advanced: a wrong
+ * customer list, a wrong lifetime spend, a wrong last-visit sort, and - because
+ * `visit_count` stayed 0 - an `isFirstVisit` that was permanently true, so the
+ * day that owner configured a `first_visit` bonus EVERY existing customer would
+ * collect it. `record_receipt_visit` (0023) performs exactly that maintenance
+ * with no ledger write, and this is the path that calls it.
  *
  * NEVER THROWS, for either caller.
  */
@@ -632,16 +711,21 @@ export async function awardPoints(input: {
   plan: AwardPlan;
 }): Promise<AwardResult> {
   const { deps, receiptId, plan } = input;
-  const { supabase } = deps;
+  const client = deps.supabase as unknown as ReceiptRpcClient;
 
   if (plan.points <= 0) {
+    const { error } = await client.rpc("record_receipt_visit", {
+      p_receipt_id: receiptId,
+    });
+    if (error !== null) {
+      return refuseRpc({ deps, receiptId, error, notePrefix: "visit_failed" });
+    }
     console.info(
-      `[receipts/award] receipt ${receiptId} priced at 0 points; approved without a ledger row`,
+      `[receipts/award] receipt ${receiptId} priced at 0 points; visit recorded without a ledger row`,
     );
     return { kind: "skipped_zero_points" };
   }
 
-  const client = supabase as unknown as AwardRpcClient;
   const { data, error } = await client.rpc("award_receipt_points", {
     p_receipt_id: receiptId,
     p_points: plan.points,
@@ -650,46 +734,20 @@ export async function awardPoints(input: {
     p_expires_at: plan.expiresAt,
   });
 
-  if (error === null) {
-    console.info(
-      `[receipts/award] receipt ${receiptId} awarded ${plan.points} points (ledger row ${String(data)})`,
-    );
-    return {
-      kind: "awarded",
-      points: plan.points,
-      transactionId: typeof data === "string" ? data : null,
-    };
+  if (error !== null) {
+    return refuseRpc({ deps, receiptId, error, notePrefix: "award_failed" });
   }
 
-  const severity = AWARD_ERROR_HANDLING[error.message] ?? "error";
-  const line = `[receipts/award] award refused for receipt ${receiptId}: ${error.message}`;
-  if (severity === "info") {
-    console.info(line);
-  } else if (severity === "warn") {
-    console.warn(line);
-  } else {
-    console.error(line, error);
-  }
-
-  // Nothing is rolled back and the receipt keeps status='approved'. Only
-  // RECEIPT_ALREADY_AWARDED is benign; the rest leave an approved receipt with
-  // no ledger row, which `processed_at is null` makes findable - that column
-  // is exactly what 0018 calls the difference between "approved and paid" and
-  // "approved, award pending".
-  if (severity !== "info") {
-    const { error: noteError } = await supabase
-      .from("receipts")
-      .update({ reject_note: `award_failed:${error.message}` })
-      .eq("id", receiptId);
-    if (noteError !== null) {
-      console.error(
-        `[receipts/award] could not annotate the failed award of ${receiptId}`,
-        noteError,
-      );
-    }
-  }
-
-  return { kind: "refused", code: error.message, severity };
+  // 0018 step 6b keeps the CRM counters in the same transaction as the ledger
+  // row, so the awarding path needs no second call.
+  console.info(
+    `[receipts/award] receipt ${receiptId} awarded ${plan.points} points (ledger row ${String(data)})`,
+  );
+  return {
+    kind: "awarded",
+    points: plan.points,
+    transactionId: typeof data === "string" ? data : null,
+  };
 }
 
 /**
@@ -703,8 +761,9 @@ export async function awardPoints(input: {
  * corrected values.
  *
  * The pipeline calls the two halves separately instead, because it has to know
- * whether points are due BEFORE it writes the row (0018 step 7 owns
- * `processed_at` on the awarding path). This function is exactly
+ * whether points are due BEFORE it writes the row. Either way `processed_at`
+ * belongs to the RPC (0018 step 7, 0023 step 3), so the caller leaves it null
+ * on an approved receipt. This function is exactly
  * `awardPoints(await priceReceipt(...))` and duplicates none of it.
  */
 export async function awardApprovedReceipt(input: {

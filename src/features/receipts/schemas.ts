@@ -49,3 +49,72 @@ export const receiptDetailParamsSchema = z.object({
 });
 
 export type ReceiptDetailParams = z.infer<typeof receiptDetailParamsSchema>;
+
+// ---------------------------------------------------------------------------
+// Human review (doc 36 Stage 9 "Human review queue", doc 37 review queues)
+// ---------------------------------------------------------------------------
+//
+// These live here rather than in server/review.ts so the decision FORM and the
+// service validate against one shape: the form is a client component and
+// server/review.ts is `server-only`, so a schema defined there could never be
+// imported by the thing that produces the payload.
+
+/**
+ * Exactly the `receipts.reject_reason` check constraint from 0017_receipts.sql,
+ * which doc 36 Stage 9 names as the reviewer's reason list ("reason from
+ * `receipt_reject_reason` enum + `reject_note`").
+ */
+export const receiptRejectReasonSchema = z.enum([
+  "duplicate",
+  "unreadable",
+  "wrong_business",
+  "too_old",
+  "fraud_suspected",
+  "manual",
+]);
+
+/** int4, the domain of every `*_centavos` column on `receipts` (0017). */
+const MAX_CENTAVOS = 2_147_483_647;
+
+const centavosSchema = z.number().int().min(0).max(MAX_CENTAVOS);
+
+/**
+ * One corrected line item. `sort` is deliberately absent: it is the position in
+ * this array, so a client cannot submit two items claiming the same slot.
+ * `qty` matches `receipt_line_items.qty numeric(8,3)` (0017).
+ */
+export const reviewLineItemSchema = z.object({
+  raw_text: z.string().trim().min(1).max(500),
+  qty: z.number().min(0).max(99_999.999).nullable(),
+  unit_price_centavos: centavosSchema.nullable(),
+  line_total_centavos: centavosSchema.nullable(),
+});
+
+export type ReviewLineItem = z.infer<typeof reviewLineItemSchema>;
+
+/**
+ * The editable field form of doc 36 Stage 9's UI contract: "merchant, number,
+ * date, subtotal/tax/total, line items, pre-filled with parsed values".
+ *
+ * EVERY scalar key is REQUIRED (nullable, but present). The form is pre-filled
+ * with what the parser found, so it always has a value to send for each field,
+ * and a partial patch would be ambiguous between "the reviewer left this alone"
+ * and "the reviewer cleared it". `line_items` is the one optional key, because
+ * "I did not touch the line items" and "the receipt has none" are genuinely
+ * different: absent leaves the parsed rows as they are, `[]` clears them.
+ *
+ * `total_centavos` is the only non-nullable field. It is the number the points
+ * engine prices, and doc 36 Stage 8's readability rule already refuses a
+ * receipt without one; approving a totalless receipt would silently award zero.
+ */
+export const reviewFieldsSchema = z.object({
+  merchant_name: z.string().trim().min(1).max(200).nullable(),
+  receipt_number: z.string().trim().min(1).max(100).nullable(),
+  receipt_date: z.coerce.date().nullable(),
+  subtotal_centavos: centavosSchema.nullable(),
+  tax_centavos: centavosSchema.nullable(),
+  total_centavos: centavosSchema,
+  line_items: z.array(reviewLineItemSchema).max(200).optional(),
+});
+
+export type ReviewFields = z.infer<typeof reviewFieldsSchema>;
