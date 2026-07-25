@@ -61,6 +61,36 @@ const serverEnvSchema = z.object({
   // degrade to documented defaults and log rather than throwing, so a
   // key-less dev environment still runs the pipeline.
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(20).optional(),
+  // Optional, and optional for the same "credentials land last" reason as the
+  // OCR pair above. HF_TOKEN authenticates two Hugging Face calls: the VLM
+  // transcription and the template layout embedding. With it unset,
+  // src/features/receipts/embed.ts returns null from embedText and template
+  // retrieval falls back to the existing heuristic selection, so the scan
+  // still completes. An embedding outage must never fail a receipt.
+  HF_TOKEN: z.string().min(1).optional(),
+  // Optional override for the embedding model. The DEFAULT lives in
+  // src/features/receipts/embed.ts, next to EMBEDDING_DIMENSIONS, because the
+  // model and the vector width are one decision and not two: setting this to a
+  // model with a different output dimension invalidates every embedding
+  // already stored in the vector(384) column. See that file's header.
+  HF_EMBED_MODEL: z.string().min(1).optional(),
+  // Optional, and it must stay optional. src/lib/ai/llm.ts is the single LLM
+  // entry point (docs/30-modules/38-ai-rag-platform.md section 1) and it fails
+  // soft by contract: with no key it returns null and the receipt pipeline's
+  // deterministic parse tiers stand alone, exactly as they do today. Making
+  // this required would take down auth, rewards and the whole app over a
+  // missing credential for an advisory feature, and would invert the one
+  // safety property that keeps the LLM from being load-bearing.
+  //
+  // Not cross-validated against GROQ_MODEL, for the same reason the OCR pair
+  // above is not: a refinement here throws for every getServerEnv() caller.
+  GROQ_API_KEY: z.string().min(20).optional(),
+  // The model id. Validated against the registry in src/lib/ai/models.ts
+  // rather than here: this schema has no business knowing which models exist,
+  // and an unregistered value there degrades to the task default with a
+  // warning instead of throwing. An unregistered model has no price, so
+  // accepting one silently would mean an unmetered call.
+  GROQ_MODEL: z.string().min(1).optional(),
 });
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;
@@ -85,6 +115,10 @@ export function getServerEnv(): ServerEnv {
     OCR_SERVICE_URL: emptyToUndefined(process.env.OCR_SERVICE_URL),
     OCR_SERVICE_TOKEN: emptyToUndefined(process.env.OCR_SERVICE_TOKEN),
     SUPABASE_SERVICE_ROLE_KEY: emptyToUndefined(process.env.SUPABASE_SERVICE_ROLE_KEY),
+    HF_TOKEN: emptyToUndefined(process.env.HF_TOKEN),
+    HF_EMBED_MODEL: emptyToUndefined(process.env.HF_EMBED_MODEL),
+    GROQ_API_KEY: emptyToUndefined(process.env.GROQ_API_KEY),
+    GROQ_MODEL: emptyToUndefined(process.env.GROQ_MODEL),
   });
 
   if (!parsed.success) {
