@@ -122,13 +122,20 @@ create trigger touch_promotions before update on public.promotions
 create index promotions_business_idx on public.promotions (business_id);
 
 -- P1 + public read: anyone sees non-deleted promotion payloads. promotions has
--- no status/is_active column of its own; the parent campaign gates visibility
--- (public campaign reads are active-only) and the app query layer always joins
--- through campaigns. Same tradeoff as catalog child rows (variants/add-ons),
--- with the composite FK guaranteeing the row belongs to its tenant's campaign.
+-- has no status/is_active column of its own, so gate public visibility on the
+-- parent campaign being active (an EXISTS subquery; acceptable here because a
+-- business has only a handful of campaigns, unlike the points/receipt hot paths
+-- doc 12's single-table rule targets). Without this a direct anon GET would leak
+-- draft/scheduled/paused offer payloads. The composite FK still pins tenancy.
 create policy promotions_public_select on public.promotions
   for select to anon, authenticated
-  using (deleted_at is null);
+  using (
+    deleted_at is null
+    and exists (
+      select 1 from public.campaigns c
+      where c.id = campaign_id and c.status = 'active' and c.deleted_at is null
+    )
+  );
 -- P1: staff of the tenant read their promotion payloads in any state
 create policy promotions_staff_select on public.promotions
   for select to authenticated
@@ -391,13 +398,17 @@ create trigger touch_loyalty_programs before update on public.loyalty_programs
 create index loyalty_programs_business_idx on public.loyalty_programs (business_id);
 create index loyalty_programs_reward_idx on public.loyalty_programs (reward_id);
 
--- P1 + public read: anyone sees non-deleted programs. loyalty_programs has no
--- is_active/status column of its own; the parent campaign gates visibility
--- (public campaign reads are active-only) and the app query layer joins
--- through campaigns. Same tradeoff as promotions and catalog child rows.
+-- P1 + public read: gate on the parent campaign being active (same reasoning as
+-- promotions_public_select) so draft/inactive program payloads never leak to anon.
 create policy loyalty_programs_public_select on public.loyalty_programs
   for select to anon, authenticated
-  using (deleted_at is null);
+  using (
+    deleted_at is null
+    and exists (
+      select 1 from public.campaigns c
+      where c.id = campaign_id and c.status = 'active' and c.deleted_at is null
+    )
+  );
 -- P1: staff of the tenant read their programs in any state
 create policy loyalty_programs_staff_select on public.loyalty_programs
   for select to authenticated
@@ -497,8 +508,9 @@ create index pt_actor_idx    on public.points_transactions (actor_id);
 
 -- ---------------------------------------------------------------- immutability
 -- Belt and suspenders per doc 23 integrity table: privilege revocation stops
--- app roles; the trigger stops everyone else (service_role, table owner, or a
--- future misgranted role). Corrections are compensating entries (reversal/adjust).
+-- app roles for row DML; the row trigger stops anyone who still holds
+-- update/delete (service_role, table owner). Corrections are compensating
+-- entries (reversal/adjust), never mutations.
 create or replace function private.points_transactions_append_only()
 returns trigger
 language plpgsql
@@ -513,9 +525,28 @@ create trigger points_transactions_append_only
   before update or delete on public.points_transactions
   for each row execute function private.points_transactions_append_only();
 
+-- A row-level trigger does NOT fire on TRUNCATE, so a bulk wipe would bypass the
+-- guard above. Block it two ways: revoke the privilege from every app role and
+-- add a statement-level BEFORE TRUNCATE trigger that raises (catches the table
+-- owner / any future misgrant).
+create or replace function private.points_transactions_no_truncate()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  raise exception 'points_transactions cannot be truncated (append-only ledger)';
+end
+$$;
+
+create trigger points_transactions_no_truncate
+  before truncate on public.points_transactions
+  for each statement execute function private.points_transactions_no_truncate();
+
 -- Supabase default privileges grant all on new public tables to app roles;
--- strip update/delete from every one of them (service_role included, doc 23).
-revoke update, delete on public.points_transactions from anon, authenticated, service_role;
+-- strip update/delete/truncate from every one of them (service_role included,
+-- doc 23: no row mutation for ANY role).
+revoke update, delete, truncate on public.points_transactions from anon, authenticated, service_role;
 
 -- P3: consumer sees own ledger rows
 create policy pt_consumer_select on public.points_transactions
