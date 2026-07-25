@@ -9,10 +9,11 @@ import { BarChart } from "./bar-chart";
 import { MOCK_KPIS, MOCK_WEEK_VISITS } from "@/lib/mock/business";
 
 describe("Sidebar", () => {
-  it("renders 6 nav items with accessible names", () => {
+  it("renders the nav items with accessible names", () => {
     render(<Sidebar mobileOpen={false} onMobileClose={() => {}} />);
     for (const label of [
       "Dashboard",
+      "Receipts",
       "Campaigns",
       "Menu",
       "Customers",
@@ -21,6 +22,26 @@ describe("Sidebar", () => {
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
+  });
+
+  it("badges the Receipts entry with the pending review count", () => {
+    render(<Sidebar mobileOpen={false} onMobileClose={() => {}} pendingReviewCount={4} />);
+
+    const receipts = screen.getByRole("link", { name: /Receipts/ });
+    expect(receipts).toHaveAttribute("href", "/business/receipts");
+    // The visible glyph is a bare number; the accessible name says what it counts.
+    expect(receipts).toHaveAccessibleName("Receipts4 receipts waiting for review");
+  });
+
+  it("caps the badge rather than letting a backlog break the rail", () => {
+    render(<Sidebar mobileOpen={false} onMobileClose={() => {}} pendingReviewCount={140} />);
+    expect(screen.getByText("99+")).toBeInTheDocument();
+  });
+
+  it("shows no badge at all when nothing is waiting, which is the steady state", () => {
+    render(<Sidebar mobileOpen={false} onMobileClose={() => {}} pendingReviewCount={0} />);
+    expect(screen.getByRole("link", { name: "Receipts" })).toBeInTheDocument();
+    expect(screen.queryByText(/receipts waiting for review/)).not.toBeInTheDocument();
   });
 });
 

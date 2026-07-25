@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import { redirect } from "next/navigation";
 import { PortalShell } from "@/components/business/portal-shell";
+import { resolveReviewerContext } from "@/features/receipts/review/access";
+import { countPendingReview } from "@/features/receipts/review/queue";
 import { createClient } from "@/lib/supabase/server";
 
 // Dashboard chrome (sidebar + topbar) for every /business/* portal page
@@ -48,5 +50,16 @@ export default async function PortalLayout({ children }: { children: ReactNode }
     redirect("/business/onboarding");
   }
 
-  return <PortalShell>{children}</PortalShell>;
+  // The sidebar's Receipts badge (doc 36 Stage 9: the queue-age and backlog
+  // are surfaced portal-wide, not just on the queue screen).
+  //
+  // `resolveReviewerContext` returns null for an active member whose role
+  // cannot review receipts (marketing, staff), and the badge is simply absent
+  // for them. It is memoized per request, so the page underneath this layout
+  // reuses this resolution rather than repeating the session round trip.
+  const reviewer = await resolveReviewerContext();
+  const pendingReviewCount =
+    reviewer === null ? 0 : await countPendingReview(reviewer.businessId);
+
+  return <PortalShell pendingReviewCount={pendingReviewCount}>{children}</PortalShell>;
 }

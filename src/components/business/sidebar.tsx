@@ -7,9 +7,12 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Logo } from "@/components/brand/logo";
 import { cn } from "@/lib/utils";
 
+const RECEIPTS_HREF = "/business/receipts";
+
 const NAV_ITEMS = [
   { href: "/business/dashboard", label: "Dashboard", icon: "space_dashboard" },
   { href: "/business/redeem", label: "Redeem", icon: "qr_code_scanner" },
+  { href: RECEIPTS_HREF, label: "Receipts", icon: "receipt_long" },
   { href: "/business/campaigns", label: "Campaigns", icon: "campaign" },
   { href: "/business/menu", label: "Menu", icon: "restaurant_menu" },
   { href: "/business/customers", label: "Customers", icon: "group" },
@@ -17,23 +20,37 @@ const NAV_ITEMS = [
   { href: "/business/settings", label: "Settings", icon: "settings" },
 ] as const;
 
+/** Above this the badge reads "99+", matching PENDING_COUNT_CAP in the queue reader. */
+const BADGE_CAP = 99;
+
 export interface SidebarProps {
   /** Whether the mobile drawer variant is open. Desktop rail always renders. */
   mobileOpen: boolean;
   onMobileClose: () => void;
+  /**
+   * Receipts waiting on a human decision at the caller's business (doc 36
+   * Stage 9's queue, resolved server-side in the portal layout). Zero renders
+   * no badge at all: an empty review queue is the steady state and a permanent
+   * "0" would train people to ignore the one place a number matters.
+   */
+  pendingReviewCount?: number;
 }
 
 function NavList({
   pathname,
+  pendingReviewCount = 0,
   onNavigate = () => {},
 }: {
   pathname: string;
+  pendingReviewCount?: number;
   onNavigate?: () => void;
 }) {
   return (
     <ul className="flex flex-col gap-1">
       {NAV_ITEMS.map((item) => {
         const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+        const badge = item.href === RECEIPTS_HREF && pendingReviewCount > 0;
+        const badgeLabel = pendingReviewCount > BADGE_CAP ? `${BADGE_CAP}+` : String(pendingReviewCount);
         return (
           <li key={item.href}>
             <Link
@@ -55,6 +72,16 @@ function NavList({
                 {item.icon}
               </span>
               {item.label}
+              {badge && (
+                <span
+                  // Error tokens, not tertiary: Mango is reserved for rewards
+                  // language, and a review backlog is not a reward.
+                  className="ml-auto inline-flex min-w-6 items-center justify-center rounded-full bg-error-container px-2 py-0.5 font-mono text-label-s text-on-error-container"
+                >
+                  <span className="sr-only">{`${badgeLabel} receipts waiting for review`}</span>
+                  <span aria-hidden>{badgeLabel}</span>
+                </span>
+              )}
             </Link>
           </li>
         );
@@ -70,7 +97,7 @@ function NavList({
  * scoped to the drawer, body scroll lock while open, and focus returning to
  * the trigger via `onMobileClose`.
  */
-export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
+export function Sidebar({ mobileOpen, onMobileClose, pendingReviewCount = 0 }: SidebarProps) {
   const pathname = usePathname();
   const reduce = useReducedMotion();
   const closeButtonRef = React.useRef<HTMLButtonElement>(null);
@@ -140,7 +167,7 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
         >
           <Logo variant="lockup" />
         </Link>
-        <NavList pathname={pathname} />
+        <NavList pathname={pathname} pendingReviewCount={pendingReviewCount} />
       </nav>
 
       {/* Mobile drawer */}
@@ -194,7 +221,11 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
                   </span>
                 </button>
               </div>
-              <NavList pathname={pathname} onNavigate={onMobileClose} />
+              <NavList
+                pathname={pathname}
+                pendingReviewCount={pendingReviewCount}
+                onNavigate={onMobileClose}
+              />
             </motion.nav>
           </>
         )}

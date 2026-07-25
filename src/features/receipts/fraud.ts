@@ -79,7 +79,16 @@ function roundComposite(value: number): number {
 }
 
 // composite = min(1.0, sum_i score_i x weight(severity_i)).
-export function scoreSignals(signals: readonly FraudSignal[]): number {
+//
+// The parameter is the SEVERITY/SCORE PAIR rather than a whole `FraudSignal`
+// because that pair is all the formula reads, and the review UI scores rows it
+// has loaded back out of `fraud_signals` (where `signal` is a database `text`,
+// not this module's narrowed union). Widening the parameter keeps the
+// composite arithmetic in exactly one place instead of gaining a second
+// implementation on the read side.
+export function scoreSignals(
+  signals: readonly Pick<FraudSignal, "severity" | "score">[],
+): number {
   let total = 0;
   for (const item of signals) {
     total += item.score * SEVERITY_WEIGHT[item.severity];

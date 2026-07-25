@@ -8,6 +8,7 @@ import { Topbar } from "@/components/business/topbar";
 const PAGE_TITLES: Record<string, string> = {
   "/business/dashboard": "Dashboard",
   "/business/redeem": "Redeem",
+  "/business/receipts": "Receipts",
   "/business/campaigns": "Campaigns",
   "/business/menu": "Menu",
   "/business/customers": "Customers",
@@ -21,9 +22,20 @@ const PAGE_TITLES: Record<string, string> = {
  * Kept separate from the route layout so the layout and its page children
  * stay server components.
  */
-export function PortalShell({ children }: { children: React.ReactNode }) {
+export function PortalShell({
+  children,
+  pendingReviewCount = 0,
+}: {
+  children: React.ReactNode;
+  /** Resolved server-side in the portal layout; feeds the sidebar badge. */
+  pendingReviewCount?: number;
+}) {
   const pathname = usePathname();
-  const title = PAGE_TITLES[pathname] ?? "Dashboard";
+  // The decision screen is a child route, so the topbar title has to fall back
+  // along the path rather than matching it exactly.
+  const title =
+    PAGE_TITLES[pathname] ??
+    (pathname.startsWith("/business/receipts") ? "Receipts" : "Dashboard");
 
   const [mobileNavOpen, setMobileNavOpen] = React.useState(false);
   const menuButtonRef = React.useRef<HTMLButtonElement>(null);
@@ -35,7 +47,11 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-dvh bg-surface text-on-surface">
-      <Sidebar mobileOpen={mobileNavOpen} onMobileClose={closeMobileNav} />
+      <Sidebar
+        mobileOpen={mobileNavOpen}
+        onMobileClose={closeMobileNav}
+        pendingReviewCount={pendingReviewCount}
+      />
       <div className="flex min-h-dvh flex-col lg:pl-60">
         <Topbar
           title={title}
