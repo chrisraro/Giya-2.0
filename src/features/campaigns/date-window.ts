@@ -75,7 +75,7 @@ function offsetMinutesAt(at: Date, timeZone: string): number {
 }
 
 /**
- * The UTC instant corresponding to `hour:00:00` wall-clock time on
+ * The UTC instant corresponding to `hour:minute:00` wall-clock time on
  * `dateString`, as read in `timeZone`. This never consults the host's own
  * timezone (unlike `new Date("YYYY-MM-DDT00:00:00")`, which resolves in
  * whatever zone the JS engine is running in) - `timeZone` is the only zone
@@ -86,10 +86,19 @@ function offsetMinutesAt(at: Date, timeZone: string): number {
  * transition landing near the target instant still resolves against the
  * offset that instant actually falls under. Irrelevant for Asia/Manila
  * (UTC+8, no DST) but keeps this correct for any IANA zone.
+ *
+ * Exported because the receipt parser (`../receipts/parse.ts`) needs the same
+ * primitive at minute precision: a receipt printed "07/24/2026 13:42" is a
+ * Manila wall-clock reading that must land on one specific UTC instant.
  */
-function zonedWallTimeToUtc(dateString: string, hour: number, timeZone: string): Date {
+export function zonedWallTimeToUtc(
+  dateString: string,
+  hour: number,
+  minute: number,
+  timeZone: string,
+): Date {
   const { year, month, day } = parseDateString(dateString);
-  const naiveUtcMs = Date.UTC(year, month - 1, day, hour, 0, 0, 0);
+  const naiveUtcMs = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
 
   const firstOffset = offsetMinutesAt(new Date(naiveUtcMs), timeZone);
   const candidateMs = naiveUtcMs - firstOffset * 60_000;
@@ -104,7 +113,7 @@ function zonedWallTimeToUtc(dateString: string, hour: number, timeZone: string):
  * as inclusive.
  */
 export function startOfDayInZone(dateString: string, timeZone: string): Date {
-  return zonedWallTimeToUtc(dateString, 0, timeZone);
+  return zonedWallTimeToUtc(dateString, 0, 0, timeZone);
 }
 
 /**
@@ -116,5 +125,5 @@ export function startOfDayInZone(dateString: string, timeZone: string): Date {
  * from 00:00:00 on Aug 2 onward.
  */
 export function endOfDayExclusiveInZone(dateString: string, timeZone: string): Date {
-  return zonedWallTimeToUtc(nextCalendarDateString(dateString), 0, timeZone);
+  return zonedWallTimeToUtc(nextCalendarDateString(dateString), 0, 0, timeZone);
 }

@@ -20,6 +20,20 @@ export type PublicBusiness = {
   businessTypeName: string | null;
 };
 
+/**
+ * A business reduced to what a picker row needs: the name, the avatar, and
+ * enough context to tell two similarly named shops apart. Used by the `/scan`
+ * store chooser; deliberately narrower than `PublicBusiness` so a list read
+ * never pulls cover images and opening hours it will not render.
+ */
+export type BusinessSummary = {
+  id: string;
+  name: string;
+  logoUrl: string | null;
+  cityName: string | null;
+  businessTypeName: string | null;
+};
+
 export type PublicVariant = {
   id: string;
   name: string;
@@ -116,6 +130,84 @@ export async function getBusinessBySlug(slug: string): Promise<PublicBusiness | 
     cityName,
     businessTypeName: businessType?.name ?? null,
   };
+}
+
+export interface ListActiveBusinessesArgs {
+  /**
+   * A name fragment, matched case-insensitively. MUST already have been
+   * through `sanitiseStoreQuery` (src/features/receipts/scan-entry.ts), which
+   * is what strips `%` and `_` so a consumer cannot smuggle `ilike` wildcards
+   * or PostgREST punctuation into this filter.
+   */
+  readonly query?: string | undefined;
+  /** Restricts the read to these ids. Still active-only: an id is not a bypass. */
+  readonly ids?: readonly string[] | undefined;
+  /** Hard ceiling on rows returned. The caller decides what "too many" means. */
+  readonly limit: number;
+}
+
+/**
+ * Active, non-deleted businesses, alphabetically. Same exposure path as
+ * `getBusinessBySlug`: the `businesses_public_select` policy from
+ * 0002_identity.sql (`status = 'active' and deleted_at is null`, granted to
+ * anon and authenticated) is the real gate, and the `.eq`/`.is` filters below
+ * are defense in depth exactly as elsewhere in this file. Nothing here reads a
+ * column a signed-out visitor cannot already read from `/b/[slug]`.
+ */
+export async function listActiveBusinesses(
+  args: ListActiveBusinessesArgs,
+): Promise<BusinessSummary[]> {
+  // An empty id list means "restrict to nothing", not "restrict to nothing in
+  // particular": without this the `.in()` would be dropped and the query would
+  // widen to every business.
+  if (args.ids !== undefined && args.ids.length === 0) return [];
+
+  const supabase = await createClient();
+
+  let select = supabase
+    .from("businesses")
+    .select("id, name, logo_url, city_id, business_type_id")
+    .eq("status", "active")
+    .is("deleted_at", null)
+    .order("name", { ascending: true })
+    .limit(args.limit);
+
+  if (args.ids !== undefined) select = select.in("id", [...args.ids]);
+  if (args.query) select = select.ilike("name", `%${args.query}%`);
+
+  const { data, error } = await select;
+  if (error || !data || data.length === 0) return [];
+
+  // Two `.in()` lookups rather than one per row, mirroring the id -> name
+  // resolution in getBusinessBySlug (the generated Database types do not model
+  // embedded joins, so PostgREST embeds are not used anywhere in this repo).
+  const cityIds = Array.from(
+    new Set(data.flatMap((business) => (business.city_id ? [business.city_id] : []))),
+  );
+  const typeIds = Array.from(new Set(data.map((business) => business.business_type_id)));
+
+  const [cityNames, typeNames] = await Promise.all([
+    refNames(supabase, "ref_cities", cityIds),
+    refNames(supabase, "ref_business_types", typeIds),
+  ]);
+
+  return data.map((business) => ({
+    id: business.id,
+    name: business.name,
+    logoUrl: business.logo_url,
+    cityName: business.city_id ? (cityNames.get(business.city_id) ?? null) : null,
+    businessTypeName: typeNames.get(business.business_type_id) ?? null,
+  }));
+}
+
+async function refNames(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  table: "ref_cities" | "ref_business_types",
+  ids: readonly string[],
+): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { data } = await supabase.from(table).select("id, name").in("id", [...ids]);
+  return new Map((data ?? []).map((row) => [row.id, row.name]));
 }
 
 /**

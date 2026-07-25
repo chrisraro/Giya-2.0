@@ -41,9 +41,33 @@ const serverEnvSchema = z.object({
   UPSTASH_REDIS_REST_URL: z.string().url(),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(20),
   REDEMPTION_TOKEN_SECRET: z.string().min(32),
+  // Optional: the OCR container (docs/30-modules/36-receipt-ocr-pipeline.md
+  // Stage 4) and its credentials arrive at the end of the build. With
+  // OCR_SERVICE_URL unset the receipts pipeline selects the deterministic
+  // stub provider, so the whole app runs, builds and tests without either
+  // key. Setting both switches to the real container with no code change.
+  //
+  // The pair is deliberately NOT cross-validated here. A refinement on this
+  // schema would make an OCR misconfiguration throw for every getServerEnv()
+  // caller, taking down auth and rewards over a receipts-only problem. The
+  // pairing rule ("URL without token is a misconfiguration") is enforced in
+  // src/features/receipts/server/ocr/provider.ts, where the blast radius is
+  // exactly the pipeline that needs it.
+  OCR_SERVICE_URL: z.string().url().optional(),
+  OCR_SERVICE_TOKEN: z.string().min(1).optional(),
+  // Optional for the same reason: the service-role key is a credential and
+  // credentials land at the end of the build. Server-side readers that need
+  // it (the receipt settings loader, later the processing orchestrator)
+  // degrade to documented defaults and log rather than throwing, so a
+  // key-less dev environment still runs the pipeline.
+  SUPABASE_SERVICE_ROLE_KEY: z.string().min(20).optional(),
 });
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;
+
+function emptyToUndefined(value: string | undefined): string | undefined {
+  return value === undefined || value.trim().length === 0 ? undefined : value;
+}
 
 let cachedServerEnv: ServerEnv | undefined;
 
@@ -56,6 +80,11 @@ export function getServerEnv(): ServerEnv {
     UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL,
     UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN,
     REDEMPTION_TOKEN_SECRET: process.env.REDEMPTION_TOKEN_SECRET,
+    // An empty string is how a platform dashboard records "set but blank";
+    // for an optional key that must read as absent, not as an invalid URL.
+    OCR_SERVICE_URL: emptyToUndefined(process.env.OCR_SERVICE_URL),
+    OCR_SERVICE_TOKEN: emptyToUndefined(process.env.OCR_SERVICE_TOKEN),
+    SUPABASE_SERVICE_ROLE_KEY: emptyToUndefined(process.env.SUPABASE_SERVICE_ROLE_KEY),
   });
 
   if (!parsed.success) {
