@@ -12,6 +12,7 @@
     "gen:tokens": "tsx scripts/generate-md3-tokens.ts"
   },
   "dependencies": {
+    "@hcaptcha/react-hcaptcha": "^2.0.2",
     "@hookform/resolvers": "^5.4.2",
     "@material/material-color-utilities": "^0.4.0",
     "@supabase/ssr": "^0.12.3",

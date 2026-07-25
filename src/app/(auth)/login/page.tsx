@@ -3,9 +3,11 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import type HCaptcha from "@hcaptcha/react-hcaptcha";
 import { AuthCard } from "@/components/auth/auth-card";
 import { SocialButtons } from "@/components/auth/social-buttons";
 import { PasswordField } from "@/components/auth/password-field";
+import { Captcha, CAPTCHA_ENABLED } from "@/components/auth/captcha";
 import { TextField } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
@@ -31,6 +33,8 @@ function LoginPageInner() {
   const [formError, setFormError] = React.useState("");
   const [socialError, setSocialError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+  const [captchaToken, setCaptchaToken] = React.useState("");
+  const captchaRef = React.useRef<HCaptcha>(null);
   const [showExpiredNotice, setShowExpiredNotice] = React.useState(
     searchParams.get("error") === "confirm",
   );
@@ -60,11 +64,24 @@ function LoginPageInner() {
 
     if (hasError) return;
 
+    if (CAPTCHA_ENABLED && !captchaToken) {
+      setFormError("Please complete the captcha.");
+      return;
+    }
+
     setFormError("");
     setSubmitting(true);
     const supabase = createClient();
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+      options: { captchaToken },
+    });
     setSubmitting(false);
+    // Each hCaptcha token is single-use: reset the widget after every submit
+    // (success or failure) so a retry gets a fresh token.
+    captchaRef.current?.resetCaptcha();
+    setCaptchaToken("");
 
     if (error) {
       // Live E2E showed a non-Error rejection rendering as "{}"; route
@@ -166,6 +183,11 @@ function LoginPageInner() {
             Forgot password
           </Link>
         </div>
+        <Captcha
+          ref={captchaRef}
+          onVerify={setCaptchaToken}
+          onExpire={() => setCaptchaToken("")}
+        />
         {formError ? (
           <p role="alert" className="text-body-s text-error">
             {formError}

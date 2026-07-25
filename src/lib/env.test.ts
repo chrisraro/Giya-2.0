@@ -41,4 +41,26 @@ describe("env", () => {
     expect(env.NEXT_PUBLIC_SUPABASE_URL).toBe("https://example.supabase.co");
     expect(env.NEXT_PUBLIC_SUPABASE_ANON_KEY).toBe("sb_publishable_abcdefghijklmnopqrstuvwxyz");
   });
+
+  it("parses with NEXT_PUBLIC_HCAPTCHA_SITE_KEY unset (optional)", async () => {
+    vi.resetModules();
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "sb_publishable_abcdefghijklmnopqrstuvwxyz");
+    vi.stubEnv("NEXT_PUBLIC_HCAPTCHA_SITE_KEY", undefined);
+
+    const { env } = await import("./env");
+
+    expect(env.NEXT_PUBLIC_HCAPTCHA_SITE_KEY).toBeUndefined();
+  });
+
+  it("parses and exports NEXT_PUBLIC_HCAPTCHA_SITE_KEY when set", async () => {
+    vi.resetModules();
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "sb_publishable_abcdefghijklmnopqrstuvwxyz");
+    vi.stubEnv("NEXT_PUBLIC_HCAPTCHA_SITE_KEY", "10000000-ffff-ffff-ffff-000000000001");
+
+    const { env } = await import("./env");
+
+    expect(env.NEXT_PUBLIC_HCAPTCHA_SITE_KEY).toBe("10000000-ffff-ffff-ffff-000000000001");
+  });
 });

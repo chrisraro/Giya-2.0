@@ -1,14 +1,18 @@
 "use client";
 
 import * as React from "react";
+import type HCaptcha from "@hcaptcha/react-hcaptcha";
 import { Button } from "@/components/ui/button";
+import { Captcha, CAPTCHA_ENABLED } from "@/components/auth/captcha";
 
 export interface CheckEmailProps {
   email: string;
   // Returns a normalized { error } shape rather than throwing, so this
   // component never needs to know about Supabase's AuthError type; the
   // caller (the signup page) owns the actual supabase.auth.resend() call.
-  onResend: () => Promise<{ error: string | null }>;
+  // This view owns its own captcha widget (resend is gated separately from
+  // the original signUp), so the token is threaded up through this callback.
+  onResend: (captchaToken: string) => Promise<{ error: string | null }>;
 }
 
 type ResendStatus = "idle" | "sending" | "sent" | "error";
@@ -16,12 +20,22 @@ type ResendStatus = "idle" | "sending" | "sent" | "error";
 export function CheckEmail({ email, onResend }: CheckEmailProps) {
   const [status, setStatus] = React.useState<ResendStatus>("idle");
   const [errorText, setErrorText] = React.useState("");
+  const [captchaToken, setCaptchaToken] = React.useState("");
+  const captchaRef = React.useRef<HCaptcha>(null);
 
   async function handleResend() {
+    if (CAPTCHA_ENABLED && !captchaToken) {
+      setStatus("error");
+      setErrorText("Please complete the captcha.");
+      return;
+    }
+
     setStatus("sending");
     setErrorText("");
     try {
-      const { error } = await onResend();
+      const { error } = await onResend(captchaToken);
+      captchaRef.current?.resetCaptcha();
+      setCaptchaToken("");
       if (error) {
         setStatus("error");
         setErrorText(error);
@@ -29,6 +43,8 @@ export function CheckEmail({ email, onResend }: CheckEmailProps) {
       }
       setStatus("sent");
     } catch {
+      captchaRef.current?.resetCaptcha();
+      setCaptchaToken("");
       setStatus("error");
       setErrorText("Something went wrong. Try again.");
     }
@@ -48,6 +64,11 @@ export function CheckEmail({ email, onResend }: CheckEmailProps) {
         on this device to finish creating your account. If you do not see it, check your spam
         folder.
       </p>
+      <Captcha
+        ref={captchaRef}
+        onVerify={setCaptchaToken}
+        onExpire={() => setCaptchaToken("")}
+      />
       <Button
         type="button"
         variant="outlined"

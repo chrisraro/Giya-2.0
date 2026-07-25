@@ -3,10 +3,12 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import type HCaptcha from "@hcaptcha/react-hcaptcha";
 import { AuthCard } from "@/components/auth/auth-card";
 import { SocialButtons } from "@/components/auth/social-buttons";
 import { CheckEmail } from "@/components/auth/check-email";
 import { PasswordField } from "@/components/auth/password-field";
+import { Captcha, CAPTCHA_ENABLED } from "@/components/auth/captcha";
 import { TextField } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -115,6 +117,8 @@ export default function SignupPage() {
   const [socialError, setSocialError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [confirmationEmail, setConfirmationEmail] = React.useState("");
+  const [captchaToken, setCaptchaToken] = React.useState("");
+  const captchaRef = React.useRef<HCaptcha>(null);
   const roleCardRefs = React.useRef<Record<Role, HTMLDivElement | null>>({
     consumer: null,
     business: null,
@@ -158,6 +162,11 @@ export default function SignupPage() {
 
     if (hasError) return;
 
+    if (CAPTCHA_ENABLED && !captchaToken) {
+      setFormError("Please complete the captcha.");
+      return;
+    }
+
     setFormError("");
     setSubmitting(true);
     const supabase = createClient();
@@ -168,9 +177,14 @@ export default function SignupPage() {
       options: {
         data: { full_name: name, intended_role: role },
         emailRedirectTo: `${window.location.origin}/auth/callback?next=${next}`,
+        captchaToken,
       },
     });
     setSubmitting(false);
+    // Each hCaptcha token is single-use: reset the widget after every submit
+    // (success or failure) so a retry gets a fresh token.
+    captchaRef.current?.resetCaptcha();
+    setCaptchaToken("");
 
     if (error) {
       // Live E2E showed a non-Error rejection rendering as "{}"; route
@@ -196,9 +210,13 @@ export default function SignupPage() {
     router.push(next);
   }
 
-  async function handleResend() {
+  async function handleResend(resendCaptchaToken: string) {
     const supabase = createClient();
-    const { error } = await supabase.auth.resend({ type: "signup", email: confirmationEmail });
+    const { error } = await supabase.auth.resend({
+      type: "signup",
+      email: confirmationEmail,
+      options: { captchaToken: resendCaptchaToken },
+    });
     return { error: error ? toErrorMessage(error) : null };
   }
 
@@ -298,6 +316,11 @@ export default function SignupPage() {
             if (passwordError) setPasswordError("");
           }}
           {...(passwordError ? { errorText: passwordError } : {})}
+        />
+        <Captcha
+          ref={captchaRef}
+          onVerify={setCaptchaToken}
+          onExpire={() => setCaptchaToken("")}
         />
         {formError ? (
           <p role="alert" className="text-body-s text-error">
