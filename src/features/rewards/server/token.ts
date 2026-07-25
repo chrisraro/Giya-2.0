@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { jwtVerify, SignJWT } from "jose";
 
 import { getServerEnv } from "@/lib/env";
-import { getDel, redisKey, setNx } from "@/lib/redis";
+import { del, get, getDel, redisKey, set, setNx } from "@/lib/redis";
 
 // Single-use redemption tokens: a business scans a customer's claim QR, the
 // server mints a short-lived signed token, the business's confirm action
@@ -13,6 +13,16 @@ import { getDel, redisKey, setNx } from "@/lib/redis";
 // by us and has not been tampered with; the Redis jti record is what makes
 // it single-use (a valid signature alone is replayable forever, since JWTs
 // are just data - the anti-replay guarantee comes entirely from GETDEL).
+//
+// One-live-code-per-claim: refreshing the QR within the 5-minute window
+// used to leave the previous jti valid, so a customer could screenshot or
+// share several concurrently-valid codes. A "pointer" key
+// (redeem:claim:{claimId} -> current jti) tracks the single live code for a
+// claim; every mint reads the pointer, deletes the previous jti's key (so
+// the old QR immediately stops validating), then writes the new jti and
+// overwrites the pointer. Double redemption was already impossible
+// (redemptions.claim_id is unique plus the claim row lock) - this closes
+// the separate "multiple live codes exist at once" gap.
 const TOKEN_TTL_SECONDS = 300;
 
 export type RedemptionTokenErrorCode = "REDEMPTION_TOKEN_INVALID";
@@ -73,6 +83,15 @@ export async function mintRedemptionToken(
     .setExpirationTime(expiresAtSeconds)
     .sign(getSecretKey());
 
+  const pointerKey = redisKey("redeem", "claim", claimId);
+  const previousJti = await get(pointerKey);
+  if (previousJti !== null) {
+    // Best-effort by nature of DEL itself (it is a no-op if the key already
+    // expired or was consumed) - invalidates the previously minted code the
+    // instant a new one is minted.
+    await del(redisKey("redeem", "jti", previousJti));
+  }
+
   const stored = await setNx(
     redisKey("redeem", "jti", jti),
     claimId,
@@ -83,6 +102,8 @@ export async function mintRedemptionToken(
     // key is astronomically unlikely and indicates something is wrong.
     throw new RedemptionTokenError("Failed to mint redemption token: jti collision");
   }
+
+  await set(pointerKey, jti, TOKEN_TTL_SECONDS);
 
   return {
     token,
@@ -126,6 +147,17 @@ export async function consumeRedemptionToken(
     // which should never happen for a token we minted ourselves, but is
     // treated the same as any other invalid-token case (fail closed).
     throw new RedemptionTokenError();
+  }
+
+  // Best-effort cleanup of the pointer key: the consume itself already
+  // succeeded via the atomic GETDEL above, so a failure here must not
+  // surface as a failed redemption. Worst case the pointer lingers and
+  // points at an already-deleted jti key until its own TTL expires, which
+  // is harmless (the next mint will just no-op the DEL of a missing key).
+  try {
+    await del(redisKey("redeem", "claim", payload.claimId));
+  } catch {
+    // Swallowed intentionally - see comment above.
   }
 
   return payload;

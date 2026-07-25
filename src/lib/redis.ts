@@ -64,3 +64,50 @@ export async function getDel(key: string): Promise<string | null> {
   const result = await sendCommand(["GETDEL", key]);
   return (result as string | null) ?? null;
 }
+
+// GET key: plain read, no side effect. Used where the caller needs to look
+// at a value (e.g. a pointer key) without consuming it - unlike getDel,
+// which must be used for anything single-use.
+export async function get(key: string): Promise<string | null> {
+  const result = await sendCommand(["GET", key]);
+  return (result as string | null) ?? null;
+}
+
+// SET key value EX ttlSeconds: unconditional write (no NX), always
+// overwrites any existing value. Returns true when Upstash acknowledges the
+// write ("OK"). Unlike setNx, this is for keys where "last write wins" is
+// exactly the desired behavior (e.g. a pointer key that should always track
+// the most recent value).
+export async function set(
+  key: string,
+  value: string,
+  ttlSeconds: number,
+): Promise<boolean> {
+  const result = await sendCommand(["SET", key, value, "EX", String(ttlSeconds)]);
+  return result === "OK";
+}
+
+// DEL key: deletes a key regardless of its value. Returns the number of
+// keys actually removed (0 or 1 for a single key), so callers can tell
+// "there was nothing to delete" from "deleted it".
+export async function del(key: string): Promise<number> {
+  const result = await sendCommand(["DEL", key]);
+  return Number(result);
+}
+
+// INCR key: atomically increments the integer stored at key (creating it at
+// 1 if absent) and returns the new value. The building block for the fixed-
+// window rate limiter in src/lib/rate-limit.ts.
+export async function incr(key: string): Promise<number> {
+  const result = await sendCommand(["INCR", key]);
+  return Number(result);
+}
+
+// EXPIRE key seconds: sets a TTL on an existing key. Returns true when the
+// TTL was set, false when the key does not exist. Combined with incr(), the
+// caller sets the TTL only on the first increment of a window so later
+// increments do not keep pushing the window out.
+export async function expire(key: string, seconds: number): Promise<boolean> {
+  const result = await sendCommand(["EXPIRE", key, String(seconds)]);
+  return result === 1;
+}

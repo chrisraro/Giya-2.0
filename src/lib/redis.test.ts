@@ -160,3 +160,249 @@ describe("getDel", () => {
     await expect(getDel("k1")).rejects.toThrow();
   });
 });
+
+describe("get", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("sends the exact GET command payload and returns the value", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: "claim-123" }),
+    });
+
+    const { get } = await import("./redis");
+    const result = await get("k1");
+
+    expect(result).toBe("claim-123");
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual(["GET", "k1"]);
+  });
+
+  it("returns null when the key is absent", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: null }),
+    });
+
+    const { get } = await import("./redis");
+
+    await expect(get("k1")).resolves.toBeNull();
+  });
+
+  it("throws on a non-200 response", async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+      text: async () => "boom",
+    });
+
+    const { get } = await import("./redis");
+
+    await expect(get("k1")).rejects.toThrow();
+  });
+});
+
+describe("set", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("sends the exact SET EX command payload (unconditional, no NX) and returns true on OK", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: "OK" }),
+    });
+
+    const { set } = await import("./redis");
+    const result = await set("k1", "v1", 300);
+
+    expect(result).toBe(true);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual(["SET", "k1", "v1", "EX", "300"]);
+  });
+
+  it("throws on a non-200 response", async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+      text: async () => "boom",
+    });
+
+    const { set } = await import("./redis");
+
+    await expect(set("k1", "v1", 300)).rejects.toThrow();
+  });
+});
+
+describe("del", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("sends the exact DEL command payload and returns the number deleted", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 1 }),
+    });
+
+    const { del } = await import("./redis");
+    const result = await del("k1");
+
+    expect(result).toBe(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual(["DEL", "k1"]);
+  });
+
+  it("returns 0 when the key did not exist", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 0 }),
+    });
+
+    const { del } = await import("./redis");
+
+    await expect(del("k1")).resolves.toBe(0);
+  });
+
+  it("throws on a non-200 response", async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+      text: async () => "boom",
+    });
+
+    const { del } = await import("./redis");
+
+    await expect(del("k1")).rejects.toThrow();
+  });
+});
+
+describe("incr", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("sends the exact INCR command payload and returns the new value", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 1 }),
+    });
+
+    const { incr } = await import("./redis");
+    const result = await incr("k1");
+
+    expect(result).toBe(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual(["INCR", "k1"]);
+  });
+
+  it("throws on a non-200 response", async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+      text: async () => "boom",
+    });
+
+    const { incr } = await import("./redis");
+
+    await expect(incr("k1")).rejects.toThrow();
+  });
+});
+
+describe("expire", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("sends the exact EXPIRE command payload and returns true when set", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 1 }),
+    });
+
+    const { expire } = await import("./redis");
+    const result = await expire("k1", 60);
+
+    expect(result).toBe(true);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual(["EXPIRE", "k1", "60"]);
+  });
+
+  it("returns false when the key does not exist", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 0 }),
+    });
+
+    const { expire } = await import("./redis");
+
+    await expect(expire("k1", 60)).resolves.toBe(false);
+  });
+
+  it("throws on a non-200 response", async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+      text: async () => "boom",
+    });
+
+    const { expire } = await import("./redis");
+
+    await expect(expire("k1", 60)).rejects.toThrow();
+  });
+});

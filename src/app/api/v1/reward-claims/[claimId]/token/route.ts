@@ -5,6 +5,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { assertClaimOwner } from "@/features/rewards/server/claim-ownership";
 import * as repo from "@/features/rewards/server/repo";
 import { mintRedemptionToken } from "@/features/rewards/server/token";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { redisKey } from "@/lib/redis";
 import { createClient } from "@/lib/supabase/server";
 
 // POST /api/v1/reward-claims/{claimId}/token
@@ -18,6 +20,12 @@ import { createClient } from "@/lib/supabase/server";
 // member of the business could mint a redemption token for a customer's
 // claim and self-redeem it. Doc 13 envelope: { data } | { error: { code,
 // message, request_id } }, always with an X-Request-Id header.
+
+// A customer legitimately refreshes the QR at most a few times; 5 mints
+// per minute per (user, claim) is generous headroom above that while still
+// stopping refresh-spam from piling up Redis keys and load.
+const MINT_RATE_LIMIT = 5;
+const MINT_RATE_LIMIT_WINDOW_SECONDS = 60;
 
 function errorResponse(
   status: number,
@@ -52,6 +60,23 @@ export async function POST(
       "Please sign in to generate a redemption code.",
       requestId,
     );
+  }
+
+  const rateLimit = await checkRateLimit({
+    key: redisKey("rl", "mint", user.id, claimId),
+    limit: MINT_RATE_LIMIT,
+    windowSeconds: MINT_RATE_LIMIT_WINDOW_SECONDS,
+  });
+
+  if (!rateLimit.ok) {
+    const response = errorResponse(
+      429,
+      "RATE_LIMITED",
+      "Too many code requests. Please wait a moment.",
+      requestId,
+    );
+    response.headers.set("Retry-After", String(rateLimit.resetSeconds));
+    return response;
   }
 
   let claim;

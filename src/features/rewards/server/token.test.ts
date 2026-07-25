@@ -26,11 +26,17 @@ vi.mock("@/lib/env", () => ({
 const redisMocks = vi.hoisted(() => ({
   setNx: vi.fn(),
   getDel: vi.fn(),
+  get: vi.fn(),
+  set: vi.fn(),
+  del: vi.fn(),
 }));
 
 vi.mock("@/lib/redis", () => ({
   setNx: redisMocks.setNx,
   getDel: redisMocks.getDel,
+  get: redisMocks.get,
+  set: redisMocks.set,
+  del: redisMocks.del,
   redisKey: (...parts: string[]) => `test:${parts.join(":")}`,
 }));
 
@@ -42,6 +48,9 @@ describe("mintRedemptionToken", () => {
   beforeEach(() => {
     redisMocks.setNx.mockReset();
     redisMocks.getDel.mockReset();
+    redisMocks.get.mockReset().mockResolvedValue(null);
+    redisMocks.set.mockReset().mockResolvedValue(true);
+    redisMocks.del.mockReset().mockResolvedValue(1);
   });
 
   afterEach(() => {
@@ -93,12 +102,72 @@ describe("mintRedemptionToken", () => {
       RedemptionTokenError,
     );
   });
+
+  it("writes the claim's pointer key to the new jti with a 300s TTL", async () => {
+    redisMocks.setNx.mockResolvedValue(true);
+    const { mintRedemptionToken } = await import("./token");
+
+    const minted = await mintRedemptionToken("claim-1", "biz-1");
+
+    expect(redisMocks.set).toHaveBeenCalledWith(
+      "test:redeem:claim:claim-1",
+      minted.jti,
+      300,
+    );
+  });
+
+  it("on first mint for a claim, reads the pointer but deletes nothing (no prior jti)", async () => {
+    redisMocks.setNx.mockResolvedValue(true);
+    redisMocks.get.mockResolvedValue(null);
+    const { mintRedemptionToken } = await import("./token");
+
+    await mintRedemptionToken("claim-1", "biz-1");
+
+    expect(redisMocks.get).toHaveBeenCalledWith("test:redeem:claim:claim-1");
+    expect(redisMocks.del).not.toHaveBeenCalled();
+  });
+
+  it("minting a second time for the same claim deletes the first jti key and leaves only the second live", async () => {
+    redisMocks.setNx.mockResolvedValue(true);
+    redisMocks.get.mockResolvedValueOnce(null);
+    const { mintRedemptionToken, consumeRedemptionToken } = await import("./token");
+
+    const first = await mintRedemptionToken("claim-1", "biz-1");
+
+    // Second mint: the pointer now resolves to the first jti.
+    redisMocks.get.mockResolvedValueOnce(first.jti);
+    const second = await mintRedemptionToken("claim-1", "biz-1");
+
+    expect(redisMocks.del).toHaveBeenCalledWith(`test:redeem:jti:${first.jti}`);
+    expect(redisMocks.set).toHaveBeenLastCalledWith(
+      "test:redeem:claim:claim-1",
+      second.jti,
+      300,
+    );
+
+    // Consuming the now-invalidated first token fails: its jti key is gone
+    // (GETDEL on it returns null, exactly as if it had been consumed).
+    redisMocks.getDel.mockResolvedValueOnce(null);
+    await expect(consumeRedemptionToken(first.token)).rejects.toMatchObject({
+      code: "REDEMPTION_TOKEN_INVALID",
+    });
+
+    // Consuming the second (current) token still succeeds.
+    redisMocks.getDel.mockResolvedValueOnce("claim-1");
+    await expect(consumeRedemptionToken(second.token)).resolves.toMatchObject({
+      claimId: "claim-1",
+      jti: second.jti,
+    });
+  });
 });
 
 describe("consumeRedemptionToken", () => {
   beforeEach(() => {
     redisMocks.setNx.mockReset();
     redisMocks.getDel.mockReset();
+    redisMocks.get.mockReset().mockResolvedValue(null);
+    redisMocks.set.mockReset().mockResolvedValue(true);
+    redisMocks.del.mockReset().mockResolvedValue(1);
   });
 
   afterEach(() => {
@@ -184,5 +253,30 @@ describe("consumeRedemptionToken", () => {
     await expect(consumeRedemptionToken(minted.token)).rejects.toThrow(
       RedemptionTokenError,
     );
+  });
+
+  it("deletes the pointer key after a successful consume", async () => {
+    redisMocks.setNx.mockResolvedValue(true);
+    redisMocks.getDel.mockResolvedValue("claim-1");
+    const { mintRedemptionToken, consumeRedemptionToken } = await import("./token");
+
+    const minted = await mintRedemptionToken("claim-1", "biz-1");
+    redisMocks.del.mockClear();
+    await consumeRedemptionToken(minted.token);
+
+    expect(redisMocks.del).toHaveBeenCalledWith("test:redeem:claim:claim-1");
+  });
+
+  it("does not fail the consume when the best-effort pointer delete errors", async () => {
+    redisMocks.setNx.mockResolvedValue(true);
+    redisMocks.getDel.mockResolvedValue("claim-1");
+    const { mintRedemptionToken, consumeRedemptionToken } = await import("./token");
+
+    const minted = await mintRedemptionToken("claim-1", "biz-1");
+    redisMocks.del.mockRejectedValueOnce(new Error("boom"));
+
+    await expect(consumeRedemptionToken(minted.token)).resolves.toMatchObject({
+      claimId: "claim-1",
+    });
   });
 });

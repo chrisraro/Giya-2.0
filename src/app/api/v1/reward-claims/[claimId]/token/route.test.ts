@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   getUser: vi.fn(),
   getClaim: vi.fn(),
   mintRedemptionToken: vi.fn(),
+  checkRateLimit: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -29,6 +30,18 @@ vi.mock("@/features/rewards/server/repo", () => ({
 
 vi.mock("@/features/rewards/server/token", () => ({
   mintRedemptionToken: mocks.mintRedemptionToken,
+}));
+
+vi.mock("@/lib/rate-limit", () => ({
+  checkRateLimit: mocks.checkRateLimit,
+}));
+
+// Real @/lib/redis pulls in @/lib/env, whose client-safe schema is
+// validated at module load time - unrelated to anything this route test
+// cares about. Mock redisKey deterministically instead of wiring up
+// NEXT_PUBLIC_* env vars just to satisfy an unrelated import chain.
+vi.mock("@/lib/redis", () => ({
+  redisKey: (...parts: string[]) => `test:${parts.join(":")}`,
 }));
 
 const { POST } = await import("./route");
@@ -73,6 +86,7 @@ async function callRoute() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.checkRateLimit.mockResolvedValue({ ok: true, remaining: 4, resetSeconds: 60 });
 });
 
 describe("POST /api/v1/reward-claims/{claimId}/token", () => {
@@ -210,5 +224,43 @@ describe("POST /api/v1/reward-claims/{claimId}/token", () => {
     const response = await callRoute();
 
     expect(response.headers.get("X-Request-Id")).toBeTruthy();
+  });
+
+  it("checks the rate limit keyed by (user, claim) before touching the claim", async () => {
+    mockAuthed(CONSUMER_ID);
+    mocks.getClaim.mockResolvedValue(null);
+
+    await callRoute();
+
+    expect(mocks.checkRateLimit).toHaveBeenCalledWith({
+      key: `test:rl:mint:${CONSUMER_ID}:${CLAIM_ID}`,
+      limit: 5,
+      windowSeconds: 60,
+    });
+  });
+
+  it("returns 429 RATE_LIMITED with a Retry-After header when the limiter blocks, without touching the claim", async () => {
+    mockAuthed(CONSUMER_ID);
+    mocks.checkRateLimit.mockResolvedValue({ ok: false, remaining: 0, resetSeconds: 42 });
+
+    const response = await callRoute();
+    const body = await response.json();
+
+    expect(response.status).toBe(429);
+    expect(body.error).toMatchObject({
+      code: "RATE_LIMITED",
+      message: "Too many code requests. Please wait a moment.",
+    });
+    expect(response.headers.get("Retry-After")).toBe("42");
+    expect(mocks.getClaim).not.toHaveBeenCalled();
+    expect(mocks.mintRedemptionToken).not.toHaveBeenCalled();
+  });
+
+  it("does not rate-limit an unauthenticated caller (401 short-circuits first)", async () => {
+    mockUnauthenticated();
+
+    await callRoute();
+
+    expect(mocks.checkRateLimit).not.toHaveBeenCalled();
   });
 });
