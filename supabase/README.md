@@ -91,6 +91,9 @@ Nine suites, one per domain:
 | `rls_consumer_fence_smoke.sql` | the `consumers` / `profiles` self-update column fence: legitimate profile and onboarding writes still land, fraud and trust columns raise 42501 (0021) |
 | `rls_audit_logs_smoke.sql` | `audit_logs`: the owner-only tenant read and the manager narrowing, platform-level rows (null `business_id`) invisible to every tenant, the `ip` / `user_agent` column fence, client writes refused at the privilege layer, the append-only row trigger and the no-truncate statement trigger, the service_role split (INSERT stays, everything else revoked), and the `action` / `entity_type` shape constraints plus the mandatory admin reason (0022) |
 | `rpc_record_visit_smoke.sql` | `record_receipt_visit`: guard order, the doc 40 Asia/Manila visit rule including the UTC/Manila date-boundary case and backdated receipts, spend accumulation, the points columns left untouched, idempotency of a second call, the service_role-only grant, and the interaction with the award path (an award after a recorded visit mints points without adding the same receipt's spend twice) (0023) |
+| `rls_template_embedding_smoke.sql` | pgvector template embeddings: the pinned vector(384) width enforced rather than decorative, cosine ordering, and that RLS still applies to a vector query (0024) |
+| `rls_notifications_smoke.sql` | `notifications`: recipient-only reads, the read_at column grant, and the narrow trigger that permits marking read while refusing a body edit (0026) |
+| `ref_data_smoke.sql` | reference data: both tables non-empty, the seed idempotent on replay, every city carrying a non-null province and region in one of the 18 real regions (0027) |
 
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
@@ -233,6 +236,10 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0021_consumer_selfupdate_column_fence.sql | 20260725163042 | 0021_consumer_selfupdate_column_fence |
 | 0022_audit_logs.sql | 20260725163156 | 0022_audit_logs |
 | 0023_record_receipt_visit.sql | 20260725163327 | 0023_record_receipt_visit |
+| 0024_template_embeddings.sql | 20260725171529 | 0024_template_embeddings |
+| 0025_receipt_amount_ceiling.sql | 20260725182404 | 0025_receipt_amount_ceiling |
+| 0026_notifications.sql | 20260725205211 | 0026_notifications |
+| 0027_reference_data.sql | 20260725215529 | 0027_reference_data |
 
 **These versions are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`.**
 Every migration was applied in file order in a single pass, so unlike the
