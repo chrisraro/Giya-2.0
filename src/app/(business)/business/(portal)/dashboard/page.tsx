@@ -1,10 +1,15 @@
+import Link from "next/link";
+
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { KpiCard } from "@/components/business/kpi-card";
 import { BarChart } from "@/components/business/bar-chart";
 import { VerificationBanner } from "@/components/business/verification-banner";
 import { EmptyState } from "@/components/consumer/empty-state";
+import { resolveReviewerContext } from "@/features/receipts/review/access";
+import { countPendingReview, PENDING_COUNT_CAP } from "@/features/receipts/review/queue";
 import { MOCK_KPIS, MOCK_WEEK_VISITS, MOCK_ACTIVITY } from "@/lib/mock/business"; // TODO(api): replace mock
 import { createClient } from "@/lib/supabase/server";
+import { cn } from "@/lib/utils";
 
 const FULL_DAY_NAMES: Record<string, string> = {
   Mon: "Monday",
@@ -57,12 +62,64 @@ async function getBusinessStatus(): Promise<string | null> {
   return business?.status ?? null;
 }
 
+/**
+ * The review-queue tile (doc 32 section 3: "Receipts approved vs rejected ...
+ * click -> /business/receipts"; doc 36 Stage 9: "queue-age surfaced on the
+ * business dashboard").
+ *
+ * Rendered only for owners and managers, because they are the only roles that
+ * can act on it, and it changes shape rather than colour when the queue is
+ * empty: a dashboard that shows a red zero every day teaches people that the
+ * red means nothing.
+ */
+function ReviewQueueTile({ pending }: { pending: number }) {
+  const waiting = pending > 0;
+  return (
+    <Link
+      href="/business/receipts"
+      className={cn(
+        "flex flex-col gap-1 rounded-md3-md p-4 outline-none",
+        "transition-colors duration-200 ease-standard motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-primary",
+        waiting
+          ? "bg-error-container text-on-error-container hover:opacity-90"
+          : "border border-outline-variant bg-surface-container-low text-on-surface hover:bg-surface-container",
+      )}
+    >
+      <span className="text-body-s">Receipts to review</span>
+      <span className="font-mono text-headline-s">
+        {pending > PENDING_COUNT_CAP ? `${PENDING_COUNT_CAP}+` : pending}
+      </span>
+      <span className="text-body-s">
+        {waiting ? "Aim to clear these within a day" : "Nothing waiting on you"}
+      </span>
+    </Link>
+  );
+}
+
 export default async function BusinessDashboardPage() {
   const businessStatus = await getBusinessStatus();
+
+  // Memoized per request alongside the portal layout's own call, so the tile
+  // costs one indexed count and no extra session round trip.
+  //
+  // Null hides the tile, and it now covers two cases: a role that cannot review
+  // receipts, and a count that could not be read. Both hide it for the same
+  // reason: the tile's zero state says "Nothing waiting on you", which is a
+  // claim about the queue, and a failed read cannot make it. The queue screen
+  // is the surface that explains the failure; a dashboard tile is not.
+  const reviewer = await resolveReviewerContext();
+  const pendingReviewCount =
+    reviewer === null ? null : await countPendingReview(reviewer.businessId);
 
   return (
     <div className="flex flex-col gap-6">
       <VerificationBanner status={businessStatus} />
+
+      {pendingReviewCount !== null && (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <ReviewQueueTile pending={pendingReviewCount} />
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         {MOCK_KPIS.map((kpi) => (

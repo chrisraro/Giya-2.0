@@ -30,17 +30,17 @@ import { DEFAULT_RECEIPT_SETTINGS } from "./settings";
 import type { ReceiptSettings } from "./settings";
 import type { OcrProvider, OcrResponse } from "./ocr/provider";
 import { OcrError } from "./ocr/provider";
+import { resolveStacking, toPointsRule } from "./award";
+import type { CampaignRow, PointsRuleRow } from "./award";
 import {
   detectSourceKind,
   processReceipt,
   resolveOutcome,
-  resolveStacking,
   sanitizeParseConfig,
   selectTemplate,
-  toPointsRule,
   validateParsedReceipt,
 } from "./process";
-import type { CampaignRow, PointsRuleRow, ProcessReceiptDeps } from "./process";
+import type { ProcessReceiptDeps } from "./process";
 import { parseReceipt } from "../parse";
 
 // ===========================================================================
@@ -528,7 +528,11 @@ describe("auto-approval and award (doc 36 Stages 9-10)", () => {
     expect(args.p_receipt_id).toBe(RECEIPT_ID);
     // floor(19000 centavos / 100 centavos-per-point) = 190 points.
     expect(args.p_points).toBe(190);
-    expect(args.p_campaign_id).toBeNull();
+    // No campaign priced this receipt, so the argument is not sent at all.
+    // 0018 declares `p_campaign_id uuid default null`, so an omitted key and an
+    // explicit null are the same call; the generated Args render a defaulted
+    // argument as omittable, and this is the omission.
+    expect(args).not.toHaveProperty("p_campaign_id");
   });
 
   it("writes the receipt as 'approved' BEFORE calling the award RPC, which guards on it", async () => {
@@ -904,7 +908,7 @@ describe("the reject paths", () => {
 // ===========================================================================
 
 describe("pricing (doc 35)", () => {
-  it("approves without calling the RPC when the business has no active base rule", async () => {
+  it("approves without a ledger row when the business has no active base rule, and still records the visit", async () => {
     const world = createWorld({ pointsRules: [] });
     const harness = createHarness({ world });
 
@@ -912,12 +916,17 @@ describe("pricing (doc 35)", () => {
 
     const update = harness.receiptUpdate();
     expect(update?.status).toBe("approved");
-    // No RPC means nothing else will stamp processed_at, so this path must.
-    expect(update?.processed_at).toBe(NOW.toISOString());
-    expect(harness.supabase.rpcCalls).toHaveLength(0);
+    // 0023 stamps processed_at itself, exactly as 0018 does on the awarding
+    // path, so this write leaves it null rather than duplicating it.
+    expect(update?.processed_at).toBeNull();
+    // The defect 0023 fixes: this tenant has configured no earning, and before
+    // it the pair row's visit_count, spend and last_visit_at never advanced.
+    expect(harness.supabase.rpcCalls).toEqual([
+      { name: "record_receipt_visit", args: { p_receipt_id: RECEIPT_ID } },
+    ]);
   });
 
-  it("approves without calling the RPC when the rules price the receipt at zero", async () => {
+  it("approves without a ledger row when the rules price the receipt at zero", async () => {
     const world = createWorld({
       pointsRules: [
         {
@@ -933,7 +942,9 @@ describe("pricing (doc 35)", () => {
     await processReceipt(RECEIPT_ID, harness.deps);
 
     expect(harness.receiptUpdate()?.status).toBe("approved");
-    expect(harness.supabase.rpcCalls).toHaveLength(0);
+    expect(harness.supabase.rpcCalls).toEqual([
+      { name: "record_receipt_visit", args: { p_receipt_id: RECEIPT_ID } },
+    ]);
   });
 
   it("applies a live campaign multiplier and names its campaign on the ledger row", async () => {
