@@ -194,6 +194,20 @@ export async function archiveCampaign(
   return transitionCampaign(businessId, campaignId, "archive");
 }
 
+/**
+ * Resumes a paused campaign (paused -> active; doc 34 T6). This is just the
+ * inverse of pauseCampaign - a previously-validated campaign that already
+ * cleared activationGates once does not need to clear them again to resume,
+ * so this deliberately does not re-run activationGates the way
+ * activateCampaign does.
+ */
+export async function resumeCampaign(
+  businessId: string,
+  campaignId: string,
+): Promise<ActionResult<CampaignRow>> {
+  return transitionCampaign(businessId, campaignId, "resume");
+}
+
 export async function upsertBaseRule(
   businessId: string,
   input: BaseRuleInput,

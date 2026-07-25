@@ -147,6 +147,20 @@ export async function archiveCampaign(input: {
   return result;
 }
 
+export async function resumeCampaign(input: {
+  campaignId: string;
+}): Promise<ActionResult<CampaignRow>> {
+  const auth = await requireOwnerBusiness();
+  if (!auth.ok) return auth.result;
+
+  const parsed = campaignIdInputSchema.safeParse(input);
+  if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
+
+  const result = await service.resumeCampaign(auth.businessId, parsed.data.campaignId);
+  if (result.ok) revalidatePath(CAMPAIGNS_PATH);
+  return result;
+}
+
 // ---------------------------------------------------------------- points
 
 export async function upsertBaseRule(input: unknown): Promise<ActionResult<PointsRuleRow>> {

@@ -554,6 +554,39 @@ describe("actions: pauseCampaign / archiveCampaign", () => {
   });
 });
 
+// ------------------------------------------------------------ resumeCampaign
+
+describe("actions: resumeCampaign", () => {
+  it("resumes a paused campaign", async () => {
+    table("campaigns").__result = { data: { id: CAMPAIGN_ID, status: "paused" }, error: null };
+
+    const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result.ok).toBe(true);
+    expect(table("campaigns").update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "active" }),
+    );
+  });
+
+  it("rejects resuming a draft campaign (invalid transition)", async () => {
+    table("campaigns").__result = { data: { id: CAMPAIGN_ID, status: "draft" }, error: null };
+
+    const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "CAMPAIGN_INVALID_STATE" }));
+    expect(table("campaigns").update).not.toHaveBeenCalled();
+  });
+
+  it("rejects resuming an already-active campaign (invalid transition)", async () => {
+    table("campaigns").__result = { data: { id: CAMPAIGN_ID, status: "active" }, error: null };
+
+    const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "CAMPAIGN_INVALID_STATE" }));
+    expect(table("campaigns").update).not.toHaveBeenCalled();
+  });
+});
+
 // ------------------------------------------------------------- upsertBaseRule
 
 describe("actions: upsertBaseRule", () => {

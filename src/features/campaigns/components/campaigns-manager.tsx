@@ -13,6 +13,7 @@ import {
   createPromotionCampaign,
   createRewardCampaign,
   pauseCampaign,
+  resumeCampaign,
   upsertBaseRule,
 } from "../actions";
 import { CampaignForm, type CampaignFormOutput } from "./campaign-form";
@@ -101,17 +102,8 @@ export function CampaignsManager({ business, campaigns, baseRule }: CampaignsMan
     return result.ok ? { ok: true } : { ok: false, message: result.message };
   }
 
-  // KNOWN LIMITATION: there is no dedicated "resume" server action in this
-  // slice (see src/features/campaigns/actions.ts) - the pure lifecycle
-  // engine's ACTION_EDGES.activate.sources is ["draft", "scheduled"] only
-  // (src/features/campaigns/lifecycle.ts), so a paused campaign resuming
-  // through activateCampaign will surface "Cannot activate a campaign in
-  // status 'paused'" until a resumeCampaign action ships. Wired this way
-  // per the task-6 brief's explicit instruction ("Resume(activate) for
-  // paused -> activateCampaign"); the failure still surfaces inline like
-  // any other gate failure, it just never succeeds today.
   async function handleResume(campaignId: string): Promise<ActionResult> {
-    const result = await activateCampaign({ campaignId });
+    const result = await resumeCampaign({ campaignId });
     return result.ok ? { ok: true } : { ok: false, message: result.message };
   }
 
