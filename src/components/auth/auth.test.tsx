@@ -152,7 +152,7 @@ describe("LoginPage submit", () => {
       expect(authMocks.signInWithPassword).toHaveBeenCalledWith({
         email: "a@b.com",
         password: "secret123",
-        options: { captchaToken: "" },
+        options: {},
       }),
     );
     await waitFor(() => expect(nav.push).toHaveBeenCalledWith("/home"));

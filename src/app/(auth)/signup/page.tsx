@@ -177,7 +177,7 @@ export default function SignupPage() {
       options: {
         data: { full_name: name, intended_role: role },
         emailRedirectTo: `${window.location.origin}/auth/callback?next=${next}`,
-        captchaToken,
+        ...(captchaToken && { captchaToken }),
       },
     });
     setSubmitting(false);
@@ -215,7 +215,9 @@ export default function SignupPage() {
     const { error } = await supabase.auth.resend({
       type: "signup",
       email: confirmationEmail,
-      options: { captchaToken: resendCaptchaToken },
+      options: {
+        ...(resendCaptchaToken && { captchaToken: resendCaptchaToken }),
+      },
     });
     return { error: error ? toErrorMessage(error) : null };
   }
@@ -321,6 +323,10 @@ export default function SignupPage() {
           ref={captchaRef}
           onVerify={setCaptchaToken}
           onExpire={() => setCaptchaToken("")}
+          onError={() => {
+            setFormError("The captcha did not load. Refresh the page and try again.");
+            setCaptchaToken("");
+          }}
         />
         {formError ? (
           <p role="alert" className="text-body-s text-error">

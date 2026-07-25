@@ -75,7 +75,9 @@ function LoginPageInner() {
     const { error } = await supabase.auth.signInWithPassword({
       email,
       password,
-      options: { captchaToken },
+      options: {
+        ...(captchaToken && { captchaToken }),
+      },
     });
     setSubmitting(false);
     // Each hCaptcha token is single-use: reset the widget after every submit
@@ -187,6 +189,10 @@ function LoginPageInner() {
           ref={captchaRef}
           onVerify={setCaptchaToken}
           onExpire={() => setCaptchaToken("")}
+          onError={() => {
+            setFormError("The captcha did not load. Refresh the page and try again.");
+            setCaptchaToken("");
+          }}
         />
         {formError ? (
           <p role="alert" className="text-body-s text-error">

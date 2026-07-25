@@ -68,6 +68,10 @@ export function CheckEmail({ email, onResend }: CheckEmailProps) {
         ref={captchaRef}
         onVerify={setCaptchaToken}
         onExpire={() => setCaptchaToken("")}
+        onError={() => {
+          setErrorText("The captcha did not load. Refresh the page and try again.");
+          setCaptchaToken("");
+        }}
       />
       <Button
         type="button"
