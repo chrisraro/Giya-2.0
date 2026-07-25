@@ -30,17 +30,17 @@ import { DEFAULT_RECEIPT_SETTINGS } from "./settings";
 import type { ReceiptSettings } from "./settings";
 import type { OcrProvider, OcrResponse } from "./ocr/provider";
 import { OcrError } from "./ocr/provider";
+import { resolveStacking, toPointsRule } from "./award";
+import type { CampaignRow, PointsRuleRow } from "./award";
 import {
   detectSourceKind,
   processReceipt,
   resolveOutcome,
-  resolveStacking,
   sanitizeParseConfig,
   selectTemplate,
-  toPointsRule,
   validateParsedReceipt,
 } from "./process";
-import type { CampaignRow, PointsRuleRow, ProcessReceiptDeps } from "./process";
+import type { ProcessReceiptDeps } from "./process";
 import { parseReceipt } from "../parse";
 
 // ===========================================================================
