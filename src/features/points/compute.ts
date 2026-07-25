@@ -62,7 +62,9 @@ function applyRounding(raw: number, mode: RoundingMode): number {
     case "floor":
       return Math.floor(raw);
     case "round":
-      // Math.round is half-up for the non-negative values used here.
+      // Math.round rounds halves toward +Infinity, which is exactly the
+      // spec's half-up (0.5 -> 1). Sub-1x multipliers can produce negative
+      // raw extras; halves still round up (-363.5 -> -363).
       return Math.round(raw);
     case "ceil":
       return Math.ceil(raw);
@@ -119,17 +121,22 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-// The award computation:
+// The award computation (doc 35 "Arithmetic (exact)" + doc 34 section 6
+// additive-extras model):
 //   1. base points from the base rule (its own conditions gate it; a failed
-//      earning floor yields 0 base).
+//      earning floor yields 0 base). base_points = round_base(raw_base) with
+//      the BASE rule's rounding.
 //   2. eligible candidates = multiplier/bonus rules whose conditions pass at
 //      the receipt's wall clock in the business timezone.
-//   3. multipliers stack additively: effective = 1 + sum(m_i - 1).
-//      multipliedBase = floor(base * effective), clamped at 0. Floor is used
-//      regardless of rule rounding modes: the house never rounds the stacked
-//      product up, and per-rule rounding already shaped the base.
-//   4. bonuses are added AFTER multiplication, never multiplied, never rounded.
-//   5. result is always an integer >= 0.
+//   3. each applied multiplier contributes its own extra:
+//      extra_i = round_i(base_points * (multiplier_i - 1)) using THAT rule's
+//      rounding column. Extras are summed per-rule-rounded; there is NO
+//      single effective multiplier rounded once, and rounding never applies
+//      to the running total.
+//   4. bonuses contribute bonus_points verbatim: never multiplied, never
+//      rounded.
+//   5. TOTAL = max(0, base_points + sum(extra_i) + sum(bonus_points)),
+//      always an integer >= 0.
 export function computePoints(input: ComputePointsInput): PointsResult {
   const {
     amountCentavos,
@@ -167,12 +174,22 @@ export function computePoints(input: ComputePointsInput): PointsResult {
     }
   }
 
-  const effectiveMultiplier =
-    1 + appliedMultipliers.reduce((sum, m) => sum + (m.multiplier - 1), 0);
-  const multipliedBase = Math.max(0, Math.floor(basePoints * effectiveMultiplier));
+  // Per-rule extras: each multiplier's contribution is rounded with its OWN
+  // rounding mode, then the integer extras are summed (doc 35 arithmetic;
+  // doc 34 section 6 additive-extras stacking).
+  const multiplierBreakdowns = appliedMultipliers.map((m) => ({
+    rule: m.rule,
+    multiplier: m.multiplier,
+    rounding: m.rule.rounding,
+    extra: applyRounding(basePoints * (m.multiplier - 1), m.rule.rounding),
+  }));
+  const multiplierExtras = multiplierBreakdowns.reduce((sum, m) => sum + m.extra, 0);
   const bonusPoints = appliedBonuses.reduce((sum, b) => sum + b.bonusPoints, 0);
-  const total = Math.max(0, multipliedBase + bonusPoints);
+  const total = Math.max(0, basePoints + multiplierExtras + bonusPoints);
 
+  // Frozen shape per doc 35 "rule_snapshot frozen shape". campaign_id,
+  // priority, and is_stackable are added by the caller/service layer, which
+  // owns campaign resolution; the pure engine does not see campaigns.
   const ruleSnapshot = deepFreeze({
     engine: "points/v1",
     amount_centavos: amountCentavos,
@@ -185,15 +202,16 @@ export function computePoints(input: ComputePointsInput): PointsResult {
       eligible: baseEligible,
       points: basePoints,
     },
-    multipliers: appliedMultipliers.map((m) => ({
+    multipliers: multiplierBreakdowns.map((m) => ({
       rule_id: m.rule.id ?? null,
       multiplier: m.multiplier,
+      rounding: m.rounding,
+      points_delta: m.extra,
     })),
     bonuses: appliedBonuses.map((b) => ({
       rule_id: b.rule.id ?? null,
       bonus_points: b.bonusPoints,
     })),
-    effective_multiplier: effectiveMultiplier,
     total_points: total,
   });
 
@@ -201,8 +219,12 @@ export function computePoints(input: ComputePointsInput): PointsResult {
     points: total,
     breakdown: {
       basePoints,
-      effectiveMultiplier,
-      multipliedBase,
+      multipliers: multiplierBreakdowns.map((m) => ({
+        multiplier: m.multiplier,
+        rounding: m.rounding,
+        extra: m.extra,
+      })),
+      multiplierExtras,
       bonusPoints,
       total,
     },

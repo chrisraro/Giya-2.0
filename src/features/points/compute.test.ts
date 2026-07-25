@@ -67,8 +67,8 @@ describe("computePoints: base rule types", () => {
     expect(result.points).toBe(485);
     expect(result.breakdown).toEqual({
       basePoints: 485,
-      effectiveMultiplier: 1,
-      multipliedBase: 485,
+      multipliers: [],
+      multiplierExtras: 0,
       bonusPoints: 0,
       total: 485,
     });
@@ -174,8 +174,8 @@ describe("computePoints: multipliers, bonuses, stacking", () => {
     expect(result.points).toBe(970);
     expect(result.breakdown).toEqual({
       basePoints: 485,
-      effectiveMultiplier: 2,
-      multipliedBase: 970,
+      multipliers: [{ multiplier: 2, rounding: "floor", extra: 485 }],
+      multiplierExtras: 485,
       bonusPoints: 0,
       total: 970,
     });
@@ -188,20 +188,85 @@ describe("computePoints: multipliers, bonuses, stacking", () => {
     expect(reprocessed).toEqual(first);
   });
 
-  it("stacks multipliers additively: 2x + 3x = effective 4x", () => {
+  it("stacks multipliers additively: 2x + 3x extras on base 485 = 1940", () => {
     const triple: PointsRule = { kind: "multiplier", rule_type: "amount_rate", multiplier: 3, rounding: "floor" };
     const result = computePoints(input({ candidateRules: [fridayDouble, triple] }));
-    expect(result.breakdown.effectiveMultiplier).toBe(4);
-    expect(result.points).toBe(485 * 4);
+    // extras: floor(485 * 1) = 485 and floor(485 * 2) = 970
+    expect(result.breakdown.multipliers).toEqual([
+      { multiplier: 2, rounding: "floor", extra: 485 },
+      { multiplier: 3, rounding: "floor", extra: 970 },
+    ]);
+    expect(result.breakdown.multiplierExtras).toBe(1455);
+    expect(result.points).toBe(1940);
   });
 
-  it("floors the multiplied base (fractional multiplier)", () => {
+  it("rounds each multiplier extra with its own rule's rounding (fractional, floor)", () => {
     const bonus25: PointsRule = { kind: "multiplier", rule_type: "amount_rate", multiplier: 1.25, rounding: "floor" };
     const base: PointsRule = { kind: "base", rule_type: "fixed_per_receipt", fixed_points: 10, rounding: "floor" };
     const result = computePoints(input({ baseRule: base, candidateRules: [bonus25] }));
-    // 10 * 1.25 = 12.5 -> floor -> 12
-    expect(result.breakdown.multipliedBase).toBe(12);
+    // extra = floor(10 * 0.25) = 2; total = 10 + 2 = 12
+    expect(result.breakdown.multipliers).toEqual([
+      { multiplier: 1.25, rounding: "floor", extra: 2 },
+    ]);
     expect(result.points).toBe(12);
+  });
+
+  it("doc divergence case: base 3 with two 1.5x floor multipliers = 5, not floor(3 * 2) = 6", () => {
+    // 30000 centavos at rate 10000 -> base 3.
+    const half1: PointsRule = { kind: "multiplier", rule_type: "amount_rate", multiplier: 1.5, rounding: "floor" };
+    const half2: PointsRule = { kind: "multiplier", rule_type: "amount_rate", multiplier: 1.5, rounding: "floor" };
+    const result = computePoints(
+      input({
+        amountCentavos: 30000,
+        baseRule: baseAmountRate({ rate_centavos_per_point: 10000 }),
+        candidateRules: [half1, half2],
+      }),
+    );
+    // each extra = floor(3 * 0.5) = floor(1.5) = 1; total = 3 + 1 + 1 = 5
+    expect(result.breakdown.basePoints).toBe(3);
+    expect(result.breakdown.multipliers).toEqual([
+      { multiplier: 1.5, rounding: "floor", extra: 1 },
+      { multiplier: 1.5, rounding: "floor", extra: 1 },
+    ]);
+    expect(result.points).toBe(5);
+  });
+
+  it("honors a multiplier rule's ceil rounding: 1.25x ceil on base 485 = 607", () => {
+    const promo: PointsRule = { kind: "multiplier", rule_type: "amount_rate", multiplier: 1.25, rounding: "ceil" };
+    const result = computePoints(input({ candidateRules: [promo] }));
+    // extra = ceil(485 * 0.25) = ceil(121.25) = 122; total = 485 + 122 = 607
+    expect(result.breakdown.multipliers).toEqual([
+      { multiplier: 1.25, rounding: "ceil", extra: 122 },
+    ]);
+    expect(result.points).toBe(607);
+  });
+
+  it("mixes rounding modes per rule: 2x floor + 1.5x ceil on base 485 = 1213", () => {
+    const halfCeil: PointsRule = { kind: "multiplier", rule_type: "amount_rate", multiplier: 1.5, rounding: "ceil" };
+    const result = computePoints(input({ candidateRules: [fridayDouble, halfCeil] }));
+    // extras: floor(485 * 1) = 485 and ceil(485 * 0.5) = ceil(242.5) = 243
+    // total = 485 + 485 + 243 = 1213
+    expect(result.breakdown.multipliers).toEqual([
+      { multiplier: 2, rounding: "floor", extra: 485 },
+      { multiplier: 1.5, rounding: "ceil", extra: 243 },
+    ]);
+    expect(result.points).toBe(1213);
+  });
+
+  it("half-up rounding on a multiplier extra: 1.5x round on base 3 = 5", () => {
+    const halfRound: PointsRule = { kind: "multiplier", rule_type: "amount_rate", multiplier: 1.5, rounding: "round" };
+    const result = computePoints(
+      input({
+        amountCentavos: 30000,
+        baseRule: baseAmountRate({ rate_centavos_per_point: 10000 }),
+        candidateRules: [halfRound],
+      }),
+    );
+    // extra = round(3 * 0.5) = round(1.5) = 2 (half-up); total = 3 + 2 = 5
+    expect(result.breakdown.multipliers).toEqual([
+      { multiplier: 1.5, rounding: "round", extra: 2 },
+    ]);
+    expect(result.points).toBe(5);
   });
 
   it("adds bonuses after multiplication (bonus is not multiplied)", () => {
@@ -210,8 +275,8 @@ describe("computePoints: multipliers, bonuses, stacking", () => {
     const result = computePoints(input({ baseRule: base, candidateRules: [fridayDouble, bonus] }));
     expect(result.breakdown).toEqual({
       basePoints: 100,
-      effectiveMultiplier: 2,
-      multipliedBase: 200,
+      multipliers: [{ multiplier: 2, rounding: "floor", extra: 100 }],
+      multiplierExtras: 100,
       bonusPoints: 50,
       total: 250,
     });
@@ -232,14 +297,16 @@ describe("computePoints: multipliers, bonuses, stacking", () => {
       rounding: "floor",
     };
     const result = computePoints(input({ candidateRules: [saturdayOnly] }));
-    expect(result.breakdown.effectiveMultiplier).toBe(1);
+    expect(result.breakdown.multipliers).toEqual([]);
+    expect(result.breakdown.multiplierExtras).toBe(0);
     expect(result.points).toBe(485);
   });
 
   it("no candidates: base only", () => {
     const result = computePoints(input());
     expect(result.points).toBe(485);
-    expect(result.breakdown.effectiveMultiplier).toBe(1);
+    expect(result.breakdown.multipliers).toEqual([]);
+    expect(result.breakdown.multiplierExtras).toBe(0);
     expect(result.breakdown.bonusPoints).toBe(0);
   });
 
@@ -298,11 +365,11 @@ describe("computePoints: multipliers, bonuses, stacking", () => {
     expect(result.points).toBe(10);
   });
 
-  it("clamps to zero when sub-1x multipliers drive the effective multiplier negative", () => {
+  it("clamps the total to zero when sub-1x multiplier extras outweigh the base", () => {
     const quarter: PointsRule = { kind: "multiplier", rule_type: "amount_rate", multiplier: 0.25, rounding: "floor" };
     const result = computePoints(input({ candidateRules: [quarter, { ...quarter }] }));
-    // effective = 1 + (0.25 - 1) * 2 = -0.5 -> multiplied base clamps to 0
-    expect(result.breakdown.multipliedBase).toBe(0);
+    // each extra = floor(485 * -0.75) = -364; 485 - 728 < 0 -> clamps to 0
+    expect(result.breakdown.multiplierExtras).toBe(-728);
     expect(result.points).toBe(0);
   });
 
@@ -310,7 +377,10 @@ describe("computePoints: multipliers, bonuses, stacking", () => {
     const odd: PointsRule = { kind: "multiplier", rule_type: "amount_rate", multiplier: 1.33, rounding: "floor" };
     const result = computePoints(input({ amountCentavos: 48533, candidateRules: [odd] }));
     expect(Number.isInteger(result.points)).toBe(true);
-    expect(Number.isInteger(result.breakdown.multipliedBase)).toBe(true);
+    expect(Number.isInteger(result.breakdown.multiplierExtras)).toBe(true);
+    for (const m of result.breakdown.multipliers) {
+      expect(Number.isInteger(m.extra)).toBe(true);
+    }
     expect(result.points).toBeGreaterThanOrEqual(0);
   });
 });
@@ -338,7 +408,12 @@ describe("computePoints: rule snapshot", () => {
     const snapshot = ruleSnapshot as {
       engine: string;
       base: { rule_id: string | null; points: number };
-      multipliers: Array<{ rule_id: string | null; multiplier: number }>;
+      multipliers: Array<{
+        rule_id: string | null;
+        multiplier: number;
+        rounding: string;
+        points_delta: number;
+      }>;
       bonuses: Array<{ rule_id: string | null; bonus_points: number }>;
       total_points: number;
     };
@@ -347,7 +422,12 @@ describe("computePoints: rule snapshot", () => {
     expect(snapshot.base.rule_id).toBe("rule-base");
     expect(snapshot.base.points).toBe(485);
     expect(snapshot.multipliers).toEqual([
-      expect.objectContaining({ rule_id: "rule-friday-2x", multiplier: 2 }),
+      expect.objectContaining({
+        rule_id: "rule-friday-2x",
+        multiplier: 2,
+        rounding: "floor",
+        points_delta: 485,
+      }),
     ]);
     expect(snapshot.bonuses).toEqual([
       expect.objectContaining({ rule_id: "rule-bonus", bonus_points: 50 }),

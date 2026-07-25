@@ -1,48 +1,52 @@
-# Task 3 Report: money helper + menu schemas + service/repo/actions
+# Task 3 report: pure points computation + condition DSL engines
 
-## Status
-
-Complete. All deliverables implemented, TDD'd, and green.
+Status: COMPLETE. Commit `debf0a5` `feat(points): pure points computation and condition DSL engines` on `feat/campaigns-points`.
 
 ## Files
+- `src/features/points/types.ts` - RuleKind/RuleType/RoundingMode, RuleTier, RuleConditions, PointsRule (snake_case fields mirroring the `points_rules` columns; tiers camelCase per the brief), ComputePointsInput, PointsBreakdown, PointsResult. Zero IO in the whole feature dir (no server/db/React imports).
+- `src/features/points/conditions.ts` + `conditions.test.ts` - `ruleConditionsSchema` (Zod v4 `z.strictObject`, equivalent to `.strict()`) and `evaluateConditions(conditions, ctx)`.
+- `src/features/points/compute.ts` + `compute.test.ts` - `deriveLocalDayTime(receiptDate, timeZone)` and `computePoints(input)`.
 
-- `src/lib/money.ts` + `src/lib/money.test.ts` (21 tests)
-- `src/features/menu/schemas.ts` (Zod: categorySchema, productSchema, variantSchema, addonSchema, availabilityWindowSchema, productStatusSchema, idSchema, productUpdateSchema + inferred types)
-- `src/features/menu/types.ts` (Row DTOs re-exported from generated Supabase types, ActionResult<T>, ProductUpdatePatch)
-- `src/features/menu/server/repo.ts` (only layer touching the Supabase client)
-- `src/features/menu/server/service.ts` (thin orchestration + emitCatalogUpdated)
-- `src/features/menu/actions.ts` ("use server": 12 actions + an extra setProductStatus helper)
-- `src/features/menu/menu.test.ts` (51 tests: repo-level + action-level)
+## Conditions DSL (as implemented)
+- Keys: `days` (int 1-7 ISO, nonempty), `time_from`/`time_to` (`^([01]\d|2[0-3]):[0-5]\d$`), `min_amount_centavos` (int >= 0 per the task brief; doc 35 shows `.positive()` - relaxed to allow an explicit 0 no-op floor), `birthday`, `first_visit`. Unknown keys rejected. Refine: time_from/time_to must be set together (kept from doc 35).
+- Doc 35's referral-only keys (`referrer_points`/`referee_points`) are intentionally NOT in this schema: they are a [V1] referral-slice concern; the strict schema will grow when that slice lands.
+- Evaluation: all present keys AND together; `{}` always true. `days`: weekday must be in list. Time window: from inclusive, to exclusive; `from > to` spans midnight (`m >= from || m < to`); `from == to` is an empty window (never matches, documented). `min_amount_centavos`: amount >=. `birthday: true` requires `ctx.isBirthday === true` (undefined = not a birthday); `birthday: false` is a no-op gate. Same for `first_visit`.
 
-## TDD evidence
+## Compute algorithm (as implemented)
+1. Derive `{weekday, minutesOfDay}` from `receiptDate` in `businessTimezone` via `Intl.DateTimeFormat` with `timeZone` + `hourCycle: "h23"` (`formatToParts`, weekday short name mapped Mon=1..Sun=7). Works for any IANA zone (Asia/Manila is fixed UTC+8, no DST); pure and deterministic; RangeError on an invalid zone id.
+2. Base points from `baseRule`, gated by the base rule's OWN conditions (doc 35 allows e.g. a `min_amount_centavos` earning floor on base; a failed base condition yields 0 base while independent bonuses still apply):
+   - `amount_rate`: `rounding(amountCentavos / rate_centavos_per_point)` with floor / round (Math.round = half-up for non-negatives) / ceil.
+   - `fixed_per_visit` / `fixed_per_receipt`: `fixed_points` (visit-day dedup is the caller's job; the pure engine treats both identically).
+   - `tiered_amount`: first tier where `minCentavos <= amount <= maxCentavos` (both ends inclusive); `maxCentavos: null` = open-ended top tier. No matching tier (below all, in a gap, or above a CLOSED top tier) awards 0 (documented choice: a closed tier table means "nothing beyond this").
+   - Misconfigured rules (missing rate/fixed_points/tiers) THROW rather than silently award 0.
+3. Eligible candidates = `candidateRules` whose conditions pass. Campaign liveness/audience/budget filtering is the caller's job (doc 34); the engine documents that `candidateRules` arrive pre-filtered.
+4. Multipliers stack additively: `effectiveMultiplier = 1 + sum(m_i - 1)`. `multipliedBase = max(0, floor(basePoints * effectiveMultiplier))`. Decision: floor always (not the base rule's rounding), documented in code - the house never rounds the stacked product up, and per-rule rounding already shaped the base. Note: doc 35 states per-multiplier extras `round_i(base * (m_i - 1))`; the task brief explicitly mandated the effective-multiplier-then-floor formulation with the `{effectiveMultiplier, multipliedBase}` breakdown, which is what is implemented. The two agree whenever extras are integral (incl. both worked/stacking examples); they can differ by <= n-1 points on fractional multipliers.
+5. Bonuses: `sum(bonus_points)` of eligible bonus rules, added AFTER multiplication, never multiplied, never rounded.
+6. `points = max(0, multipliedBase + bonusPoints)`, always an integer >= 0 (negative effective multipliers from sub-1x stacks clamp at 0).
+7. `ruleSnapshot`: deep-frozen `{engine: "points/v1", amount_centavos, receipt_date, timezone, base:{rule_id, rule_type, rounding, eligible, points}, multipliers:[{rule_id, multiplier}], bonuses:[{rule_id, bonus_points}], effective_multiplier, total_points}`. No `computed_at` (would be impure); the IO layer stamps it at insert time.
 
-1. Wrote `src/lib/money.test.ts` first (21 cases: format, parse, symbol toggle, throws on non-integer/negative, round-trip both directions). Ran it against a nonexistent `money.ts` -> red (`Failed to resolve import "./money"`).
-2. Implemented `money.ts` -> green, 21/21.
-3. Wrote `schemas.ts`, then `repo.ts`/`service.ts`/`actions.ts`, then `menu.test.ts` (51 cases covering: `resolveOwnerBusiness` auth/membership resolution, list functions' scoping, the cascade behavior directly at the repo layer, and per-action arg validation/auth-gating/repo-call-shape through the full actions -> service -> repo -> mocked-supabase-client path). First run caught a real bug: my UUIDs in test fixtures (`11111111-1111-1111-1111-...`) didn't satisfy zod v4's stricter `.uuid()` regex (requires valid version/variant nibbles), correctly failing 13 tests before I fixed the fixtures to `...-4111-8111-...` form - confirms the schema validation is doing real work, not a rubber stamp.
-4. Full suite: baseline 87 + money 21 + menu 51 = **159 passed**, `npx eslint` clean on new files, `npm run build` succeeds (Next 16 compiles + typechecks + prerenders all 24 routes).
+## Worked example (doc 35 section 3)
+48500 centavos, receiptDate `2026-07-24T04:40:00Z` (= Friday 12:40 Asia/Manila), base amount_rate rate 100 floor, candidate 2.00x multiplier `{days:[5]}`:
+base 485 -> effective 2 -> multipliedBase 970 -> bonuses 0 -> **points = 970**. Asserted exactly, including the full breakdown.
 
-## Child-cascade approach (one line)
-
-`repo.archiveProduct`, `repo.setProductStatus('hidden')`, and `repo.updateProduct` (when its patch includes `status: 'hidden'`) all funnel through a shared `cascadeHideChildren(productId)` that sets `is_available = false` on the product's `product_variants`/`product_addons` rows in the same call, since those tables' public RLS select policies only check `is_available` + `deleted_at` and never look at the parent product's status/deleted_at; un-hiding never auto re-enables children (left to explicit variant/addon toggles).
-
-## Architecture notes
-
-- `resolveOwnerBusiness()` takes no business id from the client: it derives the caller's user id from `supabase.auth.getUser()` inside repo.ts, looks up their first `business_staff` row with `status = 'active'`, then loads that business's `{id, slug, name, status}`.
-- `actions.ts` independently calls `getUser()` for the explicit "confirm session" gate (matching `identity/actions.ts`'s NOT_SIGNED_IN pattern) and separately calls `repo.resolveOwnerBusiness()` for business resolution; both share the same mocked/cookie-scoped Supabase client so this is not a real double-fetch of different data.
-- `service.ts` never touches Supabase directly - it only calls repo functions and translates `{data, error}` into `{ok}` / `{ok:false, message}`, then fires `emitCatalogUpdated` (console.info + `// TODO(api): wire embeddings refresh job (doc 38)`) after every successful mutation.
-- Added `setProductStatus` as an extra exported action (not in the UI's literal 12-action list) since the brief's repo/service deliverables explicitly call for a dedicated `setProductStatus` with cascade; it's wired up for a future hide/unhide quick-action and exercises the identical cascade path as `updateProduct`.
-- `ProductUpdateInput`/`ProductUpdatePatch` types were introduced (rather than TS's `Partial<ProductInput>`) to satisfy `exactOptionalPropertyTypes: true` - zod's own `.partial()` inference and the generated Supabase `Update` row type both need to line up structurally with what gets passed to `.update()`.
+## Tests
+58 new tests (25 conditions + 33 compute): schema accept/reject matrix (strict keys, day bounds, HH:MM regex, paired times, min_amount), every DSL predicate incl. midnight-spanning 22:00->02:00 window and from==to; timezone derivation (Manila noon, date-line crossing to Saturday, local midnight Sunday, UTC, America/New_York DST zone); every rule_type; all three rounding modes on fractional cases; tiered boundaries (at min, at max, between tiers, gap, above closed top -> 0, open-ended top); worked example -> 970; 2x+3x additive stacking -> 4x -> 1940; fractional multiplier floor; bonus-after-multiplication; multi-bonus sum; failing-condition exclusion; no candidates -> base only; birthday/first_visit gating; base earning floor; sub-1x clamp to 0; integer invariant; deep-frozen snapshot contents; throw-on-misconfig.
 
 ## Gates
+- `npm test`: 28 files, **287 passed** (229 existing + 58 new), 0 failed.
+- `npm run lint`: clean. `npm run build`: compiled + TypeScript clean (strict, exactOptionalPropertyTypes, no any).
+- Zero em-dashes in the new files (verified by grep). No IO imports anywhere in `src/features/points/`.
 
-- `npx vitest run`: 19 test files, 159 passed.
-- `npx eslint` on new files: clean.
-- `npx tsc --noEmit`: no errors in any menu/money file (3 pre-existing unrelated errors in `scripts/generate-md3-tokens.test.ts` and two component test files predate this branch/task, confirmed via `git stash`).
-- `npm run build`: compiles, typechecks, and prerenders successfully.
+## Fix report
 
-## Concerns / follow-ups for later tasks
+Status: COMPLETE. Money-path correctness fix so `computePoints` exactly matches doc 35 "Arithmetic (exact)" and the doc 34 section 6 additive-extras model. Commit `fix(points): per-multiplier rounding of extras per points-engine spec (doc 35)` on `feat/campaigns-points`.
 
-- `listCategories`/`listProducts`/`listVariants`/`listAddons` are implemented but not yet wired to any server action or page - they exist for the (presumably upcoming) menu-builder UI task to consume.
-- `emitCatalogUpdated` is a stub per spec; the embeddings-refresh wiring is explicitly deferred (doc 38 TODO).
-- `supabase/migrations/0007_catalog.sql` showed as modified in git status before this task started (an unrelated doc-22 `sold_out` public-read RLS fix); it was left untouched here and has since been committed separately (`f567a14 fix(menu): sold_out products are publicly readable (doc 22 greyed-out state)`), out of scope for this task.
-- This report file previously held content from an unrelated earlier task-numbering scheme ("Supabase clients, validated env, session middleware" on the auth-slice plan). Overwritten per instructions since the same `task-3-report.md` path is reused per-feature-plan; flagging in case that collision is unintentional.
+### What changed
+- `src/features/points/compute.ts`: replaced the effective-multiplier-then-floor formulation (`floor(base * (1 + sum(m_i - 1)))`) with per-rule extras: `extra_i = round_i(base_points * (multiplier_i - 1))` using THAT multiplier rule's `rounding` column (floor|round|ceil, round = half-up); `TOTAL = max(0, base_points + sum(extra_i) + sum(bonus_points))`, all integers. Base rounding and verbatim bonuses unchanged; eligibility filtering (conditions DSL + pre-filtered candidates) unchanged. Rounding applies per contribution, never to the running total.
+- `src/features/points/types.ts`: `PointsBreakdown` is now `{basePoints, multipliers: [{multiplier, rounding, extra}], multiplierExtras, bonusPoints, total}` (new `MultiplierBreakdown` type); `effectiveMultiplier`/`multipliedBase` removed.
+- `ruleSnapshot.multipliers` entries now carry `rounding` and `points_delta` (= extra_i) per doc 35's frozen shape; `effective_multiplier` removed. `campaign_id`/`priority`/`is_stackable` remain the caller/service layer's job (the pure engine does not see campaigns).
+- `compute.test.ts`: kept the worked examples (485 Friday 2x floor -> 970; 100 base 2x + 50 bonus -> 250; 2x + 3x on 485 -> 1940) and corrected/added divergence cases: base 3 with two 1.5x floor -> 5 (old code said 6); 1.25x ceil on base 485 -> 485 + ceil(121.25) = 607 (old: 606); mixed 2x floor + 1.5x ceil on 485 -> 485 + 485 + 243 = 1213; 1.5x round (half-up) on base 3 -> 5; sub-1x clamp now asserts per-rule extras (floor(485 * -0.75) = -364 each).
+
+### Gates
+- `npm test`: 29 files, 355 passed, 0 failed. `npm run lint`: clean. `npm run build`: compiled + TypeScript clean. Zero em-dashes in the touched files.
+- Note: the "Compute algorithm" section above (items 4, 6, 7) describes the pre-fix behavior; this fix report supersedes it.

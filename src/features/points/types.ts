@@ -77,10 +77,21 @@ export interface ComputePointsInput {
   visitContext?: VisitContext;
 }
 
+// One applied multiplier's contribution (doc 35 "Arithmetic (exact)"):
+// extra = round(basePoints * (multiplier - 1)) using THAT rule's rounding.
+export interface MultiplierBreakdown {
+  multiplier: number;
+  rounding: RoundingMode;
+  extra: number;
+}
+
 export interface PointsBreakdown {
   basePoints: number;
-  effectiveMultiplier: number;
-  multipliedBase: number;
+  // Per-rule extras, in candidate order. Each rounded with its own rule's
+  // rounding mode; never one effective multiplier rounded once.
+  multipliers: MultiplierBreakdown[];
+  // Sum of all per-rule extras.
+  multiplierExtras: number;
   bonusPoints: number;
   total: number;
 }
