@@ -125,21 +125,33 @@ export async function listMyClaims(): Promise<MyClaimDTO[]> {
 }
 
 /**
- * One claim by id, with reward/business names resolved. RLS scopes this to
- * claims the caller may see (their own claim, or staff of the owning
- * business); a claim outside that scope simply does not come back, so this
- * returns null both for "does not exist" and "not visible to you" -
- * indistinguishable by design (doc 13's 404 rule).
+ * One claim by id, with reward/business names resolved. RLS scopes the read
+ * to claims the caller may see - but that is a UNION of two policies
+ * (reward_claims_consumer_select: consumer_id = auth.uid(); OR
+ * reward_claims_staff_select: staff of the owning business), so a row
+ * coming back here is NOT necessarily the caller's own claim. Callers that
+ * must be scoped to the claim owner only (e.g. the mint-token route) must
+ * check the returned consumerId themselves - see
+ * src/features/rewards/server/claim-ownership.ts. This function only
+ * distinguishes "no row visible to the caller at all" (returns null, doc
+ * 13's 404 rule: never distinguish absent from outside-scope) from a
+ * genuine query failure (throws, so callers can answer 500 instead of a
+ * false 404).
  */
 export async function getClaim(claimId: string): Promise<ClaimDetailDTO | null> {
   const supabase = await createClient();
 
-  const { data: claim } = await supabase
+  const { data: claim, error } = await supabase
     .from("reward_claims")
-    .select("id, reward_id, business_id, status, points_spent, claimed_at, expires_at, redeemed_at")
+    .select(
+      "id, reward_id, business_id, consumer_id, status, points_spent, claimed_at, expires_at, redeemed_at",
+    )
     .eq("id", claimId)
     .maybeSingle();
 
+  if (error) {
+    throw new Error(`getClaim: failed to load claim ${claimId}: ${error.message}`);
+  }
   if (!claim) return null;
 
   const [{ data: reward }, { data: business }] = await Promise.all([
@@ -152,6 +164,7 @@ export async function getClaim(claimId: string): Promise<ClaimDetailDTO | null> 
     rewardId: claim.reward_id,
     rewardName: reward?.name ?? "",
     businessId: claim.business_id,
+    consumerId: claim.consumer_id,
     businessName: business?.name ?? "",
     status: claim.status,
     pointsSpent: claim.points_spent,

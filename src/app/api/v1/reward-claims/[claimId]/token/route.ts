@@ -2,16 +2,22 @@ import { randomUUID } from "node:crypto";
 
 import { NextResponse, type NextRequest } from "next/server";
 
+import { assertClaimOwner } from "@/features/rewards/server/claim-ownership";
 import * as repo from "@/features/rewards/server/repo";
 import { mintRedemptionToken } from "@/features/rewards/server/token";
 import { createClient } from "@/lib/supabase/server";
 
 // POST /api/v1/reward-claims/{claimId}/token
-// Mints a short-lived, single-use redemption token for one of the caller's
-// own claims (repo.getClaim is RLS-scoped, so ownership is enforced by the
-// database, not by application code re-checking a consumer_id). Doc 13
-// envelope: { data } | { error: { code, message, request_id } }, always
-// with an X-Request-Id header.
+// Mints a short-lived, single-use redemption token for the CALLER'S OWN
+// claim only (doc 35 s12: consumer / claim owner). repo.getClaim is RLS-
+// scoped, but RLS on reward_claims is a UNION of two policies - the
+// consumer's own claims OR any staff member of the owning business (see
+// supabase/migrations/0012_campaigns.sql and
+// src/features/rewards/server/claim-ownership.ts) - so RLS alone does NOT
+// enforce ownership here. Without the explicit check below, any staff
+// member of the business could mint a redemption token for a customer's
+// claim and self-redeem it. Doc 13 envelope: { data } | { error: { code,
+// message, request_id } }, always with an X-Request-Id header.
 
 function errorResponse(
   status: number,
@@ -48,13 +54,37 @@ export async function POST(
     );
   }
 
-  // RLS (reward_claims_consumer_select / reward_claims_staff_select) is the
-  // real authorization boundary: a claim outside the caller's scope simply
-  // does not come back, and "not found" and "not yours" both resolve to the
-  // same 404 (doc 13's rule: never distinguish the two).
-  const claim = await repo.getClaim(claimId);
-  if (!claim) {
+  let claim;
+  try {
+    claim = await repo.getClaim(claimId);
+  } catch {
+    return errorResponse(
+      500,
+      "INTERNAL",
+      "Something went wrong. Please try again.",
+      requestId,
+    );
+  }
+
+  // "Not found" and "not yours" (whether the claim genuinely doesn't exist,
+  // or RLS's staff-select union let a non-owning staff member's read
+  // through) both resolve to the same generic 404 - doc 13's rule: never
+  // distinguish absent from outside-caller-scope.
+  if (!claim || !assertClaimOwner(claim, user.id)) {
     return errorResponse(404, "NOT_FOUND", "This claim was not found.", requestId);
+  }
+
+  if (claim.status === "redeemed") {
+    return errorResponse(
+      409,
+      "CLAIM_ALREADY_REDEEMED",
+      "This reward was already redeemed.",
+      requestId,
+    );
+  }
+
+  if (claim.status === "expired") {
+    return errorResponse(422, "CLAIM_EXPIRED", "This claim has expired.", requestId);
   }
 
   if (claim.status !== "claimed") {
@@ -82,11 +112,11 @@ export async function POST(
     );
   }
 
-  // Response keys are camelCase here (not the snake_case doc 13 otherwise
-  // recommends) per this endpoint's binding spec: { data: { token,
-  // expiresAt } }.
+  // snake_case JSON keys per doc 13 ("Timestamps ISO-8601 UTC ...
+  // snake_case JSON keys"). Internal TS/DTO naming (minted.expiresAt) stays
+  // camelCase; only the HTTP body is snake_case.
   const response = NextResponse.json(
-    { data: { token: minted.token, expiresAt: minted.expiresAt } },
+    { data: { token: minted.token, expires_at: minted.expiresAt } },
     { status: 200 },
   );
   response.headers.set("X-Request-Id", requestId);

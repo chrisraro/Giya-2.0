@@ -46,7 +46,16 @@ export interface MyClaimDTO {
   redeemedAt: string | null;
 }
 
-export type ClaimDetailDTO = MyClaimDTO;
+// getClaim's DTO additionally carries consumerId: RLS on reward_claims is a
+// UNION of reward_claims_consumer_select (consumer_id = auth.uid()) and
+// reward_claims_staff_select (staff of the business), so a row returned by
+// getClaim is not necessarily the caller's own claim. Callers that must be
+// scoped to the claim owner only (e.g. the mint-token route, doc 35 s12)
+// need consumerId to check that themselves - see
+// src/features/rewards/server/claim-ownership.ts.
+export interface ClaimDetailDTO extends MyClaimDTO {
+  consumerId: string;
+}
 
 // One of the caller's business_customers rows (their balance at one
 // business), with the business name/slug resolved for display.
