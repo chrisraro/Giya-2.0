@@ -427,6 +427,86 @@ export type Database = {
           },
         ]
       }
+      campaigns: {
+        Row: {
+          archived_at: string | null
+          audience: Json
+          budget: Json
+          business_id: string
+          created_at: string
+          created_by: string | null
+          deleted_at: string | null
+          description: string | null
+          ends_at: string | null
+          id: string
+          image_url: string | null
+          is_stackable: boolean
+          name: string
+          priority: number
+          recurrence: Json | null
+          starts_at: string | null
+          status: string
+          timezone: string
+          type: string
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          archived_at?: string | null
+          audience?: Json
+          budget?: Json
+          business_id: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          description?: string | null
+          ends_at?: string | null
+          id?: string
+          image_url?: string | null
+          is_stackable?: boolean
+          name: string
+          priority?: number
+          recurrence?: Json | null
+          starts_at?: string | null
+          status?: string
+          timezone?: string
+          type: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          archived_at?: string | null
+          audience?: Json
+          budget?: Json
+          business_id?: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          description?: string | null
+          ends_at?: string | null
+          id?: string
+          image_url?: string | null
+          is_stackable?: boolean
+          name?: string
+          priority?: number
+          recurrence?: Json | null
+          starts_at?: string | null
+          status?: string
+          timezone?: string
+          type?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaigns_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       consumers: {
         Row: {
           city_id: string | null
@@ -500,6 +580,149 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "consumers"
             referencedColumns: ["id"]
+          },
+        ]
+      }
+      loyalty_cards: {
+        Row: {
+          business_id: string
+          completed_count: number
+          consumer_id: string
+          created_at: string
+          created_by: string | null
+          id: string
+          last_stamp_at: string | null
+          program_id: string
+          progress: number
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          business_id: string
+          completed_count?: number
+          consumer_id: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          last_stamp_at?: string | null
+          program_id: string
+          progress?: number
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          business_id?: string
+          completed_count?: number
+          consumer_id?: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          last_stamp_at?: string | null
+          program_id?: string
+          progress?: number
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "loyalty_cards_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "loyalty_cards_consumer_id_fkey"
+            columns: ["consumer_id"]
+            isOneToOne: false
+            referencedRelation: "consumers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "loyalty_cards_program_business_fkey"
+            columns: ["program_id", "business_id"]
+            isOneToOne: false
+            referencedRelation: "loyalty_programs"
+            referencedColumns: ["id", "business_id"]
+          },
+        ]
+      }
+      loyalty_programs: {
+        Row: {
+          business_id: string
+          campaign_id: string
+          card_style: Json
+          created_at: string
+          created_by: string | null
+          deleted_at: string | null
+          id: string
+          max_stamps_per_day: number
+          min_amount_per_stamp_centavos: number | null
+          program_type: string
+          resets_on_completion: boolean
+          reward_id: string
+          stamp_icon: string | null
+          target_value: number
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          business_id: string
+          campaign_id: string
+          card_style?: Json
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          id?: string
+          max_stamps_per_day?: number
+          min_amount_per_stamp_centavos?: number | null
+          program_type: string
+          resets_on_completion?: boolean
+          reward_id: string
+          stamp_icon?: string | null
+          target_value: number
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          business_id?: string
+          campaign_id?: string
+          card_style?: Json
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          id?: string
+          max_stamps_per_day?: number
+          min_amount_per_stamp_centavos?: number | null
+          program_type?: string
+          resets_on_completion?: boolean
+          reward_id?: string
+          stamp_icon?: string | null
+          target_value?: number
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "loyalty_programs_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "loyalty_programs_campaign_business_fkey"
+            columns: ["campaign_id", "business_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id", "business_id"]
+          },
+          {
+            foreignKeyName: "loyalty_programs_reward_business_fkey"
+            columns: ["reward_id", "business_id"]
+            isOneToOne: false
+            referencedRelation: "rewards"
+            referencedColumns: ["id", "business_id"]
           },
         ]
       }
@@ -594,6 +817,184 @@ export type Database = {
           },
         ]
       }
+      points_rules: {
+        Row: {
+          bonus_points: number | null
+          business_id: string
+          campaign_id: string | null
+          conditions: Json
+          created_at: string
+          created_by: string | null
+          deleted_at: string | null
+          fixed_points: number | null
+          id: string
+          is_active: boolean
+          kind: string
+          multiplier: number | null
+          rate_centavos_per_point: number | null
+          rounding: string
+          rule_type: string
+          tiers: Json | null
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          bonus_points?: number | null
+          business_id: string
+          campaign_id?: string | null
+          conditions?: Json
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          fixed_points?: number | null
+          id?: string
+          is_active?: boolean
+          kind: string
+          multiplier?: number | null
+          rate_centavos_per_point?: number | null
+          rounding?: string
+          rule_type: string
+          tiers?: Json | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          bonus_points?: number | null
+          business_id?: string
+          campaign_id?: string | null
+          conditions?: Json
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          fixed_points?: number | null
+          id?: string
+          is_active?: boolean
+          kind?: string
+          multiplier?: number | null
+          rate_centavos_per_point?: number | null
+          rounding?: string
+          rule_type?: string
+          tiers?: Json | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "points_rules_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "points_rules_campaign_business_fkey"
+            columns: ["campaign_id", "business_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id", "business_id"]
+          },
+        ]
+      }
+      points_transactions: {
+        Row: {
+          actor_id: string | null
+          adjust_reason: string | null
+          balance_after: number
+          business_id: string
+          campaign_id: string | null
+          claim_id: string | null
+          consumer_id: string
+          created_at: string
+          created_by: string | null
+          expires_at: string | null
+          id: string
+          points: number
+          receipt_id: string | null
+          reverses_id: string | null
+          rule_snapshot: Json | null
+          type: string
+        }
+        Insert: {
+          actor_id?: string | null
+          adjust_reason?: string | null
+          balance_after: number
+          business_id: string
+          campaign_id?: string | null
+          claim_id?: string | null
+          consumer_id: string
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string
+          points: number
+          receipt_id?: string | null
+          reverses_id?: string | null
+          rule_snapshot?: Json | null
+          type: string
+        }
+        Update: {
+          actor_id?: string | null
+          adjust_reason?: string | null
+          balance_after?: number
+          business_id?: string
+          campaign_id?: string | null
+          claim_id?: string | null
+          consumer_id?: string
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string
+          points?: number
+          receipt_id?: string | null
+          reverses_id?: string | null
+          rule_snapshot?: Json | null
+          type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "points_transactions_actor_id_fkey"
+            columns: ["actor_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "points_transactions_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "points_transactions_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "points_transactions_claim_fkey"
+            columns: ["claim_id"]
+            isOneToOne: false
+            referencedRelation: "reward_claims"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "points_transactions_consumer_id_fkey"
+            columns: ["consumer_id"]
+            isOneToOne: false
+            referencedRelation: "consumers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "points_transactions_reverses_id_fkey"
+            columns: ["reverses_id"]
+            isOneToOne: false
+            referencedRelation: "points_transactions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       product_addons: {
         Row: {
           business_id: string
@@ -646,11 +1047,11 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "product_addons_product_id_fkey"
-            columns: ["product_id"]
+            foreignKeyName: "product_addons_product_business_fkey"
+            columns: ["product_id", "business_id"]
             isOneToOne: false
             referencedRelation: "products"
-            referencedColumns: ["id"]
+            referencedColumns: ["id", "business_id"]
           },
         ]
       }
@@ -706,11 +1107,11 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "product_variants_product_id_fkey"
-            columns: ["product_id"]
+            foreignKeyName: "product_variants_product_business_fkey"
+            columns: ["product_id", "business_id"]
             isOneToOne: false
             referencedRelation: "products"
-            referencedColumns: ["id"]
+            referencedColumns: ["id", "business_id"]
           },
         ]
       }
@@ -781,11 +1182,11 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "products_category_id_fkey"
-            columns: ["category_id"]
+            foreignKeyName: "products_category_business_fkey"
+            columns: ["category_id", "business_id"]
             isOneToOne: false
             referencedRelation: "menu_categories"
-            referencedColumns: ["id"]
+            referencedColumns: ["id", "business_id"]
           },
         ]
       }
@@ -842,6 +1243,139 @@ export type Database = {
           updated_by?: string | null
         }
         Relationships: []
+      }
+      promotions: {
+        Row: {
+          amount_off_centavos: number | null
+          business_id: string
+          campaign_id: string
+          created_at: string
+          created_by: string | null
+          deleted_at: string | null
+          freebie_text: string | null
+          id: string
+          offer_kind: string
+          percent_off: number | null
+          product_ids: string[]
+          redemption_hint: string | null
+          terms: string | null
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          amount_off_centavos?: number | null
+          business_id: string
+          campaign_id: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          freebie_text?: string | null
+          id?: string
+          offer_kind: string
+          percent_off?: number | null
+          product_ids?: string[]
+          redemption_hint?: string | null
+          terms?: string | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          amount_off_centavos?: number | null
+          business_id?: string
+          campaign_id?: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          freebie_text?: string | null
+          id?: string
+          offer_kind?: string
+          percent_off?: number | null
+          product_ids?: string[]
+          redemption_hint?: string | null
+          terms?: string | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "promotions_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "promotions_campaign_business_fkey"
+            columns: ["campaign_id", "business_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id", "business_id"]
+          },
+        ]
+      }
+      redemptions: {
+        Row: {
+          business_id: string
+          claim_id: string
+          created_at: string
+          created_by: string | null
+          id: string
+          method: string
+          redeemed_at: string
+          token_jti: string | null
+          updated_at: string
+          updated_by: string | null
+          validated_by: string
+        }
+        Insert: {
+          business_id: string
+          claim_id: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          method?: string
+          redeemed_at?: string
+          token_jti?: string | null
+          updated_at?: string
+          updated_by?: string | null
+          validated_by: string
+        }
+        Update: {
+          business_id?: string
+          claim_id?: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          method?: string
+          redeemed_at?: string
+          token_jti?: string | null
+          updated_at?: string
+          updated_by?: string | null
+          validated_by?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "redemptions_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "redemptions_claim_business_fkey"
+            columns: ["claim_id", "business_id"]
+            isOneToOne: false
+            referencedRelation: "reward_claims"
+            referencedColumns: ["id", "business_id"]
+          },
+          {
+            foreignKeyName: "redemptions_validated_by_fkey"
+            columns: ["validated_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       ref_business_types: {
         Row: {
@@ -953,6 +1487,170 @@ export type Database = {
           updated_by?: string | null
         }
         Relationships: []
+      }
+      reward_claims: {
+        Row: {
+          business_id: string
+          cancelled_reason: string | null
+          claimed_at: string
+          consumer_id: string
+          created_at: string
+          created_by: string | null
+          expires_at: string
+          id: string
+          points_spent: number
+          points_txn_id: string | null
+          redeemed_at: string | null
+          reward_id: string
+          status: string
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          business_id: string
+          cancelled_reason?: string | null
+          claimed_at?: string
+          consumer_id: string
+          created_at?: string
+          created_by?: string | null
+          expires_at: string
+          id?: string
+          points_spent?: number
+          points_txn_id?: string | null
+          redeemed_at?: string | null
+          reward_id: string
+          status?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          business_id?: string
+          cancelled_reason?: string | null
+          claimed_at?: string
+          consumer_id?: string
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string
+          id?: string
+          points_spent?: number
+          points_txn_id?: string | null
+          redeemed_at?: string | null
+          reward_id?: string
+          status?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "reward_claims_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reward_claims_consumer_id_fkey"
+            columns: ["consumer_id"]
+            isOneToOne: false
+            referencedRelation: "consumers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reward_claims_points_txn_fkey"
+            columns: ["points_txn_id"]
+            isOneToOne: false
+            referencedRelation: "points_transactions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reward_claims_reward_business_fkey"
+            columns: ["reward_id", "business_id"]
+            isOneToOne: false
+            referencedRelation: "rewards"
+            referencedColumns: ["id", "business_id"]
+          },
+        ]
+      }
+      rewards: {
+        Row: {
+          business_id: string
+          campaign_id: string
+          claim_expiry_days: number
+          claim_kind: string
+          created_at: string
+          created_by: string | null
+          deleted_at: string | null
+          description: string | null
+          id: string
+          image_url: string | null
+          is_active: boolean
+          name: string
+          per_customer_limit: number
+          points_cost: number
+          remaining: number | null
+          terms: string | null
+          total_inventory: number | null
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          business_id: string
+          campaign_id: string
+          claim_expiry_days?: number
+          claim_kind?: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          description?: string | null
+          id?: string
+          image_url?: string | null
+          is_active?: boolean
+          name: string
+          per_customer_limit?: number
+          points_cost?: number
+          remaining?: number | null
+          terms?: string | null
+          total_inventory?: number | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          business_id?: string
+          campaign_id?: string
+          claim_expiry_days?: number
+          claim_kind?: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          description?: string | null
+          id?: string
+          image_url?: string | null
+          is_active?: boolean
+          name?: string
+          per_customer_limit?: number
+          points_cost?: number
+          remaining?: number | null
+          terms?: string | null
+          total_inventory?: number | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "rewards_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "rewards_campaign_business_fkey"
+            columns: ["campaign_id", "business_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id", "business_id"]
+          },
+        ]
       }
       user_consents: {
         Row: {
