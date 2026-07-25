@@ -16,6 +16,57 @@ export type Database = {
   }
   public: {
     Tables: {
+      ai_usage_events: {
+        Row: {
+          business_id: string | null
+          cost_micros: number
+          created_at: string
+          id: string
+          kind: string
+          model: string | null
+          ref_id: string | null
+          units: number
+          user_id: string | null
+        }
+        Insert: {
+          business_id?: string | null
+          cost_micros?: number
+          created_at?: string
+          id?: string
+          kind: string
+          model?: string | null
+          ref_id?: string | null
+          units: number
+          user_id?: string | null
+        }
+        Update: {
+          business_id?: string | null
+          cost_micros?: number
+          created_at?: string
+          id?: string
+          kind?: string
+          model?: string | null
+          ref_id?: string | null
+          units?: number
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ai_usage_events_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ai_usage_events_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       business_customers: {
         Row: {
           business_id: string
@@ -583,6 +634,71 @@ export type Database = {
           },
         ]
       }
+      fraud_signals: {
+        Row: {
+          business_id: string | null
+          consumer_id: string
+          created_at: string
+          evidence: Json
+          id: string
+          receipt_id: string
+          score: number
+          severity: string
+          signal: string
+        }
+        Insert: {
+          business_id?: string | null
+          consumer_id: string
+          created_at?: string
+          evidence?: Json
+          id?: string
+          receipt_id: string
+          score: number
+          severity: string
+          signal: string
+        }
+        Update: {
+          business_id?: string | null
+          consumer_id?: string
+          created_at?: string
+          evidence?: Json
+          id?: string
+          receipt_id?: string
+          score?: number
+          severity?: string
+          signal?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fraud_signals_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "fraud_signals_consumer_id_fkey"
+            columns: ["consumer_id"]
+            isOneToOne: false
+            referencedRelation: "consumers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "fraud_signals_receipt_business_fkey"
+            columns: ["receipt_id", "business_id"]
+            isOneToOne: false
+            referencedRelation: "receipts"
+            referencedColumns: ["id", "business_id"]
+          },
+          {
+            foreignKeyName: "fraud_signals_receipt_id_fkey"
+            columns: ["receipt_id"]
+            isOneToOne: false
+            referencedRelation: "receipts"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       loyalty_cards: {
         Row: {
           business_id: string
@@ -772,6 +888,59 @@ export type Database = {
             columns: ["business_id"]
             isOneToOne: false
             referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      ocr_results: {
+        Row: {
+          attempt: number
+          blocks: Json | null
+          created_at: string
+          duration_ms: number | null
+          engine: string
+          engine_version: string
+          error: string | null
+          id: string
+          mean_confidence: number | null
+          preprocess_ops: string[] | null
+          raw_text: string | null
+          receipt_id: string
+        }
+        Insert: {
+          attempt?: number
+          blocks?: Json | null
+          created_at?: string
+          duration_ms?: number | null
+          engine?: string
+          engine_version: string
+          error?: string | null
+          id?: string
+          mean_confidence?: number | null
+          preprocess_ops?: string[] | null
+          raw_text?: string | null
+          receipt_id: string
+        }
+        Update: {
+          attempt?: number
+          blocks?: Json | null
+          created_at?: string
+          duration_ms?: number | null
+          engine?: string
+          engine_version?: string
+          error?: string | null
+          id?: string
+          mean_confidence?: number | null
+          preprocess_ops?: string[] | null
+          raw_text?: string | null
+          receipt_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ocr_results_receipt_id_fkey"
+            columns: ["receipt_id"]
+            isOneToOne: false
+            referencedRelation: "receipts"
             referencedColumns: ["id"]
           },
         ]
@@ -984,6 +1153,13 @@ export type Database = {
             columns: ["consumer_id"]
             isOneToOne: false
             referencedRelation: "consumers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "points_transactions_receipt_fkey"
+            columns: ["receipt_id"]
+            isOneToOne: false
+            referencedRelation: "receipts"
             referencedColumns: ["id"]
           },
           {
@@ -1310,6 +1486,271 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "campaigns"
             referencedColumns: ["id", "business_id"]
+          },
+        ]
+      }
+      receipt_line_items: {
+        Row: {
+          business_id: string | null
+          id: string
+          line_total_centavos: number | null
+          match_score: number | null
+          product_id: string | null
+          qty: number | null
+          raw_text: string
+          receipt_id: string
+          sort: number
+          unit_price_centavos: number | null
+        }
+        Insert: {
+          business_id?: string | null
+          id?: string
+          line_total_centavos?: number | null
+          match_score?: number | null
+          product_id?: string | null
+          qty?: number | null
+          raw_text: string
+          receipt_id: string
+          sort?: number
+          unit_price_centavos?: number | null
+        }
+        Update: {
+          business_id?: string | null
+          id?: string
+          line_total_centavos?: number | null
+          match_score?: number | null
+          product_id?: string | null
+          qty?: number | null
+          raw_text?: string
+          receipt_id?: string
+          sort?: number
+          unit_price_centavos?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "receipt_line_items_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "receipt_line_items_product_id_fkey"
+            columns: ["product_id"]
+            isOneToOne: false
+            referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "receipt_line_items_receipt_id_fkey"
+            columns: ["receipt_id"]
+            isOneToOne: false
+            referencedRelation: "receipts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "rli_receipt_business_fkey"
+            columns: ["receipt_id", "business_id"]
+            isOneToOne: false
+            referencedRelation: "receipts"
+            referencedColumns: ["id", "business_id"]
+          },
+        ]
+      }
+      receipt_templates: {
+        Row: {
+          business_id: string
+          created_at: string
+          created_by: string | null
+          deleted_at: string | null
+          id: string
+          is_active: boolean
+          name: string
+          ocr_test_result: Json | null
+          parse_config: Json
+          sample_path: string
+          source_kind: string
+          updated_at: string
+          updated_by: string | null
+          validated_at: string | null
+          version: number
+        }
+        Insert: {
+          business_id: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          id?: string
+          is_active?: boolean
+          name: string
+          ocr_test_result?: Json | null
+          parse_config?: Json
+          sample_path: string
+          source_kind?: string
+          updated_at?: string
+          updated_by?: string | null
+          validated_at?: string | null
+          version?: number
+        }
+        Update: {
+          business_id?: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          id?: string
+          is_active?: boolean
+          name?: string
+          ocr_test_result?: Json | null
+          parse_config?: Json
+          sample_path?: string
+          source_kind?: string
+          updated_at?: string
+          updated_by?: string | null
+          validated_at?: string | null
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "receipt_templates_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      receipts: {
+        Row: {
+          business_id: string | null
+          created_at: string
+          created_by: string | null
+          device_id: string | null
+          id: string
+          image_hash: string
+          image_path: string
+          match_confidence: number | null
+          merchant_name: string | null
+          parse_confidence: number | null
+          parse_meta: Json | null
+          processed_at: string | null
+          receipt_date: string | null
+          receipt_number: string | null
+          reject_note: string | null
+          reject_reason: string | null
+          reviewed_at: string | null
+          reviewed_by: string | null
+          sha256: string
+          source: string
+          status: string
+          submitted_lat: number | null
+          submitted_lng: number | null
+          subtotal_centavos: number | null
+          tax_centavos: number | null
+          template_id: string | null
+          total_centavos: number | null
+          updated_at: string
+          updated_by: string | null
+          user_id: string
+        }
+        Insert: {
+          business_id?: string | null
+          created_at?: string
+          created_by?: string | null
+          device_id?: string | null
+          id?: string
+          image_hash: string
+          image_path: string
+          match_confidence?: number | null
+          merchant_name?: string | null
+          parse_confidence?: number | null
+          parse_meta?: Json | null
+          processed_at?: string | null
+          receipt_date?: string | null
+          receipt_number?: string | null
+          reject_note?: string | null
+          reject_reason?: string | null
+          reviewed_at?: string | null
+          reviewed_by?: string | null
+          sha256: string
+          source?: string
+          status?: string
+          submitted_lat?: number | null
+          submitted_lng?: number | null
+          subtotal_centavos?: number | null
+          tax_centavos?: number | null
+          template_id?: string | null
+          total_centavos?: number | null
+          updated_at?: string
+          updated_by?: string | null
+          user_id: string
+        }
+        Update: {
+          business_id?: string | null
+          created_at?: string
+          created_by?: string | null
+          device_id?: string | null
+          id?: string
+          image_hash?: string
+          image_path?: string
+          match_confidence?: number | null
+          merchant_name?: string | null
+          parse_confidence?: number | null
+          parse_meta?: Json | null
+          processed_at?: string | null
+          receipt_date?: string | null
+          receipt_number?: string | null
+          reject_note?: string | null
+          reject_reason?: string | null
+          reviewed_at?: string | null
+          reviewed_by?: string | null
+          sha256?: string
+          source?: string
+          status?: string
+          submitted_lat?: number | null
+          submitted_lng?: number | null
+          subtotal_centavos?: number | null
+          tax_centavos?: number | null
+          template_id?: string | null
+          total_centavos?: number | null
+          updated_at?: string
+          updated_by?: string | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "receipts_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "receipts_device_id_fkey"
+            columns: ["device_id"]
+            isOneToOne: false
+            referencedRelation: "user_devices"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "receipts_reviewed_by_fkey"
+            columns: ["reviewed_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "receipts_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "receipt_templates"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "receipts_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "consumers"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -1652,6 +2093,50 @@ export type Database = {
           },
         ]
       }
+      settings: {
+        Row: {
+          business_id: string | null
+          created_at: string
+          created_by: string | null
+          id: string
+          key: string
+          scope: string
+          updated_at: string
+          updated_by: string | null
+          value: Json
+        }
+        Insert: {
+          business_id?: string | null
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          key: string
+          scope: string
+          updated_at?: string
+          updated_by?: string | null
+          value: Json
+        }
+        Update: {
+          business_id?: string | null
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          key?: string
+          scope?: string
+          updated_at?: string
+          updated_by?: string | null
+          value?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "settings_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       user_consents: {
         Row: {
           consented_at: string
@@ -1743,6 +2228,7 @@ export type Database = {
     }
     Functions: {
       claim_reward: { Args: { p_reward_id: string }; Returns: string }
+      expire_claims: { Args: { p_limit?: number }; Returns: number }
       register_business: {
         Args: {
           p_address: string
