@@ -18,7 +18,7 @@ this file, only names.
 |---|---|---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase | SET | Nothing works |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase | SET | Nothing works |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase | **NEEDED NOW** | **The receipt pipeline cannot run.** `receipts`, `ocr_results` and `fraud_signals` are service-role-write-only by design, so a consumer cannot hand themselves an approved receipt with an invented total. Submission returns an error and no receipt is ever created. Found in the dashboard under Project Settings, API. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase | **NEEDED NOW** | **The receipt pipeline and the review queue cannot run.** `receipts`, `ocr_results`, `fraud_signals` and `audit_logs` are service-role-write-only by design, so a consumer cannot hand themselves an approved receipt with an invented total. Submission errors and no receipt is created; the review queue renders its unavailable state. Found in the dashboard under Project Settings, API. **Check the ref before using it:** the key is a JWT whose payload must read `"ref":"dcnpuvtbftpbcjcvfnlt"`. A key for `zlfxfzlnklqhajacngxf` was supplied once by mistake; that project is defunct and its key authenticates against nothing this app uses. The two look alike in the dashboard. |
 | `UPSTASH_REDIS_REST_URL` | Upstash Redis | SET | Redemption tokens fail closed, rate limiting fails open, idempotency 503s |
 | `UPSTASH_REDIS_REST_TOKEN` | Upstash Redis | SET | Same. **Rotate before production**: this value was pasted into a chat transcript |
 | `REDEMPTION_TOKEN_SECRET` | self-generated | SET | Redemption QR codes cannot be signed or verified |
@@ -60,6 +60,7 @@ These are set in a dashboard rather than a file, and are easy to forget.
 ## Before production
 
 - Rotate `UPSTASH_REDIS_REST_TOKEN` (exposed in a chat transcript).
+- Rotate the Supabase `service_role` key. One was exposed in a chat transcript on 2026-07-25. It belonged to the defunct `zlfxfzlnklqhajacngxf` project rather than the live one, so the blast radius is nil, but rotate it anyway rather than reasoning about which project a leaked key opened.
 - Regenerate `REDEMPTION_TOKEN_SECRET` for the production environment rather than reusing the dev value.
 - Enable email confirmation and leaked-password protection once Resend is connected.
 - Enable the access token hook if any admin surface has shipped.
