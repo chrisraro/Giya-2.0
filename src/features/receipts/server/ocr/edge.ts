@@ -27,13 +27,20 @@ import type { OcrProvider } from "./provider";
 //   2. THE NAME. Reported as "edge", so a log line or a future
 //      `ocr_results`-adjacent trace says which of the two HTTP paths answered.
 //      The database column already distinguishes them independently: the Edge
-//      Function writes `engine: "hf-vlm"` where the container writes
+//      Function writes `engine: "google-vision"` where the container writes
 //      `engine: "paddleocr"`, and the stub writes `engine: "stub"`.
 //
-// WHAT THE CALLER SHOULD KNOW ABOUT FAILURE. The Edge Function's engine is a
-// Hugging Face vision-language model on an account with no billing, so 402 and
-// 429 are expected operating conditions rather than exceptions. The function
-// folds both onto 503, which arrives here as OCR_UNAVAILABLE with
+// THE ENGINE CHANGED UNDER THIS FILE AND THIS FILE DID NOT. The Edge Function
+// was rebuilt on Google Cloud Vision in place of a Hugging Face VLM - a
+// different vendor, a different auth flow, real bounding boxes and real
+// confidences where there were none - and not a line here needed touching.
+// That is the seam doing its job: the external contract is doc 36 Stage 4 and
+// only the contract, so swapping the engine is a deployment, not a refactor.
+//
+// WHAT THE CALLER SHOULD KNOW ABOUT FAILURE. Vision quota is per-project and
+// per-minute, so a burst of scans at a busy counter can be throttled: that is
+// an expected operating condition rather than an exception. The function folds
+// 429 and every 5xx onto 503, which arrives here as OCR_UNAVAILABLE with
 // `retryable: true`, and if the attempt budget runs out the receipt routes to
 // review. It never becomes a transcription, and therefore never becomes an
 // award (plan risk 3).

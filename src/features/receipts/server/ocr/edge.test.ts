@@ -17,7 +17,7 @@ import type { OcrRequest } from "./provider";
 // is tested here is the CLIENT side of the seam - that this provider speaks
 // doc 36 Stage 4 on the wire, and that every status the function can return
 // becomes the right OcrError with the right retry decision. The retry decision
-// is the load-bearing part: a transient Hugging Face throttle recorded as
+// is the load-bearing part: a transient Vision quota throttle recorded as
 // terminal would send a perfectly good receipt to `rejected` instead of trying
 // again, and a terminal failure recorded as transient would burn the whole
 // attempt budget reproducing it.
@@ -33,17 +33,24 @@ const REQUEST: OcrRequest = {
   returnBlocks: true,
 };
 
-// What supabase/functions/ocr/index.ts returns on a clean transcription: the
-// VLM engine identity, no preprocess ops, no blocks, and the neutral 0.5
-// mean_confidence that stands in for a per-token confidence a VLM cannot give.
+// What supabase/functions/ocr/index.ts returns on a clean read: the Google
+// Vision engine identity, the ops it really performed, one block per
+// reconstructed printed line with real pixel boxes, and Vision's own measured
+// page confidence. Every one of those last three was empty or invented under
+// the Hugging Face VLM this engine replaced, and the whole reason this fixture
+// is worth updating is that `blocks` now has to survive the wire.
 const OK_BODY = {
-  engine: "hf-vlm",
-  engine_version: "google/gemma-4-26B-A4B-it",
-  preprocess_ops: [],
-  raw_text: "KAPE DIARIA\nOR# 004512\nTOTAL           150.00\n",
-  blocks: [],
-  mean_confidence: 0.5,
-  duration_ms: 1834,
+  engine: "google-vision",
+  engine_version: "v1:DOCUMENT_TEXT_DETECTION",
+  preprocess_ops: ["line_reconstruction"],
+  raw_text: "KAPE DIARIA\nOR# 004512\nTOTAL 150.00\n",
+  blocks: [
+    { text: "KAPE DIARIA", bbox: [22, 22, 79, 29], conf: 0.988 },
+    { text: "OR# 004512", bbox: [21, 118, 77, 126], conf: 0.961 },
+    { text: "TOTAL 150.00", bbox: [22, 331, 120, 340], conf: 0.984 },
+  ],
+  mean_confidence: 0.98076,
+  duration_ms: 812,
 };
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -119,46 +126,51 @@ describe("createEdgeOcrProvider", () => {
     expect(fetchImpl.mock.calls[0]?.[0]).toBe(FUNCTION_URL);
   });
 
-  it("returns the transcription camelCased, with the VLM engine identity intact", async () => {
+  it("returns the read camelCased, with the engine identity and geometry intact", async () => {
     fetchImpl.mockResolvedValue(jsonResponse(200, OK_BODY));
 
     const result = await provider().ocr(REQUEST);
 
     expect(result).toEqual({
       // `engine` is what lands in ocr_results.engine, and it is what makes a
-      // VLM-read row distinguishable from a stub row and from a future
-      // paddleocr row.
-      engine: "hf-vlm",
-      engineVersion: "google/gemma-4-26B-A4B-it",
-      preprocessOps: [],
+      // Vision-read row distinguishable from a stub row, from the retired
+      // hf-vlm rows, and from a future paddleocr row.
+      engine: "google-vision",
+      engineVersion: "v1:DOCUMENT_TEXT_DETECTION",
+      preprocessOps: ["line_reconstruction"],
       rawText: OK_BODY.raw_text,
-      blocks: [],
-      meanConfidence: 0.5,
-      durationMs: 1834,
+      // The blocks survive the wire untouched. Doc 36 Stage 6's
+      // `layout_anchors` tier resolves anchors against these boxes, so a
+      // provider that dropped or reshaped them would silently disable a whole
+      // parse tier rather than fail.
+      blocks: OK_BODY.blocks,
+      meanConfidence: 0.98076,
+      durationMs: 812,
     });
   });
 
-  it("passes the neutral 0.5 mean confidence through unchanged", async () => {
-    // 0.5 is chosen so `shouldEmitLowConfidenceSignal` (strict `< 0.5`) does
-    // NOT fire on every receipt, and so the Stage 9 OCR term contributes half
-    // its 0.30 weight, leaving the field terms to decide routing. Any
-    // rescaling here would quietly break both.
+  it("passes Vision's measured mean confidence through unrescaled", async () => {
+    // The number is MEASURED, not a placeholder, and both consumers read it
+    // directly: `shouldEmitLowConfidenceSignal` compares it against 0.5 and the
+    // Stage 9 formula multiplies it by 0.30. Any rescaling here would quietly
+    // move both.
     fetchImpl.mockResolvedValue(jsonResponse(200, OK_BODY));
 
     const result = await provider().ocr(REQUEST);
 
-    expect(result.meanConfidence).toBe(0.5);
+    expect(result.meanConfidence).toBe(0.98076);
   });
 
-  it("passes a truncated read's 0 mean confidence through unchanged", async () => {
-    // 0 is the function's answer when the model hit the token cap, so the
-    // transcription is provably incomplete. It caps parse_confidence at 0.75,
-    // below the 0.80 approve threshold, and it must not be clamped up.
-    fetchImpl.mockResolvedValue(jsonResponse(200, { ...OK_BODY, mean_confidence: 0 }));
+  it("passes a genuinely low mean confidence through unchanged", async () => {
+    // A smudged thermal slip really can come back this low. It must not be
+    // clamped up: 0.2 caps parse_confidence below the 0.80 approve threshold
+    // and fires the `ai_confidence_low` info signal, both of which are the
+    // intended handling of a receipt we read badly.
+    fetchImpl.mockResolvedValue(jsonResponse(200, { ...OK_BODY, mean_confidence: 0.2 }));
 
     const result = await provider().ocr(REQUEST);
 
-    expect(result.meanConfidence).toBe(0);
+    expect(result.meanConfidence).toBe(0.2);
   });
 
   it("maps 401 to a terminal auth failure", async () => {

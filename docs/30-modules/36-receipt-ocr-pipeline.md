@@ -67,6 +67,29 @@ Ops actually applied are returned by the service and recorded verbatim in `ocr_r
 
 ## Stage 4 — OCR service contract (PaddleOCR + OpenCV, containerized)
 
+> **What actually runs today (2026-07-26):** a Supabase Edge Function,
+> `supabase/functions/ocr/index.ts`, on **Google Cloud Vision**
+> `DOCUMENT_TEXT_DETECTION`, see
+> `../superpowers/specs/2026-07-26-ocr-rag-extraction-design.md` section 2.1.
+> **The contract below is honoured verbatim** and is the reason the swap needed
+> no pipeline change: same request fields, same response fields, same
+> 401/413/422/503 taxonomy. It reports `engine: "google-vision"`,
+> `engine_version: "v1:DOCUMENT_TEXT_DETECTION"`.
+>
+> Two Stage 4 fields are real for the first time, which matters for Stage 6 and
+> Stage 7. `blocks` carries one entry per **printed line** with true pixel
+> `bbox` and a true per-line `conf`, so the `layout_anchors` tier below finally
+> has geometry to resolve against; `mean_confidence` is Vision's measured page
+> confidence (0.98 on the reference receipt) rather than the neutral 0.5 the
+> preceding vision-language model had to invent.
+>
+> `raw_text` is **not** Vision's `fullTextAnnotation.text`. Vision's own
+> segmentation splits a label from its right-aligned amount ("TOTAL" and
+> "150.00" land on separate lines), which makes Stage 7's same-line amount rule
+> read the CASH tendered as the total. `supabase/functions/ocr/vision.ts`
+> rebuilds the printed lines from the word-level geometry first. See
+> `src/features/receipts/server/ocr/vision-lines.test.ts`.
+
 Per decision D1 (`../10-architecture/10-system-architecture.md`): private HTTP container (Fly.io/Railway/Cloud Run), stateless, no DB access, no business logic — image in, structured text out. Called only by the OCR worker.
 
 ```

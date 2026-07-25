@@ -1801,12 +1801,18 @@ interface OcrFailureInput {
  * which provider was selected. On a failure there is no response body to read
  * the engine name out of, so it is derived from the provider instead - and it
  * has to be derived, not guessed: an edge-provider failure recorded as
- * `paddleocr` would put rows in the OCR quality dashboards attributing our
- * VLM's error rate to an engine that has never run here.
+ * `paddleocr` would put rows in the OCR quality dashboards attributing this
+ * engine's error rate to one that has never run here.
+ *
+ * `edge` reads "google-vision" and used to read "hf-vlm", matching the engine
+ * the Edge Function actually runs (supabase/functions/ocr/index.ts). Rows
+ * written before that swap keep the old value, which is the point of recording
+ * it per attempt: an error-rate comparison between the two engines is a query,
+ * not an archaeology exercise.
  */
 const FAILED_ATTEMPT_ENGINE: Record<OcrProvider["name"], string> = {
   stub: "stub",
-  edge: "hf-vlm",
+  edge: "google-vision",
   http: "paddleocr",
 };
 
