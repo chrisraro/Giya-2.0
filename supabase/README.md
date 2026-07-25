@@ -78,7 +78,7 @@ is transaction-wrapped (`begin ... rollback`) and leaves no data behind:
 psql "$DATABASE_URL" -f supabase/tests/rls_identity_smoke.sql
 ```
 
-Nine suites, one per domain:
+Thirteen suites, one per domain:
 
 | file | covers |
 |---|---|
@@ -94,6 +94,7 @@ Nine suites, one per domain:
 | `rls_template_embedding_smoke.sql` | pgvector template embeddings: the pinned vector(384) width enforced rather than decorative, cosine ordering, and that RLS still applies to a vector query (0024) |
 | `rls_notifications_smoke.sql` | `notifications`: recipient-only reads, the read_at column grant, and the narrow trigger that permits marking read while refusing a body edit (0026) |
 | `ref_data_smoke.sql` | reference data: both tables non-empty, the seed idempotent on replay, every city carrying a non-null province and region in one of the 18 real regions (0027) |
+| `rpc_sweeps_smoke.sql` | the two scheduled sweeps: `sweep_stuck_receipts` moves a stuck, out-of-budget receipt to the doc 36 dead-letter state (`rejected` / `manual` / `processing_failed`) while leaving both a receipt still inside its attempt budget and a receipt that is merely recent completely untouched, the business-scope `ocr.max_attempts` override widens the budget and withdrawing it narrows it again, a second run is a no-op, no ledger row is written, both `cron.job` rows carry the expected schedule and command, `expire_claims` still runs clean, and every function is service_role only (0028) |
 
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
@@ -164,6 +165,107 @@ API, not by Postgres. The submit path re-checks the 10MB cap and magic-byte
 sniffs the content type server-side; the bucket settings are a second fence, not
 the only one.
 
+## Scheduled jobs (pg_cron)
+
+`0028_scheduled_sweeps.sql` installs `pg_cron` and schedules the two sweeps that
+had been correct and unreachable since they were written. There are no QStash
+credentials on this project, so the scheduler is Postgres itself.
+
+`pg_cron` is not relocatable (its control file pins `schema = pg_catalog`), so
+it is the one extension that cannot follow `0001_foundations.sql`'s
+`with schema extensions` convention. It creates its own `cron` schema. No app
+role holds `usage` on that schema, deliberately: `cron.job` exposes the whole
+schedule and `cron.job_run_details` exposes every error string a sweep has ever
+raised.
+
+| job | cron (UTC) | calls | why this cadence |
+|---|---|---|---|
+| `claims.expiry_sweep` | `7 * * * *` | `public.expire_claims(200)` | Doc 39's registered offset for this queue. `rewards.claim_expiry_days` is 1 to 365 (default 30), so the shortest TTL the schema permits is 24h; hourly holds a lapsed claim's inventory and points for at most 1/24 of that, and about 1/720 of the default. More often multiplies scans for a sub-hour gain; daily would, on a 1-day TTL, lock inventory for as long again as the claim was valid. |
+| `receipts.stuck_sweep` | `50 * * * *` | `public.sweep_stuck_receipts(200)` | :50 is doc 39's hourly jobs-reconciler slot, which is what this is. Against a 24h threshold, 23 runs in 24 find nothing and each empty run is one partial-index probe. The payoff is bounded discovery latency: a receipt reaches the operator's queue within the hour of crossing the threshold rather than within a day. |
+
+Both jobs run as `postgres`, which owns both functions and so retains EXECUTE
+independently of the `service_role`-only grants. Both functions are idempotent
+and take `for update skip locked`, so an overlapping run or a concurrent
+application write is safe.
+
+### What the receipts sweep does and does not do
+
+It cannot re-run OCR. Every retry decision lives in TypeScript
+(`src/features/receipts/server/process.ts`), and reimplementing any of it in
+plpgsql would create the second pipeline doc 36 Stage 9 exists to prevent. So
+the sweep builds the honest half only: it lands genuinely-dead receipts in doc
+36's dead-letter state (`status='rejected'`, `reject_reason='manual'`,
+`reject_note='processing_failed'`) where an operator can see them.
+
+Three conditions must ALL hold before a receipt is touched:
+
+1. `status = 'processing'`, re-asserted on the UPDATE so a receipt the pipeline
+   finished mid-sweep is left as the pipeline finished it.
+2. `updated_at` older than `settings['receipts.stuck_processing_hours']`
+   (platform scope, seeded at **24**). On a processing row `updated_at` is when
+   the pipeline claimed it, so this is time since last progress. A merely slow
+   receipt is never swept.
+3. `max(ocr_results.attempt)` at or above the effective `ocr.max_attempts`
+   (business scope wins over platform, matching the settings loader). This is
+   the same comparison `handleOcrFailure` makes before it writes the same state
+   itself, so the sweep can only reach the conclusion the pipeline would have
+   reached had it run again.
+
+A receipt with zero recorded attempts is therefore never swept, and neither is
+one parked by an `OCR_AUTH_FAILED` / `OCR_MISCONFIGURED` operator failure that
+has not burned the budget. Both are deliberate: rejecting a real customer's
+genuine purchase cannot be undone by the consumer, and leaving a receipt
+processing for another hour costs nothing.
+
+The sweep writes exactly one table. It never touches the points ledger, and it
+cannot: a receipt at `processing` has no earn row, because
+`award_receipt_points` (0018) only runs after the terminal `approved` write.
+
+### How an operator notices a failed run
+
+`cron.job_run_details` records every run with `status` and `return_message`.
+That table carries row level security with the policy `username = current_user`
+and no app role holds `usage` on schema `cron`, so it cannot simply be selected
+through PostgREST. `public.sweep_job_health(p_hours integer default 24)` is the
+read path: `security definer`, owned by `postgres`, granted to `service_role`
+only. It returns one row per scheduled job with `runs`, `failures`,
+`last_status`, `last_finished_at` and `last_error` (the most recent FAILING
+message, not the most recent message, so a job that fails every other run is
+still readable).
+
+```sql
+-- as postgres, or via the service role
+select * from public.sweep_job_health(24);
+
+-- the raw rows, privileged only
+select j.jobname, d.status, d.start_time, d.return_message
+  from cron.job_run_details d
+  join cron.job j on j.jobid = d.jobid
+ order by d.start_time desc
+ limit 20;
+```
+
+An operator query worth running alongside it, since the sweep deliberately
+leaves these alone:
+
+```sql
+select id, updated_at, now() - updated_at as stuck_for
+  from public.receipts
+ where status = 'processing'
+ order by updated_at;
+```
+
+Anything in that list older than a day is a receipt the sweep declined to
+declare dead, which is exactly the set a human should look at.
+
+**Not wired yet:** nothing alerts on `failures > 0` and nothing notifies the
+consumer when the sweep dead-letters their receipt. The pipeline's own
+dead-letter path sends `receipt_rejected` through the TypeScript copy matrix
+(`notifyReceiptOutcome`); composing that copy in plpgsql would duplicate it,
+which is the thing this migration is at pains not to do. Receipts is in the
+Realtime publication (0020) and the consumer's history reads the row, so the
+outcome is visible; the push is owed to the notifications slice.
+
 ## Known limitations (tracked)
 
 - `private.jwt_biz_role()` keeps doc 12's table-lookup fallback for `biz_overflow` users (>20 memberships). Under RLS this recurses (policy -> helper -> same table) and Postgres aborts the query for those users. [SCALE]-only surface; fixing requires a security definer lookup variant and an ADR against the Locked doc 12. Do not ship overflow accounts before that ADR.
@@ -198,6 +300,15 @@ the only one.
   and `private.apply_receipt_visit` are absent from the definer list because
   EXECUTE on the first is granted to `service_role` only and revoked from every
   role on the second, and both pin `search_path = ''`.
+- Migration 0028 (`pg_cron`, the two scheduled sweeps) added: no new advisors of
+  any level. Verified live on 2026-07-26 after 0028: 0 ERROR, and neither
+  `sweep_stuck_receipts` nor `sweep_job_health` appears in the definer-callable
+  warnings, because EXECUTE on both is granted to `service_role` only and both
+  pin `search_path = ''`. The WARN count read 9 rather than the 7 recorded
+  above: the two extra entries are both `public.rls_auto_enable`, the
+  pre-existing event-trigger function described under "Environment difference on
+  the current project" below, now surfaced by two definer-callable lints
+  Supabase added after the 7-WARN baseline was written. Neither is 0028's.
 
 ## Manual dashboard steps (pending)
 
@@ -240,6 +351,7 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0025_receipt_amount_ceiling.sql | 20260725182404 | 0025_receipt_amount_ceiling |
 | 0026_notifications.sql | 20260725205211 | 0026_notifications |
 | 0027_reference_data.sql | 20260725215529 | 0027_reference_data |
+| 0028_scheduled_sweeps.sql | 20260725221121 | 0028_scheduled_sweeps |
 
 **These versions are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`.**
 Every migration was applied in file order in a single pass, so unlike the
