@@ -15,6 +15,7 @@ vi.mock("@/lib/supabase/service", () => ({
 }));
 
 import { DEFAULT_ROUTING_THRESHOLDS } from "../confidence";
+import { LLM_DEFAULT_MAX_TOTAL_CENTAVOS } from "../extract";
 import { DEFAULT_FRAUD_REVIEW_THRESHOLD } from "../fraud";
 import { MATCH_THRESHOLDS } from "../matching";
 import { PHASH_BANDS } from "../phash";
@@ -43,7 +44,8 @@ function businessRow(key: string, value: unknown, businessId = BUSINESS_ID): Set
 }
 
 // The full platform registry exactly as supabase/migrations/0017_receipts.sql
-// seeds it, used as the "healthy database" baseline.
+// and 0025_receipt_amount_ceiling.sql seed it, used as the "healthy database"
+// baseline.
 const SEEDED_PLATFORM_ROWS: SettingsRow[] = [
   platformRow("fraud.phash_block_distance", 4),
   platformRow("fraud.phash_warn_distance", 10),
@@ -59,6 +61,8 @@ const SEEDED_PLATFORM_ROWS: SettingsRow[] = [
   platformRow("ocr.review_threshold", 0.5),
   platformRow("ocr.max_attempts", 3),
   platformRow("receipts.max_age_days", 3),
+  // 0025_receipt_amount_ceiling.sql: PHP 20,000.00 in integer centavos.
+  platformRow("receipts.max_total_centavos", 2_000_000),
 ];
 
 describe("DEFAULT_RECEIPT_SETTINGS drift guard", () => {
@@ -88,10 +92,24 @@ describe("DEFAULT_RECEIPT_SETTINGS drift guard", () => {
     expect(DEFAULT_ROUTING_THRESHOLDS.matchReview).toBe(MATCH_THRESHOLDS.review);
   });
 
-  it("matches the numbers migration 0017 seeds into the platform registry", () => {
+  it("matches the numbers migrations 0017 and 0025 seed into the platform registry", () => {
     // Resolving the seeded rows must produce exactly the fallbacks. If the
     // seed and the fallbacks ever diverge, this fails.
     expect(resolveReceiptSettings(SEEDED_PLATFORM_ROWS)).toEqual(DEFAULT_RECEIPT_SETTINGS);
+  });
+
+  it("keeps the amount ceiling above the LLM tier's default bound, deliberately", () => {
+    // The two are allowed to differ and do (see the comment on
+    // DEFAULT_MAX_TOTAL_CENTAVOS): the LLM bound guards a number a model
+    // produced on receipts that were already going to a human, so it is
+    // strict; this one guards every printed receipt on the platform, where a
+    // false positive is a real customer in a review queue. What must never
+    // happen is the platform ceiling dropping BELOW the LLM one, which would
+    // make the deterministic path the stricter of the two and put ordinary PH
+    // food-service receipts in the queue.
+    expect(DEFAULT_RECEIPT_SETTINGS.maxTotalCentavos).toBeGreaterThanOrEqual(
+      LLM_DEFAULT_MAX_TOTAL_CENTAVOS,
+    );
   });
 
   it("declares every key the seed registers that this loader consumes", () => {
@@ -193,6 +211,34 @@ describe("resolveReceiptSettings", () => {
       expect(settings.maxAgeDays).toBe(3);
     });
 
+    it("lets a business raise the amount ceiling above the platform default", () => {
+      // Doc 36 Stage 8's amount rule routes to review rather than rejecting,
+      // so the ceiling is a review trigger and not a business rule: a merchant
+      // who genuinely rings up more than PHP 20,000.00 raises their own bound
+      // once instead of having every large sale queued forever.
+      const settings = resolveReceiptSettings(
+        [
+          platformRow("receipts.max_total_centavos", 2_000_000),
+          businessRow("receipts.max_total_centavos", 20_000_000),
+        ],
+        BUSINESS_ID,
+      );
+
+      expect(settings.maxTotalCentavos).toBe(20_000_000);
+    });
+
+    it("lets a business lower the amount ceiling too", () => {
+      const settings = resolveReceiptSettings(
+        [
+          platformRow("receipts.max_total_centavos", 2_000_000),
+          businessRow("receipts.max_total_centavos", 50_000),
+        ],
+        BUSINESS_ID,
+      );
+
+      expect(settings.maxTotalCentavos).toBe(50_000);
+    });
+
     it("falls back to the platform value when the business override is malformed", () => {
       const settings = resolveReceiptSettings(
         [
@@ -263,6 +309,19 @@ describe("resolveReceiptSettings", () => {
       ]);
 
       expect(settings.phashBands.blockDistance).toBe(PHASH_BANDS.blockDistance);
+    });
+
+    it("falls back for an amount ceiling that is not a usable centavo count", () => {
+      // The loose direction is the dangerous one: a ceiling of 0 or of a
+      // billion pesos is a check switched off by accident, and this key exists
+      // precisely to make "no ceiling" unreachable.
+      for (const bad of [0, -1, 1.5, 2_000_000_001]) {
+        expect(
+          resolveReceiptSettings([platformRow("receipts.max_total_centavos", bad)])
+            .maxTotalCentavos,
+        ).toBe(DEFAULT_RECEIPT_SETTINGS.maxTotalCentavos);
+      }
+      expect(console.warn).toHaveBeenCalled();
     });
 
     it("ignores keys this loader does not consume", () => {

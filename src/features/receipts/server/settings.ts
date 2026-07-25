@@ -80,6 +80,18 @@ export interface ReceiptSettings {
   readonly ocrMaxAttempts: number;
   /** doc 36 Stage 8 freshness window, clamped 1-30. `receipts.max_age_days`. */
   readonly maxAgeDays: number;
+  /**
+   * doc 36 Stage 8 amount sanity, the PLATFORM ceiling in integer centavos.
+   * `receipts.max_total_centavos`.
+   *
+   * The fallback under a template's own `amount_sanity.max_total_centavos`,
+   * not a replacement for it: a configured template bound wins in both
+   * directions, and this number is what applies to the merchant who has
+   * configured nothing (or to a receipt that matched no template at all).
+   * Exceeding it routes to review, never to a rejection, so a business-scope
+   * row raising it is the documented fix for a genuinely high-ticket merchant.
+   */
+  readonly maxTotalCentavos: number;
 }
 
 /** A `settings` row as the service-role read returns it. */
@@ -120,6 +132,7 @@ export const RECEIPT_SETTINGS_KEYS = [
   "ocr.review_threshold",
   "ocr.max_attempts",
   "receipts.max_age_days",
+  "receipts.max_total_centavos",
 ] as const;
 
 // Defaults imported from the pure engines wherever an engine already owns the
@@ -132,6 +145,55 @@ const DEFAULT_COOLDOWN_STRIKES = 3; // matches the 0017 seed (doc 37 ladder step
 const DEFAULT_COOLDOWN_HOURS = 24; // matches the 0017 seed (doc 37 ladder step 2)
 const DEFAULT_OCR_MAX_ATTEMPTS = 3; // matches the 0017 seed (doc 36 Stage 4)
 const DEFAULT_MAX_AGE_DAYS = 3; // matches the 0017 seed (doc 36 Stage 8)
+
+/**
+ * PHP 20,000.00, matching the 0025_receipt_amount_ceiling.sql seed. Doc 36
+ * Stage 8's amount-sanity rule, applied when no template bound is configured.
+ *
+ * WHY THIS EXISTS AT ALL. Stage 8's amount rule used to read exactly one
+ * value: `withinAmountSanity`, which parse.ts leaves null when the matched
+ * template declared no `amount_sanity` (and there is no template at all on the
+ * generic path). So an unconfigured merchant had NO ceiling on the
+ * deterministic tiers, and a printed line reading `TOTAL: PHP 99,999.00` was
+ * read by the tier 1 keyword scan and auto-approved. extract.ts already gives
+ * the LLM tier a default bound for precisely this reason ("an unconfigured
+ * merchant would otherwise be an open door"), which left the CHEAPER attack -
+ * the one that needs no model call - as the unguarded one.
+ *
+ * WHY 20,000 AND NOT extract.ts's 10,000. The two numbers deliberately differ,
+ * because they guard different populations and their false positives cost
+ * different things:
+ *
+ *   * LLM_DEFAULT_MAX_TOTAL_CENTAVOS (PHP 10,000.00) bounds a number a
+ *     LANGUAGE MODEL produced, on the small minority of receipts the
+ *     deterministic tiers could not read. Refusing there leaves the field
+ *     missing, and a receipt with no total was already going to a human, so a
+ *     strict bound costs nothing extra. Strictness is free, so it is strict.
+ *   * This one bounds a number PRINTED ON THE PAPER and read by a parser that
+ *     found it at a position it recognises, on EVERY receipt the platform
+ *     scans. A false positive here is a real customer waiting on a review
+ *     queue for a purchase they genuinely made. Set it at PHP 10,000 and every
+ *     large-party restaurant bill and every bulk resupply in the country lands
+ *     in the queue.
+ *
+ * PHP 20,000.00 is where a single transaction at a PH food-service or small
+ * retail SME - this platform's whole target market - stops being large and
+ * starts being unusual enough that a human should glance at it before points
+ * are minted. It is also a fifth of the PHP 99,999 an injected total reaches
+ * for, so the attack the finding describes cannot clear it.
+ *
+ * NO FLOOR IS DEFINED, and that asymmetry is deliberate. extract.ts pairs its
+ * ceiling with a PHP 1.00 minimum because a sub-peso "total" from a model is
+ * evidence the model grabbed the wrong token - a statement about the
+ * extraction. The deterministic tiers read a money token that is actually
+ * printed, and the attack this file defends against is an INFLATED total: a
+ * deflated one awards the consumer fewer points than they earned, which no
+ * attacker wants. Meanwhile PHP 1.00 and PHP 5.00 purchases are the ordinary
+ * case at a sari-sari store, so a floor here would buy nothing on the money
+ * path and would put the smallest, most frequent legitimate transactions in
+ * the review queue.
+ */
+const DEFAULT_MAX_TOTAL_CENTAVOS = 2_000_000;
 
 /**
  * What the pipeline runs on when the registry is missing, unreachable, or
@@ -147,6 +209,7 @@ export const DEFAULT_RECEIPT_SETTINGS: ReceiptSettings = {
   routing: DEFAULT_ROUTING_THRESHOLDS,
   ocrMaxAttempts: DEFAULT_OCR_MAX_ATTEMPTS,
   maxAgeDays: DEFAULT_MAX_AGE_DAYS,
+  maxTotalCentavos: DEFAULT_MAX_TOTAL_CENTAVOS,
 };
 
 // ---------------------------------------------------------------------------
@@ -178,6 +241,15 @@ const attemptCount = z.number().int().min(1).max(10);
 // 1-30" for this key specifically, so an out-of-range number is a value to
 // bound rather than a value to reject.
 const ageDays = z.number().int();
+
+// The platform amount ceiling, in integer centavos. Rejected rather than
+// clamped, because doc 36 registers no clamp for this key and the two failure
+// directions are not symmetric: a fractional or negative value is a typo, and
+// anything above PHP 10,000,000.00 is not a merchant with big tills, it is a
+// ceiling switched off by accident - which is exactly the state this key exists
+// to make impossible. Falling back to the documented default and logging is the
+// only reading that cannot silently disable the check.
+const totalCeilingCentavos = z.number().int().min(1).max(1_000_000_000);
 
 const MAX_AGE_DAYS_MIN = 1;
 const MAX_AGE_DAYS_MAX = 30;
@@ -345,6 +417,16 @@ export function resolveReceiptSettings(
       readValue(values, "receipts.max_age_days", ageDays, DEFAULT_MAX_AGE_DAYS),
       MAX_AGE_DAYS_MIN,
       MAX_AGE_DAYS_MAX,
+    ),
+    // Business scope wins here by the same `readValue` precedence every other
+    // key uses, which is the whole point: a merchant who genuinely rings up
+    // more than the platform default raises their own bound once, and the
+    // ceiling stays a review trigger rather than becoming a business rule.
+    maxTotalCentavos: readValue(
+      values,
+      "receipts.max_total_centavos",
+      totalCeilingCentavos,
+      DEFAULT_MAX_TOTAL_CENTAVOS,
     ),
   };
 }

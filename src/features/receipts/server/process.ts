@@ -326,9 +326,19 @@ export interface TemplateRow {
   /** Migration 0024. The normalized master transcription the vector was made
    * from, and the master layout tier 3's prompt is guided by. */
   layout_text?: string | null;
-  /** Migration 0024, `vector(384)`. PostgREST serializes it as the text
-   * `"[0.1,...]"`; `parseEmbedding` is the only place that is read. */
-  embedding?: string | number[] | null;
+  /**
+   * Migration 0024, `vector(384)`. TYPED AS A STRING BECAUSE THAT IS WHAT
+   * COMES BACK: pgvector has no JSON representation, so PostgREST serializes
+   * the column as its text literal `"[0.1,...]"` and the generated types say
+   * `string | null` for exactly that reason. `parseEmbedding` is the only
+   * place it is read, and it re-validates the width and every element at
+   * runtime rather than trusting either this annotation or the database.
+   *
+   * Both columns stay OPTIONAL so `selectTemplate` can be called with the
+   * three columns Stage 6's heuristic actually needs; the generated row, which
+   * has them present and nullable, satisfies this shape unchanged.
+   */
+  embedding?: string | null;
 }
 
 export interface SelectedTemplate {
@@ -1003,9 +1013,30 @@ export function validateParsedReceipt(input: {
   parsed: ParsedReceipt;
   now: Date;
   maxAgeDays: number;
+  /**
+   * The platform amount ceiling (`receipts.max_total_centavos`), already
+   * resolved through business scope by `getReceiptSettings`. Used ONLY when
+   * the matched template configured no ceiling of its own.
+   */
+  maxTotalCentavos: number;
+  /**
+   * The matched template's `amount_sanity.max_total_centavos`, or null when
+   * the template declared none or when no template matched at all. Passed
+   * separately from `parsed.withinAmountSanity` because that flag cannot
+   * distinguish "the template said this total is fine" from "the template had
+   * no opinion", and the whole finding lives in that second case.
+   */
+  templateMaxTotalCentavos: number | null;
   businessVerifiedAt: Date | null;
 }): ValidationResult {
-  const { parsed, now, maxAgeDays, businessVerifiedAt } = input;
+  const {
+    parsed,
+    now,
+    maxAgeDays,
+    maxTotalCentavos,
+    templateMaxTotalCentavos,
+    businessVerifiedAt,
+  } = input;
   const signals: FraudSignal[] = [];
 
   // Readability (doc 36 Stage 8 row 1). A receipt with no total cannot be
@@ -1065,9 +1096,50 @@ export function validateParsedReceipt(input: {
   // them; the missing date has already cost 0.20 of parse_confidence, which is
   // where that uncertainty is meant to be priced.
 
-  // Amount sanity (row 6): route to review, never reject. `withinAmountSanity`
-  // is null when the template declared no bounds.
-  const forceReview = parsed.withinAmountSanity === false;
+  // Amount sanity (row 6): route to review, NEVER reject, in both halves below.
+  //
+  // Half one is the template's own verdict. `withinAmountSanity` is null when
+  // the template declared no bounds - and that null is where the T6 finding
+  // lands: a printed `TOTAL: PHP 99,999.00` read by the deterministic tier 1
+  // keyword scan needs no model call, so neither spec 4.2's rails nor
+  // extract.ts's LLM default bounds are anywhere near it, and nothing here used
+  // to test it. The LLM tier was given a safe default ceiling for exactly this
+  // reason, which left the cheaper attack as the unguarded one.
+  //
+  // Half two closes that. The EFFECTIVE ceiling is the template's configured
+  // maximum when it has one, and the platform setting otherwise; a merchant's
+  // own number therefore wins in both directions, above and below the platform
+  // default. A receipt over the ceiling is not fraud and is not unreadable - it
+  // is a real receipt with a large number on it - so a human looks at it, and a
+  // merchant who legitimately rings up that much raises their own bound once,
+  // in their template or in a business-scope settings row.
+  //
+  // The `templateMaxTotalCentavos === null` guard is what makes the template's
+  // number authoritative: when it has one, parse.ts has already tested this
+  // total against it and reported the answer in `withinAmountSanity`, so the
+  // platform ceiling must stay out of the way in BOTH directions - it may
+  // neither queue a receipt the merchant's own higher bound allows, nor
+  // second-guess a lower one that has already spoken.
+  const total = parsed.totalCentavos;
+  const overPlatformCeiling =
+    templateMaxTotalCentavos === null && total !== null && total > maxTotalCentavos;
+
+  if (overPlatformCeiling) {
+    // Doc 37 S7's `amount_outlier_total`, the same case a breached template
+    // bound already raises - the reviewer needs to know WHY an otherwise
+    // perfect receipt is in their queue, and `source` says which bound spoke.
+    // Not raised on the template-bound path, where `detectAmountAnomalies`
+    // already emits it and a second row would double-count the composite.
+    signals.push(
+      buildSignal("amount_outlier_total", {
+        observed_centavos: total,
+        max_total_centavos: maxTotalCentavos,
+        source: "platform_amount_ceiling",
+      }),
+    );
+  }
+
+  const forceReview = parsed.withinAmountSanity === false || overPlatformCeiling;
 
   return { rejection: null, forceReview, signals };
 }
@@ -1321,6 +1393,11 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
     parsed,
     now: now(),
     maxAgeDays: settings.maxAgeDays,
+    maxTotalCentavos: settings.maxTotalCentavos,
+    // Read off the SANITIZED config, so a template whose jsonb holds a string
+    // or a NaN in that slot is treated as having configured nothing and falls
+    // through to the platform ceiling rather than disabling it.
+    templateMaxTotalCentavos: template?.config.amount_sanity?.max_total_centavos ?? null,
     businessVerifiedAt,
   });
 
@@ -1877,13 +1954,12 @@ async function loadTemplates(
     );
     return [];
   }
-  // `src/lib/supabase/types.ts` was last generated before 0024, so the two new
-  // columns are not in its `receipt_templates` row type yet and the select
-  // above types as a column error. The cast is the same shape assertion the
-  // other loaders in this file make, widened by one step; it goes away on the
-  // next `generate_typescript_types` run, and `parseEmbedding` validates the
-  // vector at runtime regardless of what any generated type claims.
-  return (data ?? []) as unknown as TemplateRow[];
+  // No cast. `src/lib/supabase/types.ts` has been regenerated since 0024, so
+  // the select above is checked column by column against the generated row
+  // type and `data` already carries `layout_text` and `embedding`. If a future
+  // migration renames or drops either one, this line stops compiling, which is
+  // the whole reason the assertion was worth removing.
+  return data ?? [];
 }
 
 interface BusinessRow {

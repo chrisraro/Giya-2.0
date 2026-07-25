@@ -191,7 +191,7 @@ Applied to the parsed candidate before fraud scoring; failures set terminal stat
 | Not future | `receipt_date <= now() + 24h` (TZ grace) | `timestamp_anomaly` fraud signal (37), not auto-reject |
 | Postdates activation | `receipt_date >= businesses.verified_at` | `rejected / too_old` (predates the program) |
 | Number dedupe | insert-time conflict on `receipts_number_unique` (`(business_id, receipt_number)` where status ∈ approved/review/processing — rejected rows excluded, so resubmission after rejection works, `../20-data/24-schema-receipts-ai.md` note) | `rejected / duplicate` + `receipt_number_dup` signal |
-| Amount sanity | within template `amount_sanity` bounds | route to `review` |
+| Amount sanity | `total_centavos <=` the effective ceiling: the matched template's `amount_sanity.max_total_centavos` when it configures one, otherwise the platform ceiling (`settings` key `receipts.max_total_centavos`, default **PHP 20,000.00** = `2000000`, business-scope override allowed in either direction). A configured template bound wins over the platform number, and a template `min_total_centavos` still applies; there is deliberately **no** platform floor. | route to `review` (+ `amount_anomaly` signal, 37 S7) |
 
 ## Stage 9 — Confidence model & outcome routing
 
@@ -290,3 +290,4 @@ Ratified into `../20-data/26-schema-amendments.md`.
 2. `receipts.parse_meta` — **ACCEPTED** [MVP] (A24.2).
 3. Relax `receipts.image_path`/`image_hash`/`sha256` to nullable for non-scan sources — **DEFERRED [SCALE]**, lands with the POS/digital source adapters (A24.8).
 4. Settings keys (`receipts.max_age_days`, `ocr.approve_threshold`, `ocr.review_threshold`, `ocr.max_attempts`) — data, not DDL; recorded in 26 "Non-DDL registrations".
+5. Settings key `receipts.max_total_centavos` — **ACCEPTED** [MVP], seeded by `supabase/migrations/0025_receipt_amount_ceiling.sql`. Data, not DDL. Closes the Stage 8 gap where a merchant with no `amount_sanity` configured (or a receipt that matched no template at all) had no amount ceiling on the *deterministic* tiers, so a printed `TOTAL: PHP 99,999.00` read by the tier 1 keyword scan auto-approved without ever reaching the LLM tier's own default bounds. Deliberately higher than `extract.ts`'s PHP 10,000.00 LLM bound: that one guards a model-produced number on receipts already headed for a human, this one guards every printed receipt, where a false positive is a real customer in the review queue.
