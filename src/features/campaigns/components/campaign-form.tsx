@@ -20,6 +20,7 @@ import {
   offerKindSchema,
   programTypeSchema,
 } from "../schemas";
+import { CAMPAIGN_TIMEZONE, endOfDayExclusiveInZone, startOfDayInZone } from "../date-window";
 import type {
   CreateLoyaltyCampaignInput,
   CreatePromotionCampaignInput,
@@ -74,10 +75,6 @@ function controlBorderClass(hasError: boolean) {
   return hasError
     ? "border-error focus:border-error focus:ring-1 focus:ring-error"
     : "border-outline focus:border-primary focus:ring-1 focus:ring-primary";
-}
-
-function dateStringToDate(value: string): Date {
-  return new Date(`${value}T00:00:00`);
 }
 
 // -------------------------------------------------------------- shared step 1
@@ -237,7 +234,8 @@ const promotionFormSchema = z
     if (
       value.startsAt &&
       value.endsAt &&
-      dateStringToDate(value.endsAt).getTime() <= dateStringToDate(value.startsAt).getTime()
+      endOfDayExclusiveInZone(value.endsAt, CAMPAIGN_TIMEZONE).getTime() <=
+        startOfDayInZone(value.startsAt, CAMPAIGN_TIMEZONE).getTime()
     ) {
       ctx.addIssue({ code: "custom", path: ["endsAt"], message: "End date must be after start date" });
     }
@@ -272,8 +270,8 @@ function PromotionFields({ onBack, onCancel, submitting, serverError, onSubmit }
     onSubmit({
       name: values.name,
       ...(values.description ? { description: values.description } : {}),
-      ...(values.startsAt ? { startsAt: dateStringToDate(values.startsAt) } : {}),
-      ...(values.endsAt ? { endsAt: dateStringToDate(values.endsAt) } : {}),
+      ...(values.startsAt ? { startsAt: startOfDayInZone(values.startsAt, CAMPAIGN_TIMEZONE) } : {}),
+      ...(values.endsAt ? { endsAt: endOfDayExclusiveInZone(values.endsAt, CAMPAIGN_TIMEZONE) } : {}),
       promotion: {
         offerKind: values.offerKind,
         ...(values.offerKind === "percent_off" && values.percentOff
@@ -349,6 +347,7 @@ function PromotionFields({ onBack, onCancel, submitting, serverError, onSubmit }
           {...register("endsAt")}
         />
       </div>
+      <p className="text-body-s text-on-surface-variant">Dates follow Philippine time.</p>
 
       <div className="flex flex-col gap-2">
         <label htmlFor="promo-terms" className="text-label-l text-on-surface">
@@ -408,7 +407,8 @@ const rewardFormSchema = z
     if (
       value.startsAt &&
       value.endsAt &&
-      dateStringToDate(value.endsAt).getTime() <= dateStringToDate(value.startsAt).getTime()
+      endOfDayExclusiveInZone(value.endsAt, CAMPAIGN_TIMEZONE).getTime() <=
+        startOfDayInZone(value.startsAt, CAMPAIGN_TIMEZONE).getTime()
     ) {
       ctx.addIssue({ code: "custom", path: ["endsAt"], message: "End date must be after start date" });
     }
@@ -428,8 +428,8 @@ function RewardFields({ onBack, onCancel, submitting, serverError, onSubmit }: S
   const submit: SubmitHandler<RewardFormValues> = (values) => {
     onSubmit({
       name: values.name,
-      ...(values.startsAt ? { startsAt: dateStringToDate(values.startsAt) } : {}),
-      ...(values.endsAt ? { endsAt: dateStringToDate(values.endsAt) } : {}),
+      ...(values.startsAt ? { startsAt: startOfDayInZone(values.startsAt, CAMPAIGN_TIMEZONE) } : {}),
+      ...(values.endsAt ? { endsAt: endOfDayExclusiveInZone(values.endsAt, CAMPAIGN_TIMEZONE) } : {}),
       reward: {
         name: values.rewardName,
         pointsCost: Number(values.pointsCost),
@@ -510,6 +510,7 @@ function RewardFields({ onBack, onCancel, submitting, serverError, onSubmit }: S
           {...register("endsAt")}
         />
       </div>
+      <p className="text-body-s text-on-surface-variant">Dates follow Philippine time.</p>
 
       <div className="flex flex-col gap-2">
         <label htmlFor="reward-terms" className="text-label-l text-on-surface">
@@ -570,7 +571,8 @@ const loyaltyFormSchema = z
     if (
       value.startsAt &&
       value.endsAt &&
-      dateStringToDate(value.endsAt).getTime() <= dateStringToDate(value.startsAt).getTime()
+      endOfDayExclusiveInZone(value.endsAt, CAMPAIGN_TIMEZONE).getTime() <=
+        startOfDayInZone(value.startsAt, CAMPAIGN_TIMEZONE).getTime()
     ) {
       ctx.addIssue({ code: "custom", path: ["endsAt"], message: "End date must be after start date" });
     }
@@ -601,8 +603,8 @@ function LoyaltyFields({ onBack, onCancel, submitting, serverError, onSubmit }: 
   const submit: SubmitHandler<LoyaltyFormValues> = (values) => {
     onSubmit({
       name: values.name,
-      ...(values.startsAt ? { startsAt: dateStringToDate(values.startsAt) } : {}),
-      ...(values.endsAt ? { endsAt: dateStringToDate(values.endsAt) } : {}),
+      ...(values.startsAt ? { startsAt: startOfDayInZone(values.startsAt, CAMPAIGN_TIMEZONE) } : {}),
+      ...(values.endsAt ? { endsAt: endOfDayExclusiveInZone(values.endsAt, CAMPAIGN_TIMEZONE) } : {}),
       loyaltyProgram: {
         programType: values.programType,
         targetValue: Number(values.targetValue),
@@ -723,6 +725,7 @@ function LoyaltyFields({ onBack, onCancel, submitting, serverError, onSubmit }: 
           {...register("endsAt")}
         />
       </div>
+      <p className="text-body-s text-on-surface-variant">Dates follow Philippine time.</p>
 
       <StepActions onBack={onBack} onCancel={onCancel} submitting={submitting} />
     </form>

@@ -143,7 +143,12 @@ export async function activateCampaign(
     patch.starts_at = new Date().toISOString();
   }
 
-  const { data, error } = await repo.setCampaignStatus(businessId, campaignId, patch);
+  const { data, error } = await repo.setCampaignStatus(
+    businessId,
+    campaignId,
+    row.status as CampaignStatus,
+    patch,
+  );
   if (error) return failResult(error.message, error.code);
 
   emitLifecycleEvent(businessId, campaignId, "activate");
@@ -158,9 +163,11 @@ async function transitionCampaign(
   const row = await repo.getCampaignRow(businessId, campaignId);
   if (!row) return { ok: false, message: "Campaign not found." };
 
+  const expectedFrom = row.status as CampaignStatus;
+
   let target: CampaignStatus;
   try {
-    target = nextStatus({ status: row.status as CampaignStatus }, action);
+    target = nextStatus({ status: expectedFrom }, action);
   } catch (err) {
     if (err instanceof CampaignTransitionError) {
       return failResult(err.message, err.code);
@@ -173,7 +180,7 @@ async function transitionCampaign(
     patch.archived_at = new Date().toISOString();
   }
 
-  const { data, error } = await repo.setCampaignStatus(businessId, campaignId, patch);
+  const { data, error } = await repo.setCampaignStatus(businessId, campaignId, expectedFrom, patch);
   if (error) return failResult(error.message, error.code);
 
   emitLifecycleEvent(businessId, campaignId, action);
@@ -206,6 +213,22 @@ export async function resumeCampaign(
   campaignId: string,
 ): Promise<ActionResult<CampaignRow>> {
   return transitionCampaign(businessId, campaignId, "resume");
+}
+
+/**
+ * Ends a running campaign (active|paused -> ended; doc 34 T7). This is the
+ * only path off active/paused besides pausing/resuming each other - without
+ * it, `ended` and `archived` (which requires `ended` or `draft`, per the
+ * doc 34 edge set) are unreachable from the portal for any campaign that
+ * ever activated. Ending is one-way: doc 34 has no `ended -> active` edge,
+ * so relaunching the same offer means duplicating it into a new draft
+ * (T9), not resuming this row.
+ */
+export async function endCampaign(
+  businessId: string,
+  campaignId: string,
+): Promise<ActionResult<CampaignRow>> {
+  return transitionCampaign(businessId, campaignId, "end");
 }
 
 export async function upsertBaseRule(

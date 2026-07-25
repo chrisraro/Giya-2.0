@@ -12,6 +12,7 @@ import {
   createLoyaltyCampaign,
   createPromotionCampaign,
   createRewardCampaign,
+  endCampaign,
   pauseCampaign,
   resumeCampaign,
   upsertBaseRule,
@@ -112,6 +113,11 @@ export function CampaignsManager({ business, campaigns, baseRule }: CampaignsMan
     return result.ok ? { ok: true } : { ok: false, message: result.message };
   }
 
+  async function handleEnd(campaignId: string): Promise<ActionResult> {
+    const result = await endCampaign({ campaignId });
+    return result.ok ? { ok: true } : { ok: false, message: result.message };
+  }
+
   async function handleSaveBaseRule(input: BaseRuleInput): Promise<ActionResult> {
     const result = await upsertBaseRule(input);
     return result.ok ? { ok: true } : { ok: false, message: result.message };
@@ -149,6 +155,7 @@ export function CampaignsManager({ business, campaigns, baseRule }: CampaignsMan
         onActivate={handleActivate}
         onPause={handlePause}
         onResume={handleResume}
+        onEnd={handleEnd}
         onArchive={handleArchive}
       />
 

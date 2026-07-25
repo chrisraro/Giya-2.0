@@ -274,12 +274,39 @@ export async function updateCampaign(
   return { data, error };
 }
 
-// Thin status/column update; service.ts decides the patch (e.g. whether to
-// also stamp starts_at/archived_at) since that decision needs the
-// currently-loaded row, which the service layer already has.
+// PostgREST's error code for "the query's .single() expected exactly one
+// row but got zero (or more than one)". Here it can only mean zero: our own
+// .eq("id", ...).eq("business_id", ...) already scope to a single row by
+// primary key, so the only way this update matches nothing is the added
+// .eq("status", expectedFrom) predicate below missing because another
+// request changed the status first.
+const NO_ROWS_MATCHED_CODE = "PGRST116";
+
+const STALE_STATUS_MESSAGE =
+  "This campaign changed while you were working on it. Refresh and try again.";
+
+/**
+ * Thin status/column update; service.ts decides the patch (e.g. whether to
+ * also stamp starts_at/archived_at) since that decision needs the
+ * currently-loaded row, which the service layer already has.
+ *
+ * OPTIMISTIC CONCURRENCY: `expectedFrom` (the status the service layer read
+ * the row as being in) is folded into the update's WHERE clause via
+ * `.eq("status", expectedFrom)`, not just checked in memory beforehand.
+ * Without this, two interleaved requests - e.g. one activating, one
+ * archiving the same campaign - could both pass their own in-memory gate
+ * checks against the same stale row and then both write, letting a
+ * "archived -> active" write through and violating archived's terminal
+ * state. With the predicate, only the request that still finds the row in
+ * `expectedFrom` actually updates it; the loser's update matches zero rows,
+ * `.single()` surfaces that as a PGRST116 error, and this function turns
+ * that into a CAMPAIGN_INVALID_STATE conflict rather than a generic DB
+ * error or (worse) a silent no-op success.
+ */
 export async function setCampaignStatus(
   businessId: string,
   campaignId: string,
+  expectedFrom: CampaignStatus,
   patch: { status: CampaignStatus; starts_at?: string; archived_at?: string },
 ): Promise<Result<CampaignRow>> {
   const supabase = await createClient();
@@ -288,8 +315,16 @@ export async function setCampaignStatus(
     .update(patch)
     .eq("id", campaignId)
     .eq("business_id", businessId)
+    .eq("status", expectedFrom)
     .select()
     .single();
+
+  if (error && error.code === NO_ROWS_MATCHED_CODE) {
+    return {
+      data: null,
+      error: { code: "CAMPAIGN_INVALID_STATE", message: STALE_STATUS_MESSAGE },
+    };
+  }
 
   return { data, error };
 }

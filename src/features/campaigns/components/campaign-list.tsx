@@ -17,6 +17,7 @@ export interface CampaignListProps {
   onActivate: (campaignId: string) => Promise<ActionResult>;
   onPause: (campaignId: string) => Promise<ActionResult>;
   onResume: (campaignId: string) => Promise<ActionResult>;
+  onEnd: (campaignId: string) => Promise<ActionResult>;
   onArchive: (campaignId: string) => Promise<ActionResult>;
 }
 
@@ -75,8 +76,12 @@ function scheduleSummary(campaign: CampaignRow): string {
   return `Ends ${formatDate(ends as string)}`;
 }
 
-type ActionKind = "activate" | "pause" | "resume" | "archive";
+type ActionKind = "activate" | "pause" | "resume" | "end" | "archive";
 
+// "end" is deliberately never grouped with the other actions here - it is
+// one-way (no ended -> active edge, doc 34) so CampaignCard renders it
+// behind its own confirm step rather than firing on a single click like
+// pause/resume/archive do.
 function actionsForStatus(status: CampaignStatus): { label: string; kind: ActionKind }[] {
   switch (status) {
     case "draft":
@@ -87,9 +92,15 @@ function actionsForStatus(status: CampaignStatus): { label: string; kind: Action
     case "scheduled":
       return [{ label: "Activate", kind: "activate" }];
     case "active":
-      return [{ label: "Pause", kind: "pause" }];
+      return [
+        { label: "Pause", kind: "pause" },
+        { label: "End", kind: "end" },
+      ];
     case "paused":
-      return [{ label: "Resume", kind: "resume" }];
+      return [
+        { label: "Resume", kind: "resume" },
+        { label: "End", kind: "end" },
+      ];
     case "ended":
       return [{ label: "Archive", kind: "archive" }];
     case "archived":
@@ -103,26 +114,40 @@ function CampaignCard({
   onActivate,
   onPause,
   onResume,
+  onEnd,
   onArchive,
 }: {
   campaign: CampaignRow;
   onActivate: (campaignId: string) => Promise<ActionResult>;
   onPause: (campaignId: string) => Promise<ActionResult>;
   onResume: (campaignId: string) => Promise<ActionResult>;
+  onEnd: (campaignId: string) => Promise<ActionResult>;
   onArchive: (campaignId: string) => Promise<ActionResult>;
 }) {
   const [pending, setPending] = React.useState(false);
   const [rowError, setRowError] = React.useState<string | null>(null);
+  const [confirmingEnd, setConfirmingEnd] = React.useState(false);
   const status = campaign.status as CampaignStatus;
 
   async function run(kind: ActionKind) {
     setRowError(null);
     setPending(true);
-    const handler = { activate: onActivate, pause: onPause, resume: onResume, archive: onArchive }[kind];
+    const handler = { activate: onActivate, pause: onPause, resume: onResume, end: onEnd, archive: onArchive }[
+      kind
+    ];
     const result = await handler(campaign.id);
     setPending(false);
     if (!result.ok) setRowError(result.message);
   }
+
+  async function confirmEnd() {
+    setConfirmingEnd(false);
+    await run("end");
+  }
+
+  const actions = actionsForStatus(status);
+  const clickableActions = actions.filter((action) => action.kind !== "end");
+  const canEnd = actions.some((action) => action.kind === "end");
 
   return (
     <Card variant="outlined" className="flex flex-col gap-3 p-4">
@@ -145,7 +170,7 @@ function CampaignCard({
       ) : null}
 
       <div className="mt-auto flex flex-wrap items-center gap-2">
-        {actionsForStatus(status).map((action) => (
+        {clickableActions.map((action) => (
           <Button
             key={action.kind}
             type="button"
@@ -157,7 +182,40 @@ function CampaignCard({
             {action.label}
           </Button>
         ))}
+        {canEnd && !confirmingEnd ? (
+          <Button
+            type="button"
+            variant="text"
+            size="sm"
+            disabled={pending}
+            onClick={() => setConfirmingEnd(true)}
+          >
+            End
+          </Button>
+        ) : null}
       </div>
+
+      {canEnd && confirmingEnd ? (
+        <div className="flex flex-col gap-2 rounded-md3-xs bg-error-container p-3">
+          <p className="text-body-s text-on-error-container">
+            Ending is permanent. You can duplicate the campaign to run it again.
+          </p>
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="filled" size="sm" disabled={pending} onClick={confirmEnd}>
+              Confirm end
+            </Button>
+            <Button
+              type="button"
+              variant="text"
+              size="sm"
+              disabled={pending}
+              onClick={() => setConfirmingEnd(false)}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {rowError ? (
         <p role="alert" className="text-body-s text-error">
@@ -175,7 +233,14 @@ function CampaignCard({
  * a single status (campaigns-manager's status-filter chips), only that
  * group's heading renders.
  */
-export function CampaignList({ campaigns, onActivate, onPause, onResume, onArchive }: CampaignListProps) {
+export function CampaignList({
+  campaigns,
+  onActivate,
+  onPause,
+  onResume,
+  onEnd,
+  onArchive,
+}: CampaignListProps) {
   if (campaigns.length === 0) {
     return (
       <EmptyState
@@ -206,6 +271,7 @@ export function CampaignList({ campaigns, onActivate, onPause, onResume, onArchi
                   onActivate={onActivate}
                   onPause={onPause}
                   onResume={onResume}
+                  onEnd={onEnd}
                   onArchive={onArchive}
                 />
               </li>

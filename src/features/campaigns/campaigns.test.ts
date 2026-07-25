@@ -587,6 +587,75 @@ describe("actions: resumeCampaign", () => {
   });
 });
 
+// --------------------------------------------------------------- endCampaign
+
+describe("actions: endCampaign", () => {
+  it("ends an active campaign", async () => {
+    table("campaigns").__result = { data: { id: CAMPAIGN_ID, status: "active" }, error: null };
+
+    const result = await actions.endCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result.ok).toBe(true);
+    expect(table("campaigns").update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "ended" }),
+    );
+  });
+
+  it("ends a paused campaign", async () => {
+    table("campaigns").__result = { data: { id: CAMPAIGN_ID, status: "paused" }, error: null };
+
+    const result = await actions.endCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result.ok).toBe(true);
+    expect(table("campaigns").update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "ended" }),
+    );
+  });
+
+  it("rejects ending a draft campaign (invalid transition) with CAMPAIGN_INVALID_STATE", async () => {
+    table("campaigns").__result = { data: { id: CAMPAIGN_ID, status: "draft" }, error: null };
+
+    const result = await actions.endCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "CAMPAIGN_INVALID_STATE" }));
+    expect(table("campaigns").update).not.toHaveBeenCalled();
+  });
+});
+
+// --------------------------------------------- setCampaignStatus concurrency
+
+describe("setCampaignStatus optimistic concurrency guard", () => {
+  it("returns CAMPAIGN_INVALID_STATE and does not change status when the row's status moved out from under a stale request", async () => {
+    // The service layer read the row as "active" (expectedFrom), but by the
+    // time the update runs another request has already moved it elsewhere,
+    // so the update's .eq("status", "active") predicate matches zero rows.
+    // PostgREST's .single() surfaces a zero-row match as PGRST116.
+    table("campaigns").__result = { data: { id: CAMPAIGN_ID, status: "active" }, error: null };
+    table("campaigns").single = vi.fn(async () => ({
+      data: null,
+      error: { message: "JSON object requested, multiple (or no) rows returned", code: "PGRST116" },
+    }));
+
+    const result = await actions.pauseCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual({
+      ok: false,
+      code: "CAMPAIGN_INVALID_STATE",
+      message: "This campaign changed while you were working on it. Refresh and try again.",
+    });
+    // The stale-from predicate was actually sent, not just checked in memory.
+    expect(table("campaigns").eq).toHaveBeenCalledWith("status", "active");
+  });
+
+  it("passes the loaded row's own status as the expected-from predicate for every transition", async () => {
+    table("campaigns").__result = { data: { id: CAMPAIGN_ID, status: "paused" }, error: null };
+
+    await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(table("campaigns").eq).toHaveBeenCalledWith("status", "paused");
+  });
+});
+
 // ------------------------------------------------------------- upsertBaseRule
 
 describe("actions: upsertBaseRule", () => {
