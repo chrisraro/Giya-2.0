@@ -21,9 +21,39 @@ narrowed and the plan depends on it:
   provider, and a sweep of the top 12 models in both `image-to-text` and
   `document-question-answering` found **zero** served. Building on donut or trocr
   via the serverless API is not possible.
-- **Vision-language models are served.** 9 of the top 12 `image-text-to-text`
-  models are live, including `Qwen/Qwen2.5-VL-7B-Instruct`,
-  `Qwen/Qwen3-VL-8B-Instruct` and `google/gemma-4-31B-it`.
+- **Vision-language models are served, but only via third-party providers.**
+  `hf-inference`, the provider included in the free tier, serves **zero**
+  `image-text-to-text` models. Every VLM routes to `featherless-ai`, `deepinfra`,
+  `novita`, `together` or `scaleway`, and the account must have that provider
+  enabled.
+
+### Model selection, measured on a synthetic PH receipt (2026-07-26)
+
+Tested end to end against the live token with a generated VAT receipt
+(KAPE DIARIA, OR# 004512, VATABLE 133.93 / VAT 16.07 / TOTAL 150.00):
+
+| model | result |
+|---|---|
+| **`google/gemma-4-26B-A4B-it`** | **CHOSEN.** 1.8s, 169 completion tokens, `finish_reason: stop`, clean `content`. Every ground-truth field transcribed exactly. |
+| `google/gemma-4-31B-it` | Rejected. It is a reasoning model: it spends the completion budget in `reasoning` and returns an EMPTY `content`, hitting `finish_reason: length` at 800 tokens. Also returned an HTML edge-block on two of four calls, so it is rate-limited on this account. |
+| `Qwen/Qwen2.5-VL-7B-Instruct`, `Qwen/Qwen3-VL-8B-Instruct` | Unavailable: "not supported by any provider you have enabled" (both are `featherless-ai` only, which this account does not have enabled). |
+
+**Observed error profile, and why it fits the design.** The single transcription
+error across the whole receipt was a line-item name: `Pandesal Bilao` came back
+as `Pandesal Bilbao`. Every money-bearing field (total, VAT, VATable, cash,
+change, all three line amounts) was exact. This is the failure mode the pipeline
+is already built for: doc 36 makes line items analytics enrichment that never
+gates approval, while the total is cross-checked against VAT sanity and must
+appear verbatim in this same text before it can become points. A model that
+fumbles a Filipino bread name but never fumbles a peso amount is exactly the
+tool we want in this position.
+
+**Free-tier caveat.** The account (`Giya2026`) has `canPay: false`. Third-party
+provider calls draw on the monthly included credits, and `gemma-4-31B-it` was
+already returning edge blocks under light testing. Before launch this needs
+either billing enabled or a paid provider chosen deliberately; the stub provider
+remains the fallback so a quota exhaustion degrades to "receipt queued for
+review" rather than to a wrong award.
 - **Embeddings are served.** `sentence-transformers/all-MiniLM-L6-v2` is live on
   `hf-inference` (384 dims, the dimension this spec pins).
 
@@ -147,7 +177,7 @@ Consumer scan:   photo -> Storage -> submit (sha256, pHash, dedupe)
 
 - `GROQ_API_KEY` - set and verified 2026-07-26. Rotate before production, it was pasted in chat.
 - `HF_TOKEN` - **still needed.** Two calls depend on it: the VLM transcription and the embedding. Without it both are unauthenticated and heavily rate limited.
-- `HF_VLM_MODEL` - defaults to `google/gemma-4-31B-it` (five providers, so provider outages do not take the scanner down). `Qwen/Qwen2.5-VL-7B-Instruct` is the alternative if transcription quality is better in testing, at the cost of a single provider.
+- `HF_VLM_MODEL` - `google/gemma-4-26B-A4B-it`, selected by measurement (see the table above), not by reputation.
 - `HF_EMBED_MODEL` - defaults to `sentence-transformers/all-MiniLM-L6-v2`, 384 dims, matching the pinned vector column width.
 - `GROQ_MODEL` - defaults to `llama-3.3-70b-versatile`; `llama-3.1-8b-instant` is the cheap path if extraction quality holds.
 
