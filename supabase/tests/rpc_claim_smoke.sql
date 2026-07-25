@@ -1,11 +1,11 @@
 -- ============================================================================
 -- rpc_claim_smoke.sql (pgTAP)
 -- Smoke tests for the 0013 reward RPCs: public.claim_reward and
--- public.validate_redemption, plus the ledger insert fence and the
--- business_customers balance-cache column fence. Runs entirely inside one
--- transaction and rolls back. Execute as a privileged role (postgres) against
--- a database with migrations 0001-0013 applied. pgTAP lives in the extensions
--- schema.
+-- public.validate_redemption, plus the ledger insert fence, the
+-- business_customers balance-cache column fence, and the 0016 claim expiry
+-- sweep (public.expire_claims). Runs entirely inside one transaction and
+-- rolls back. Execute as a privileged role (postgres) against a database with
+-- migrations 0001-0016 applied. pgTAP lives in the extensions schema.
 --
 -- Fixture strategy: mirror rls_campaigns_smoke.sql. Insert directly into
 -- auth.users (the on_auth_user_created trigger creates profiles + consumers),
@@ -20,7 +20,7 @@ begin;
 
 set local search_path = public, extensions;
 
-select plan(35);
+select plan(51);
 
 -- ---------------------------------------------------------------- fixtures
 -- Six fixed test users: two business owners, one consumer with a balance,
@@ -488,6 +488,210 @@ select ok(
   not has_column_privilege('authenticated', 'public.business_customers',
                            'points_balance', 'UPDATE'),
   'authenticated has no UPDATE privilege on business_customers.points_balance');
+
+-- ---------------------------------------------------------------- claim expiry sweep (0016)
+-- Privileged fixtures, mirroring what claim_reward would have written for a
+-- claim made in the past. State entering this section for the pair
+-- (biz1, consumer a3): balance 470, ledger = earn +970, redeem -500.
+--
+-- Paid lapsed claim on Free Milk Tea (r_main, remaining currently 49 of 50):
+-- claim row first (points_txn_id null), then the redeem ledger row carrying
+-- claim_id, then link points_txn_id back, matching the 0013 insert order.
+-- Every id comes straight off its own returning CTE.
+with ins as (
+  insert into public.reward_claims
+    (business_id, reward_id, consumer_id, status, points_spent, expires_at)
+  values
+    (current_setting('test.biz1')::uuid, current_setting('test.r_main')::uuid,
+     'a3333333-3333-4333-8333-333333333333', 'claimed', 100,
+     now() - interval '2 hours')
+  returning id
+)
+select set_config('test.claim_paid', (select id::text from ins), true);
+
+with ins as (
+  insert into public.points_transactions
+    (business_id, consumer_id, type, points, balance_after, claim_id, campaign_id)
+  values
+    (current_setting('test.biz1')::uuid,
+     'a3333333-3333-4333-8333-333333333333', 'redeem', -100, 370,
+     current_setting('test.claim_paid')::uuid, current_setting('test.camp1')::uuid)
+  returning id
+)
+select set_config('test.txn_paid', (select id::text from ins), true);
+
+update public.reward_claims
+   set points_txn_id = current_setting('test.txn_paid')::uuid
+ where id = current_setting('test.claim_paid')::uuid;
+update public.business_customers
+   set points_balance = 370
+ where business_id = current_setting('test.biz1')::uuid
+   and consumer_id = 'a3333333-3333-4333-8333-333333333333';
+update public.rewards
+   set remaining = remaining - 1              -- 49 -> 48, as claim_reward would have
+ where id = current_setting('test.r_main')::uuid;
+
+-- inventory-cap probe: a reward already at remaining = total_inventory (the
+-- drift case the rewards_remaining_lte_total guard exists for), with its own
+-- lapsed zero-cost claim
+with ins as (
+  insert into public.rewards
+    (business_id, campaign_id, name, points_cost, total_inventory, remaining,
+     per_customer_limit, claim_expiry_days)
+  values
+    (current_setting('test.biz1')::uuid, current_setting('test.camp1')::uuid,
+     'Capped Stock', 0, 5, 5, 1, 30)
+  returning id
+)
+select set_config('test.r_capfull', (select id::text from ins), true);
+
+with ins as (
+  insert into public.reward_claims
+    (business_id, reward_id, consumer_id, status, points_spent, expires_at)
+  values
+    (current_setting('test.biz1')::uuid, current_setting('test.r_capfull')::uuid,
+     'a3333333-3333-4333-8333-333333333333', 'claimed', 0,
+     now() - interval '1 hour')
+  returning id
+)
+select set_config('test.claim_capfull', (select id::text from ins), true);
+
+-- a claimed row whose expiry is still in the future: the sweep must skip it
+with ins as (
+  insert into public.reward_claims
+    (business_id, reward_id, consumer_id, status, points_spent, expires_at)
+  values
+    (current_setting('test.biz1')::uuid, current_setting('test.r_free')::uuid,
+     'a3333333-3333-4333-8333-333333333333', 'claimed', 0,
+     now() + interval '1 day')
+  returning id
+)
+select set_config('test.claim_future', (select id::text from ins), true);
+
+-- 36. the sweep expires exactly the three lapsed claimed rows: the paid claim,
+--     the zero-cost claim_exp fixture (r_pricey), and the capped-stock claim.
+--     The future claim and the redeemed claims are not candidates.
+select is(
+  public.expire_claims(),
+  3,
+  'expire_claims() expired exactly the 3 lapsed claimed rows');
+
+-- 37. the paid claim flipped to expired
+select is(
+  (select status from public.reward_claims
+    where id = current_setting('test.claim_paid')::uuid),
+  'expired',
+  'lapsed paid claim is status expired after the sweep');
+
+-- 38. EXACTLY ONE reversal ledger row exists for the pair
+select is(
+  (select count(*)::int from public.points_transactions
+    where business_id = current_setting('test.biz1')::uuid
+      and consumer_id = 'a3333333-3333-4333-8333-333333333333'
+      and type = 'reversal'),
+  1,
+  'sweep wrote exactly one reversal ledger row for the pair');
+
+-- 39. the reversal carries points = +points_spent and balance_after = 370+100
+select is(
+  (select points::text || '/' || balance_after::text from public.points_transactions
+    where claim_id = current_setting('test.claim_paid')::uuid
+      and type = 'reversal'),
+  '100/470',
+  'reversal row has points +100 and balance_after 470 (prev 370 + refund 100)');
+
+-- 40. reverses_id points at the original redeem txn; campaign_id carried over
+select is(
+  (select (reverses_id = current_setting('test.txn_paid')::uuid)::text || '/'
+       || (campaign_id = current_setting('test.camp1')::uuid)::text
+     from public.points_transactions
+    where claim_id = current_setting('test.claim_paid')::uuid
+      and type = 'reversal'),
+  'true/true',
+  'reversal reverses_id is the original redeem txn and campaign_id is carried from it');
+
+-- 41. the pair balance is restored to its pre-claim value
+select is(
+  (select points_balance from public.business_customers
+    where business_id = current_setting('test.biz1')::uuid
+      and consumer_id = 'a3333333-3333-4333-8333-333333333333'),
+  470,
+  'points_balance restored to the pre-claim 470 by the sweep');
+
+-- 42. inventory restored: the fixture decrement 49 -> 48 is undone, 48 -> 49
+select is(
+  (select remaining from public.rewards
+    where id = current_setting('test.r_main')::uuid),
+  49,
+  'sweep incremented rewards.remaining by 1 (48 -> 49)');
+
+-- 43. the zero-cost expired fixture claim also flipped to expired
+select is(
+  (select status from public.reward_claims
+    where id = current_setting('test.claim_exp')::uuid),
+  'expired',
+  'lapsed points_spent = 0 claim is status expired after the sweep');
+
+-- 44. and neither zero-cost claim wrote ANY ledger row
+select is(
+  (select count(*)::int from public.points_transactions
+    where claim_id in (current_setting('test.claim_exp')::uuid,
+                       current_setting('test.claim_capfull')::uuid)),
+  0,
+  'points_spent = 0 claims expired with NO ledger row written');
+
+-- 45. the not-yet-expired claimed row is untouched
+select is(
+  (select status from public.reward_claims
+    where id = current_setting('test.claim_future')::uuid),
+  'claimed',
+  'claimed row with expires_at in the future is untouched by the sweep');
+
+-- 46. the redeemed claim is untouched and its redeem txn was never reversed
+select is(
+  (select status from public.reward_claims
+    where id = current_setting('test.claim1')::uuid)
+  || '/' ||
+  (select count(*)::text from public.points_transactions
+    where reverses_id = (select points_txn_id from public.reward_claims
+                          where id = current_setting('test.claim1')::uuid)),
+  'redeemed/0',
+  'already-redeemed claim is never expired or refunded by the sweep');
+
+-- 47. re-running the sweep finds no candidates (status latch = idempotency)
+select is(
+  public.expire_claims(),
+  0,
+  'second expire_claims() run returns 0 (already-expired claims not re-selected)');
+
+-- 48. and the balance is unchanged: no double refund
+select is(
+  (select points_balance from public.business_customers
+    where business_id = current_setting('test.biz1')::uuid
+      and consumer_id = 'a3333333-3333-4333-8333-333333333333'),
+  470,
+  'second sweep run did not double-refund (balance still 470)');
+
+-- 49. system-only: authenticated may NOT execute the sweep
+select ok(
+  not has_function_privilege('authenticated', 'public.expire_claims(integer)', 'EXECUTE'),
+  'authenticated cannot execute expire_claims');
+
+-- 50. while service_role (the jobs worker) can
+select ok(
+  has_function_privilege('service_role', 'public.expire_claims(integer)', 'EXECUTE'),
+  'service_role can execute expire_claims');
+
+-- 51. inventory cap guard: the claim expired but remaining stayed at
+--     total_inventory (5, never 6), so rewards_remaining_lte_total holds
+select is(
+  (select status from public.reward_claims
+    where id = current_setting('test.claim_capfull')::uuid)
+  || '/' ||
+  (select remaining::text from public.rewards
+    where id = current_setting('test.r_capfull')::uuid),
+  'expired/5',
+  'reward already at remaining = total_inventory is not incremented past the cap');
 
 select * from finish();
 
