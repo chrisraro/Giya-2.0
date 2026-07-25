@@ -13,12 +13,13 @@ Canonical docs: `docs/30-modules/36-receipt-ocr-pipeline.md` (stages S1-S10),
 
 | Stage | What happens | Owner |
 |---|---|---|
+| entry | `/scan` needs a business before it needs a camera: with a valid `?business=`, the capture flow; without one, the store chooser | `scan-entry.ts`, `components/scan-business-chooser.tsx`, `server/scan-targets.ts` |
 | capture | size and type validation, then the compression ladder (2048px long edge, q0.8, target 1.5MB) | `compress.ts`, `components/camera-viewfinder.tsx`, `components/receipt-capture.tsx` |
 | upload | signed upload URL, PUT, then submit with a stable `Idempotency-Key` | `upload.ts`, `src/app/api/v1/receipts/uploads/route.ts` |
 | submit | path ownership, cooldown, magic-byte sniff, sharp canonicalization, sha256, pHash, insert `status='queued'` | `server/submit.ts`, `server/image.ts`, `src/app/api/v1/receipts/route.ts` |
 | OCR | 5 minute signed URL to the object, one provider call per invocation, `ocr_results` + `ai_usage_events` rows | `server/ocr/provider.ts`, `server/ocr/http.ts`, `server/ocr/stub.ts`, `server/process.ts` |
 | parse | template `parse_config` tier, then generic PH heuristics; VAT sanity | `parse.ts` |
-| match | best-of business scoring, pre-bound receipts verified not re-bound | `matching.ts` |
+| match | best-of business scoring; a pre-bound receipt is never silently re-bound, but see the matching note under "The pure engines" for what that does and does not verify | `matching.ts` |
 | validate | readability, freshness, not-future, postdates-activation, amount sanity | `validateParsedReceipt` in `server/process.ts` |
 | fraud | pHash neighbours, receipt-number duplicates, Redis velocity windows, amount anomalies, staff self-scan, low confidence | `fraud.ts`, `velocity.ts`, `phash.ts`, the detectors in `server/process.ts` |
 | route | confidence formula and the doc 36 Stage 9 routing table, merged with the fraud verdict | `confidence.ts`, `resolveOutcome` in `server/process.ts` |
@@ -151,6 +152,24 @@ public by default.
 section in `supabase/README.md`. The image is evidence behind a sha256 and a
 pHash already computed from it.
 
+**A blocked consumer cannot unblock themselves.** `applyCooldownIfEarned`
+writes `consumers.scan_blocked_until` and `server/submit.ts` refuses
+submissions while it is in the future, which is doc 37's ladder step 2. That
+column is only a fence if the consumer cannot write it, and until this slice it
+was not: `consumers_owner_update` is row-scoped and not column-restricted, and
+`authenticated` held the default table-level UPDATE, so one PATCH cleared the
+block. 0021 closes it with 0013's revoke-then-grant-columns pattern: the
+table-level UPDATE is revoked from `authenticated` and granted back on exactly
+the self-editable columns, which do not include `scan_blocked_until` (nor
+`profiles.is_suspended` / `suspended_reason`, ladder step 4, nor the
+`birth_date` / `birth_date_updated_at` pair, whose A21.1 once-a-year rule only
+holds if neither is client-writable). The allowlists are asserted in pgTAP as
+exact sorted string lists, so adding a column without deciding its writability
+fails the suite. RLS is untouched: the policy still decides which row, the
+grant decides which columns, and both have to hold. Service-role writes and the
+SECURITY DEFINER RPCs are unaffected. Do not "fix" a failing client write by
+widening this grant; the write belongs on the server.
+
 ## Thresholds: settings-driven vs code
 
 Doc 37's rule is that thresholds are data, not code. `server/settings.ts` reads
@@ -202,8 +221,20 @@ exported for the loader.
   `duplicate` and everything else to `fraud_suspected`; `staff_self_scan` forces
   review unconditionally), and pure velocity window evaluation given counts and
   caps.
-- `matching.ts`: best-of business scoring with a pre-bound floor. A pre-bound
-  receipt is verified and never silently re-bound.
+- `matching.ts`: best-of business scoring with a pre-bound floor. Be precise
+  about what this buys today. **Verified:** a pre-bound receipt is never
+  silently re-bound to a different business, so the merchant a consumer chose
+  is the merchant that gets charged the points, and `matchBusiness` does own a
+  contradiction path that demotes a pre-bound receipt whose text clearly names
+  somebody else. **Not verified:** that the receipt is actually from that
+  business. `buildMatchCandidates` in `server/process.ts` supplies exactly one
+  candidate, the pre-bound business itself, so there is no rival for the text
+  to score higher against and the contradiction path cannot fire. Every
+  pre-bound receipt therefore lands on the 0.85 floor. Concretely: a legible
+  receipt from a shop across the street, submitted with a chosen `business_id`,
+  auto-approves. Nothing shipped catches it, because pHash, sha256 and
+  receipt-number dedupe only stop reuse of the same receipt. Tracked under
+  Known gaps.
 - `phash.ts`: 64-bit DCT perceptual hash with a frozen bit convention and golden
   vectors, plus `hammingDistance`. Pure given pixels; sharp only supplies them.
 
@@ -215,6 +246,18 @@ by tests; do not remove the rounding.
 
 ## Known gaps and deferred work
 
+- **Generic (unbound) scan is V1, and `/scan` says so by not offering it.**
+  Doc 33's route table marks it `[V1]`; `buildMatchCandidates` supplies only the
+  pre-bound business, so an unbound receipt scores against an empty candidate
+  set, gets confidence 0 and is rejected `wrong_business` every time. Because
+  `receipts_sha_unique` is a total index that includes rejected rows, the same
+  photo re-submitted from the right store page then returns 422
+  `RECEIPT_DUPLICATE`, so a real receipt is spent for nothing and each attempt
+  costs a slot of the 60/day cap and moves every velocity counter. Bare `/scan`
+  therefore renders a store chooser instead of the camera, and a hand-typed
+  non-UUID `?business=` lands there too. When generic scan lands, the chooser
+  gains a "not sure which shop" path; until then there is deliberately no way
+  to reach the capture flow without a business id.
 - **Review queue UI is the next slice.** Business and admin queues plus doc 36's
   `POST /api/v1/businesses/{businessId}/receipts/{id}/review` and
   `POST /api/v1/admin/receipts/{id}/review` endpoints do not exist. Receipts routed to
@@ -239,14 +282,17 @@ by tests; do not remove the rounding.
   `requireServiceRoleClient()` returns 503 on submit and
   `defaultProcessReceiptDeps()` returns null and logs. The credential lands at
   the end of the build per standing orders.
-- **The cooldown a consumer can lift themselves.** `applyCooldownIfEarned` writes
-  `consumers.scan_blocked_until` and `server/submit.ts` refuses submissions while
-  it is in the future, but `consumers_owner_update` is not column-restricted and
-  `authenticated` holds UPDATE on that column, so a consumer can clear their own
-  block with one PATCH. Doc 37's ladder step 2 is only as strong as that grant.
-  Tracked in `supabase/README.md` under "Known limitations"; the fix is a
-  column-restricted re-grant, the pattern 0013 used for the `business_customers`
-  balance cache.
+- **Pre-bound match verification is structurally vacuous.** `matchBusiness` has
+  a contradiction path, but `buildMatchCandidates` only ever hands it the
+  pre-bound business, so the path can never fire and there is nothing for the
+  receipt to contradict. A legible receipt from ANY store, submitted with a
+  `business_id` of the consumer's choosing, lands on the 0.85 pre-bound floor
+  and auto-approves. The three dedupe layers do not help: pHash, sha256 and
+  receipt-number dedupe only stop reuse of the SAME receipt, and this is a
+  genuine unused one at the wrong merchant. Closing it needs rival candidates,
+  which needs the template management UI plus generic-scan candidate scoring.
+  This is the highest-value item in the V1 matching slice. See "The pure
+  engines" above for exactly what is and is not verified today.
 - **S5 closed-hours is not implemented.** `parse.ts` reads an adjoining time
   token when one exists but does not report whether it found one; a dateless time
   defaults to 12:00 in the returned `receiptDate`, so a noon timestamp is

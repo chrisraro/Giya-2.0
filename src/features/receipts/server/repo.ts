@@ -234,6 +234,10 @@ export async function listMyReceipts(args: ListMyReceiptsArgs): Promise<ListMyRe
   }
 
   if (args.cursor) {
+    // Both components are interpolated into PostgREST's filter grammar, where
+    // `,` `(` `)` are structural. They are safe to interpolate only because
+    // decodeCursor has already pinned sortKey to an ISO-8601 timestamp and id
+    // to a UUID; do not build a cursor here by any other route.
     query = query.or(
       `created_at.lt.${args.cursor.sortKey},and(created_at.eq.${args.cursor.sortKey},id.lt.${args.cursor.id})`,
     );

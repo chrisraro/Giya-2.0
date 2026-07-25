@@ -14,11 +14,14 @@
 // cursor is a client-visible string and a client may want to parse a limit
 // alongside it, so nothing here may drag server code into the browser bundle.
 
-/** The two components of a keyset cursor, in sort order. */
+/**
+ * The two components of a keyset cursor, in sort order. `decodeCursor`
+ * guarantees the shape of both on the way in; see the note above it.
+ */
 export interface CursorParts {
-  /** The endpoint's primary sort column, serialised as a string (an ISO-8601 timestamp for the default `created_at desc` sort). */
+  /** The endpoint's primary sort column: an ISO-8601 timestamp, for the default `created_at desc` sort. */
   sortKey: string;
-  /** The tiebreaker: the row id. Makes the cursor total even when two rows share a sort key. */
+  /** The tiebreaker: the row id, a UUID. Makes the cursor total even when two rows share a sort key. */
   id: string;
 }
 
@@ -59,12 +62,53 @@ export function encodeCursor(parts: CursorParts): string {
   return toBase64(`${parts.sortKey}${SEPARATOR}${parts.id}`);
 }
 
+// BOTH COMPONENTS ARE VALIDATED BECAUSE BOTH ARE INTERPOLATED.
+//
+// A decoded cursor is client-controlled input that ends up inside a PostgREST
+// filter expression, textually: the keyset predicate has no row-value
+// comparison operator to lean on, so every repository writes it by hand as
+//
+//   .or(`created_at.lt.${sortKey},and(created_at.eq.${sortKey},id.lt.${id})`)
+//
+// where `,` `(` `)` and `.` are that grammar's punctuation. Today the outer
+// `.eq("user_id", ...)` is ANDed with whatever the `.or()` parses to and the
+// withheld columns raise 42501, so a crafted cursor buys nothing. That is two
+// unrelated accidents standing between an opaque token and a tenancy hole, and
+// it contradicts what schemas.ts says this codebase does with untrusted filter
+// input ("an enum rather than a free string so `?status=` can never become a
+// filter injection point"). So the shape is pinned here, once, at the only
+// place a cursor becomes structured data.
+//
+// A rejected cursor still degrades to "start from head" rather than 422: doc
+// 13 says a cursor whose sort schema changed simply restarts, and an attacker
+// crafting one is not owed a different answer from a consumer with a stale
+// bookmark.
+
+/**
+ * ISO-8601 UTC-or-offset timestamps, which is exactly what PostgREST emits for
+ * a `timestamptz` and therefore the only thing `encodeCursor` is ever handed.
+ * Fractional seconds are optional and go up to nanosecond precision.
+ */
+const ISO_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})$/;
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidSortKey(value: string): boolean {
+  // The pattern rejects the punctuation; Date.parse rejects 2026-13-45, which
+  // is well formed and still not a timestamp.
+  return ISO_TIMESTAMP_PATTERN.test(value) && !Number.isNaN(Date.parse(value));
+}
+
 /**
  * Decode a cursor a client supplied. Returns null for anything malformed
  * rather than throwing, because a stale or hand-edited cursor is a client
  * mistake and not a server fault: callers treat null as "start from head",
  * which is exactly doc 13's "clients restart from head" behaviour and avoids
  * turning an old bookmark into a 422.
+ *
+ * Malformed includes the wrong SHAPE, not just bad base64: the sort key must
+ * be an ISO-8601 timestamp and the id a UUID. See the note above.
  */
 export function decodeCursor(raw: string | undefined | null): CursorParts | null {
   if (!raw) return null;
@@ -81,7 +125,8 @@ export function decodeCursor(raw: string | undefined | null): CursorParts | null
 
   const sortKey = decoded.slice(0, separatorIndex);
   const id = decoded.slice(separatorIndex + SEPARATOR.length);
-  if (!sortKey || !id) return null;
+  if (!isValidSortKey(sortKey)) return null;
+  if (!UUID_PATTERN.test(id)) return null;
 
   return { sortKey, id };
 }

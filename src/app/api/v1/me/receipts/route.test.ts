@@ -40,9 +40,14 @@ const { GET } = await import("./route");
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_USER_ID = "99999999-9999-4999-8999-999999999999";
 
+// Receipt ids are real UUIDs: they become the id half of a keyset cursor, and
+// decodeCursor pins that half to a UUID so a crafted cursor cannot reach a
+// PostgREST filter.
+const receiptId = (index: number) => `33333333-3333-4333-8333-${String(index).padStart(12, "0")}`;
+
 function receipt(index: number, overrides: Partial<ReceiptListItemDTO> = {}): ReceiptListItemDTO {
   return {
-    receiptId: `receipt-${index}`,
+    receiptId: receiptId(index),
     businessId: "22222222-2222-4222-8222-222222222222",
     businessName: "Kape Diaria",
     status: "approved",
@@ -115,7 +120,7 @@ describe("envelope", () => {
     const body = await (await callRoute()).json();
 
     expect(body.data[0]).toEqual({
-      receipt_id: "receipt-0",
+      receipt_id: receiptId(0),
       business_id: "22222222-2222-4222-8222-222222222222",
       business_name: "Kape Diaria",
       status: "approved",
@@ -168,7 +173,7 @@ describe("cursor pagination", () => {
     expect(body.meta.page.limit).toBe(3);
     expect(decodeCursor(body.meta.page.next_cursor)).toEqual({
       sortKey: "2026-07-03T00:00:00.000Z",
-      id: "receipt-2",
+      id: receiptId(2),
     });
   });
 
@@ -182,19 +187,36 @@ describe("cursor pagination", () => {
   });
 
   it("decodes a supplied cursor into the keyset position the repository needs", async () => {
-    const cursor = encodeCursor({ sortKey: "2026-07-03T00:00:00.000Z", id: "receipt-2" });
+    const cursor = encodeCursor({ sortKey: "2026-07-03T00:00:00.000Z", id: receiptId(2) });
 
     await callRoute(`?cursor=${encodeURIComponent(cursor)}`);
 
     expect(mocks.listMyReceipts).toHaveBeenCalledWith(
       expect.objectContaining({
-        cursor: { sortKey: "2026-07-03T00:00:00.000Z", id: "receipt-2" },
+        cursor: { sortKey: "2026-07-03T00:00:00.000Z", id: receiptId(2) },
       }),
     );
   });
 
   it("treats a stale or hand-edited cursor as start-from-head rather than a 422", async () => {
     const response = await callRoute("?cursor=not-a-real-cursor");
+
+    expect(response.status).toBe(200);
+    expect(mocks.listMyReceipts).toHaveBeenCalledWith(expect.objectContaining({ cursor: null }));
+  });
+
+  it("CRITICAL: a cursor crafted to inject a PostgREST filter never reaches the repository", async () => {
+    // The repository splices both cursor components straight into an `.or()`
+    // filter, so a sort key carrying `,` or `(` would add filter terms of the
+    // caller's choosing. decodeCursor refuses the shape, and the request
+    // simply starts from head like any other unusable bookmark: same 200,
+    // same answer, nothing learned.
+    const crafted = encodeCursor({
+      sortKey: "2099-01-01T00:00:00.000Z,user_id.neq.null",
+      id: receiptId(2),
+    });
+
+    const response = await callRoute(`?cursor=${encodeURIComponent(crafted)}`);
 
     expect(response.status).toBe(200);
     expect(mocks.listMyReceipts).toHaveBeenCalledWith(expect.objectContaining({ cursor: null }));
@@ -244,14 +266,14 @@ describe("status filter", () => {
   });
 
   it("combines the status filter with a cursor", async () => {
-    const cursor = encodeCursor({ sortKey: "2026-07-03T00:00:00.000Z", id: "receipt-2" });
+    const cursor = encodeCursor({ sortKey: "2026-07-03T00:00:00.000Z", id: receiptId(2) });
 
     await callRoute(`?status=rejected&limit=5&cursor=${encodeURIComponent(cursor)}`);
 
     expect(mocks.listMyReceipts).toHaveBeenCalledWith({
       userId: USER_ID,
       limit: 5,
-      cursor: { sortKey: "2026-07-03T00:00:00.000Z", id: "receipt-2" },
+      cursor: { sortKey: "2026-07-03T00:00:00.000Z", id: receiptId(2) },
       status: "rejected",
     });
   });
