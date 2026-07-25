@@ -224,6 +224,7 @@ export function CategoryList({
                       <>
                         <button
                           type="button"
+                          aria-label={`Confirm archive ${category.name}`}
                           onClick={() => handleArchive(category.id)}
                           disabled={isPending}
                           className="rounded-full bg-error px-3 py-1 text-label-m text-on-error"
@@ -232,6 +233,7 @@ export function CategoryList({
                         </button>
                         <button
                           type="button"
+                          aria-label={`Cancel archive ${category.name}`}
                           onClick={() => setConfirmArchiveId(null)}
                           className="text-label-m text-on-surface-variant"
                         >

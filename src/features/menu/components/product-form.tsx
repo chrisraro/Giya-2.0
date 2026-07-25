@@ -10,7 +10,15 @@ import { TextField } from "@/components/ui/text-field";
 import { cn } from "@/lib/utils";
 import { formatPeso, pesoToCentavos } from "@/lib/money";
 
-import { productStatusSchema, type ProductStatus } from "../schemas";
+import {
+  productStatusSchema,
+  type ProductStatus,
+  DESCRIPTION_MAX_LENGTH,
+  PRODUCT_IMAGES_MAX,
+  PRODUCT_NAME_MAX_LENGTH,
+  VARIANT_NAME_MAX_LENGTH,
+  ADDON_NAME_MAX_LENGTH,
+} from "../schemas";
 import type { ProductAddonRow, ProductRow, ProductVariantRow } from "../types";
 
 // Shared visual treatment for native <select>/<textarea> controls, mirroring
@@ -52,25 +60,43 @@ const imageRowSchema = z.object({
   url: z.string().min(1, "Enter an image URL").url("Enter a valid URL"),
 });
 
+// These field bounds are kept in sync with the canonical schemas in
+// ../schemas.ts (productSchema/variantSchema/addonSchema, which mirror the
+// DB checks) via the imported constants above, so the two can't silently
+// drift apart. The z.string() calls stay local rather than reusing
+// productSchema.shape.* directly because this form wants its own
+// UX-friendly messages ("Name is required") instead of zod's defaults.
 const variantRowSchema = z.object({
   id: z.string().optional(),
-  name: z.string().min(1, "Variant name is required").max(60, "Keep it under 60 characters"),
+  name: z
+    .string()
+    .min(1, "Variant name is required")
+    .max(VARIANT_NAME_MAX_LENGTH, `Keep it under ${VARIANT_NAME_MAX_LENGTH} characters`),
   price: priceStringSchema,
 });
 
 const addonRowSchema = z.object({
   id: z.string().optional(),
-  name: z.string().min(1, "Add-on name is required").max(60, "Keep it under 60 characters"),
+  name: z
+    .string()
+    .min(1, "Add-on name is required")
+    .max(ADDON_NAME_MAX_LENGTH, `Keep it under ${ADDON_NAME_MAX_LENGTH} characters`),
   priceDelta: priceStringSchema,
 });
 
 const productFormSchema = z.object({
-  name: z.string().min(1, "Name is required").max(120, "Name must be 120 characters or fewer"),
-  description: z.string().max(1000, "Description must be 1000 characters or fewer").optional(),
+  name: z
+    .string()
+    .min(1, "Name is required")
+    .max(PRODUCT_NAME_MAX_LENGTH, `Name must be ${PRODUCT_NAME_MAX_LENGTH} characters or fewer`),
+  description: z
+    .string()
+    .max(DESCRIPTION_MAX_LENGTH, `Description must be ${DESCRIPTION_MAX_LENGTH} characters or fewer`)
+    .optional(),
   basePrice: priceStringSchema,
   categoryId: z.string(),
   status: productStatusSchema,
-  images: z.array(imageRowSchema).max(6, "Up to 6 images"),
+  images: z.array(imageRowSchema).max(PRODUCT_IMAGES_MAX, `Up to ${PRODUCT_IMAGES_MAX} images`),
   variants: z.array(variantRowSchema),
   addons: z.array(addonRowSchema),
 });

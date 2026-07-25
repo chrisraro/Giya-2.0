@@ -6,9 +6,21 @@ import { z } from "zod";
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
+// Numeric bounds shared with the business-portal product form's own client
+// schema (components/product-form.tsx's productFormSchema). Exported so
+// that form keeps its custom, UX-friendly validation messages while still
+// deriving its limits from this single source of truth instead of
+// duplicating the numbers - see product-form.tsx for the import.
+export const CATEGORY_NAME_MAX_LENGTH = 80;
+export const PRODUCT_NAME_MAX_LENGTH = 120;
+export const DESCRIPTION_MAX_LENGTH = 1000;
+export const PRODUCT_IMAGES_MAX = 6;
+export const VARIANT_NAME_MAX_LENGTH = 60;
+export const ADDON_NAME_MAX_LENGTH = 60;
+
 export const categorySchema = z.object({
-  name: z.string().min(1).max(80),
-  description: z.string().max(1000).optional(),
+  name: z.string().min(1).max(CATEGORY_NAME_MAX_LENGTH),
+  description: z.string().max(DESCRIPTION_MAX_LENGTH).optional(),
   sort: z.number().int().optional(),
 });
 export type CategoryInput = z.infer<typeof categorySchema>;
@@ -26,13 +38,13 @@ export const availabilityWindowSchema = z.object({
 export type AvailabilityWindow = z.infer<typeof availabilityWindowSchema>;
 
 export const productSchema = z.object({
-  name: z.string().min(1).max(120),
-  description: z.string().max(1000).optional(),
+  name: z.string().min(1).max(PRODUCT_NAME_MAX_LENGTH),
+  description: z.string().max(DESCRIPTION_MAX_LENGTH).optional(),
   basePriceCentavos: z.number().int().min(0),
   categoryId: z.string().uuid().nullable(),
   status: productStatusSchema,
   isAvailable: z.boolean(),
-  images: z.array(z.string().url()).max(6),
+  images: z.array(z.string().url()).max(PRODUCT_IMAGES_MAX),
   availability: availabilityWindowSchema.optional(),
 });
 export type ProductInput = z.infer<typeof productSchema>;
@@ -44,13 +56,13 @@ export const productUpdateSchema = productSchema.partial();
 export type ProductUpdateInput = z.infer<typeof productUpdateSchema>;
 
 export const variantSchema = z.object({
-  name: z.string().min(1).max(60),
+  name: z.string().min(1).max(VARIANT_NAME_MAX_LENGTH),
   priceCentavos: z.number().int().min(0),
 });
 export type VariantInput = z.infer<typeof variantSchema>;
 
 export const addonSchema = z.object({
-  name: z.string().min(1).max(60),
+  name: z.string().min(1).max(ADDON_NAME_MAX_LENGTH),
   priceDeltaCentavos: z.number().int().min(0),
 });
 export type AddonInput = z.infer<typeof addonSchema>;

@@ -154,6 +154,7 @@ export function ProductList({
                             variant="filled"
                             size="sm"
                             className="bg-error text-on-error after:hidden"
+                            aria-label={`Confirm archive ${product.name}`}
                             disabled={isPending}
                             onClick={() => handleArchive(product)}
                           >
@@ -163,6 +164,7 @@ export function ProductList({
                             type="button"
                             variant="text"
                             size="sm"
+                            aria-label={`Cancel archive ${product.name}`}
                             onClick={() => setConfirmArchiveId(null)}
                           >
                             Cancel

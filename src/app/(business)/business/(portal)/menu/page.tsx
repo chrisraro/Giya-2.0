@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { EmptyState } from "@/components/consumer/empty-state";
 import { MenuManager } from "@/features/menu/components/menu-manager";
 import * as repo from "@/features/menu/server/repo";
 import type { ProductAddonRow, ProductVariantRow } from "@/features/menu/types";
@@ -22,6 +23,20 @@ export default async function BusinessMenuPage() {
     repo.listCategories(business.id),
     repo.listProducts(business.id),
   ]);
+
+  // A query error (e.g. a transient DB/network failure) is not the same as
+  // a business that genuinely has no categories/products yet - surface a
+  // distinct "try again" state instead of silently rendering MenuManager
+  // with empty lists, which would look identical to a real empty menu.
+  if (categoriesResult.error || productsResult.error) {
+    return (
+      <EmptyState
+        icon="error"
+        title="Could not load your menu"
+        body="Refresh to try again."
+      />
+    );
+  }
 
   const categories = categoriesResult.data ?? [];
   const products = productsResult.data ?? [];

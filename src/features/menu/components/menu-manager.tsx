@@ -3,6 +3,8 @@
 import * as React from "react";
 import Link from "next/link";
 
+import { Dialog } from "@/components/ui/dialog";
+
 import {
   addAddon,
   addVariant,
@@ -92,6 +94,14 @@ export function MenuManager({
   const [dialog, setDialog] = React.useState<DialogState>(null);
   const [formSubmitting, setFormSubmitting] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
+  // Set the moment createProduct succeeds during a create-mode submit, and
+  // cleared on a fully successful save or when the dialog is (re)opened.
+  // Its presence means "a product row already exists for this dialog
+  // session" - used so a retry after a partial variant/addon failure routes
+  // through updateProduct instead of calling createProduct again and
+  // leaving a duplicate, half-configured product behind. See
+  // handleSubmitProduct.
+  const [createdProductId, setCreatedProductId] = React.useState<string | null>(null);
 
   // Derived rather than mirrored into an effect: if the previously-selected
   // category disappears from props (e.g. another tab archived it, or this
@@ -114,15 +124,6 @@ export function MenuManager({
     effectiveCategoryId === "all"
       ? "All items"
       : (categories.find((category) => category.id === effectiveCategoryId)?.name ?? "Category");
-
-  React.useEffect(() => {
-    if (!dialog) return;
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") closeDialog();
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [dialog]);
 
   async function handleAddCategory(name: string): Promise<ActionResult> {
     const nextSort = categories.length > 0 ? Math.max(...categories.map((c) => c.sort)) + 1 : 0;
@@ -175,17 +176,20 @@ export function MenuManager({
 
   function openCreateDialog() {
     setFormError(null);
+    setCreatedProductId(null);
     setDialog({ mode: "create" });
   }
 
   function openEditDialog(product: ProductRow) {
     setFormError(null);
+    setCreatedProductId(null);
     setDialog({ mode: "edit", product });
   }
 
   function closeDialog() {
     setDialog(null);
     setFormError(null);
+    setCreatedProductId(null);
   }
 
   async function handleSubmitProduct(values: ProductFormOutput) {
@@ -202,54 +206,59 @@ export function MenuManager({
       images: values.images,
     };
 
-    if (dialog.mode === "create") {
+    // A row already exists for this dialog session either because we're
+    // genuinely editing a pre-existing product, or because a previous
+    // submit's createProduct call already succeeded but a later
+    // addVariant/addAddon call failed partway through (createdProductId is
+    // set below, right after createProduct resolves, precisely so this
+    // check catches that case too). Either way, submitting again must
+    // never call createProduct a second time - that would leave a
+    // duplicate, half-configured product behind - so it always goes
+    // through updateProduct instead.
+    const existingProductId = dialog.mode === "edit" ? dialog.product.id : createdProductId;
+
+    let productId: string;
+
+    if (existingProductId) {
+      const result = await updateProduct({ productId: existingProductId, ...basePayload });
+      if (!result.ok) {
+        setFormSubmitting(false);
+        setFormError(result.message);
+        return;
+      }
+      productId = existingProductId;
+    } else {
       const result = await createProduct({ ...basePayload, isAvailable: true });
       if (!result.ok) {
         setFormSubmitting(false);
         setFormError(result.message);
         return;
       }
-      const productId = result.data?.id;
-      if (productId) {
-        for (const variant of values.variants) {
-          const added = await addVariant({
-            productId,
-            name: variant.name,
-            priceCentavos: variant.priceCentavos,
-          });
-          if (!added.ok) {
-            setFormSubmitting(false);
-            setFormError(added.message);
-            return;
-          }
-        }
-        for (const addon of values.addons) {
-          const added = await addAddon({
-            productId,
-            name: addon.name,
-            priceDeltaCentavos: addon.priceDeltaCentavos,
-          });
-          if (!added.ok) {
-            setFormSubmitting(false);
-            setFormError(added.message);
-            return;
-          }
-        }
+      if (!result.data) {
+        setFormSubmitting(false);
+        setFormError("Something went wrong creating the product. Please try again.");
+        return;
       }
-      setFormSubmitting(false);
-      closeDialog();
-      return;
+      const newProductId = result.data.id;
+      // Record the id and move the dialog into edit mode for it *before*
+      // attempting the variant/addon adds below. If one of those fails,
+      // the dialog stays open pointed at this now-real product: a retry
+      // re-enters this function with existingProductId already set (from
+      // dialog.mode === "edit", or createdProductId as a fallback) and
+      // takes the updateProduct branch above instead of creating a
+      // second product.
+      setCreatedProductId(newProductId);
+      setDialog({ mode: "edit", product: result.data });
+      productId = newProductId;
     }
 
-    const productId = dialog.product.id;
-    const result = await updateProduct({ productId, ...basePayload });
-    if (!result.ok) {
-      setFormSubmitting(false);
-      setFormError(result.message);
-      return;
-    }
-
-    const originalVariants = variantsByProduct[productId] ?? [];
+    // Diff against what this product already has on the server. For a
+    // brand-new product (this submit's createProduct call just succeeded)
+    // that's an empty list, so every submitted row is added; for an
+    // existing product - genuine edit or a create retry - it's whatever
+    // the last load/revalidation returned, so only the still-missing rows
+    // get added and nothing already-saved is recreated.
+    const originalVariants = dialog.mode === "edit" ? (variantsByProduct[productId] ?? []) : [];
     const variantError = await applyRowDiff(
       originalVariants,
       values.variants,
@@ -263,7 +272,7 @@ export function MenuManager({
       return;
     }
 
-    const originalAddons = addonsByProduct[productId] ?? [];
+    const originalAddons = dialog.mode === "edit" ? (addonsByProduct[productId] ?? []) : [];
     const addonError = await applyRowDiff(
       originalAddons,
       values.addons,
@@ -279,6 +288,7 @@ export function MenuManager({
     }
 
     setFormSubmitting(false);
+    setCreatedProductId(null);
     closeDialog();
   }
 
@@ -322,52 +332,28 @@ export function MenuManager({
         />
       </div>
 
-      {dialog ? (
-        <div
-          role="presentation"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/40 p-4"
-          onClick={closeDialog}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="product-dialog-title"
-            className="flex max-h-[90vh] w-full max-w-lg flex-col gap-4 overflow-y-auto rounded-md3-xl bg-surface p-6 shadow-md"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="flex items-center justify-between">
-              <h2 id="product-dialog-title" className="text-headline-s text-on-surface">
-                {dialog.mode === "create" ? "Add product" : "Edit product"}
-              </h2>
-              <button
-                type="button"
-                aria-label="Close"
-                onClick={closeDialog}
-                className="flex size-8 shrink-0 items-center justify-center rounded-full text-on-surface-variant outline-none transition-colors duration-200 ease-standard hover:bg-surface-container-high focus-visible:ring-2 focus-visible:ring-secondary"
-              >
-                <span aria-hidden className="material-symbols-rounded text-[18px]">
-                  close
-                </span>
-              </button>
-            </div>
-
-            <ProductForm
-              categories={categories.map((category) => ({ id: category.id, name: category.name }))}
-              {...(dialog.mode === "edit"
-                ? {
-                    product: dialog.product,
-                    variants: variantsByProduct[dialog.product.id] ?? [],
-                    addons: addonsByProduct[dialog.product.id] ?? [],
-                  }
-                : {})}
-              onSubmit={handleSubmitProduct}
-              onCancel={closeDialog}
-              submitting={formSubmitting}
-              serverError={formError}
-            />
-          </div>
-        </div>
-      ) : null}
+      <Dialog
+        open={dialog !== null}
+        onClose={closeDialog}
+        title={dialog?.mode === "edit" ? "Edit product" : "Add product"}
+      >
+        {dialog ? (
+          <ProductForm
+            categories={categories.map((category) => ({ id: category.id, name: category.name }))}
+            {...(dialog.mode === "edit"
+              ? {
+                  product: dialog.product,
+                  variants: variantsByProduct[dialog.product.id] ?? [],
+                  addons: addonsByProduct[dialog.product.id] ?? [],
+                }
+              : {})}
+            onSubmit={handleSubmitProduct}
+            onCancel={closeDialog}
+            submitting={formSubmitting}
+            serverError={formError}
+          />
+        ) : null}
+      </Dialog>
     </div>
   );
 }
