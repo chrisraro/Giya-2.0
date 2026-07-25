@@ -28,8 +28,9 @@ import type { FieldSource, ReceiptRejectReason, RouteOutcome } from "../types";
 import { evaluateVelocity } from "../velocity";
 import type { VelocityCounts, VelocityWindow } from "../velocity";
 import { awardPoints, priceReceipt } from "./award";
-import type { AwardPlan } from "./award";
+import type { AwardPlan, AwardResult } from "./award";
 import { applyCooldownIfEarned, isFraudFamilyRejectReason } from "./cooldown";
+import { notifyReceiptOutcome } from "./notify";
 import { getOcrProvider, OcrError } from "./ocr/provider";
 import type { OcrBlock, OcrProvider, OcrResponse } from "./ocr/provider";
 import { getReceiptSettings } from "./settings";
@@ -1545,8 +1546,13 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
   // ---- Stage 10: the award ------------------------------------------------
   // The receipt is 'approved' in the database by now (`persistOutcome` above),
   // which is `awardPoints`'s stated precondition and 0018 step 2's guard.
+  //
+  // The result is captured now only so the notification below can say how many
+  // points landed. Nothing about the award path changes: the same call, the
+  // same guard, the same ignored-on-failure semantics.
+  let awardResult: AwardResult | null = null;
   if (finalOutcome.status === "approved" && award !== null) {
-    await awardPoints({ deps, receiptId: receipt.id, plan: award });
+    awardResult = await awardPoints({ deps, receiptId: receipt.id, plan: award });
   }
 
   // ---- Doc 37 consequences ladder step 2 ---------------------------------
@@ -1558,6 +1564,38 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
   ) {
     await applyCooldownIfEarned(deps, receipt.user_id, settings);
   }
+
+  // ---- Stage 10: tell the consumer ---------------------------------------
+  // Doc 36 Stage 10: approval "enqueues notify.push (kind='points_awarded')"
+  // and "rejection enqueues kind='receipt_rejected' with the reason"; doc 37's
+  // consequences ladder step 1 names the same rejection notification. The
+  // `review` case is this slice's addition - doc 36 Stage 9 routes a receipt to
+  // a human and the consumer heard nothing about it until now, which is the
+  // one outcome where silence lasts up to a day.
+  //
+  // LAST, AND FAIL-SOFT. It sits after the award and the cooldown deliberately:
+  // everything above it is the decision and its consequences, all of which are
+  // already persisted, and `notifyReceiptOutcome` cannot throw (see its header
+  // and ../../notifications/server/raise.ts). A message that could not be
+  // written costs a message.
+  //
+  // TODO(queue): doc 39's `notify.push`. Today the row is written synchronously
+  // here; once the jobs slice and the delivery credentials land, the push send
+  // is enqueued from raise.ts and this call site does not change shape. Same
+  // marker as the OCR enqueue in ./submit.ts.
+  await notifyReceiptOutcome({
+    deps,
+    userId: receipt.user_id,
+    receiptId: receipt.id,
+    businessId: matchedBusinessId,
+    businessName: business?.name ?? null,
+    outcome:
+      finalOutcome.status === "approved"
+        ? { status: "approved", award: awardResult }
+        : finalOutcome.status === "review"
+          ? { status: "review" }
+          : { status: "rejected", reason: finalOutcome.reason },
+  });
 
   console.info(
     `[receipts/process] receipt ${receiptId} -> ${finalOutcome.status}` +
@@ -1870,6 +1908,11 @@ async function handleOcrFailure(input: OcrFailureInput): Promise<void> {
       status: "rejected",
       reason: "unreadable",
     });
+    // A rejection is a rejection however it was reached. This one never gets
+    // as far as `runPipeline`'s notification, and it is the rejection a
+    // consumer is MOST able to act on (retake the photo in better light), so
+    // staying silent here would withhold the one message with an obvious fix.
+    await notifyRejected(deps, receipt, "unreadable");
     return;
   }
 
@@ -1897,12 +1940,42 @@ async function handleOcrFailure(input: OcrFailureInput): Promise<void> {
       { status: "rejected", reason: "manual" },
       "processing_failed",
     );
+    // Doc 36's dead-letter path: "consumer notified and may resubmit". The
+    // 'manual' copy offers a retake, which is the right advice - the failure
+    // was ours, not theirs, and `reject_note='processing_failed'` stays
+    // internal (0017 withholds the column from the client, and this message
+    // never carries it).
+    await notifyRejected(deps, receipt, "manual");
     return;
   }
 
   console.warn(
     `[receipts/process] receipt ${receipt.id} OCR attempt ${attempt} failed retryably (${code}); leaving it processing`,
   );
+}
+
+/**
+ * The OCR dead ends' half of Stage 10's notification. Separate from
+ * `runPipeline`'s call only because these two rejections happen before a
+ * business name, a match or an award exists; the message itself is composed by
+ * the same adapter from the same copy matrix.
+ *
+ * `receipt.business_id` is the PRE-BOUND tenant (the shop the consumer scanned
+ * from), which is the only tenancy fact available on this path and is exactly
+ * what a rejection at this stage is attributable to.
+ */
+async function notifyRejected(
+  deps: ProcessReceiptDeps,
+  receipt: ReceiptRow,
+  reason: ReceiptRejectReason,
+): Promise<void> {
+  await notifyReceiptOutcome({
+    deps,
+    userId: receipt.user_id,
+    receiptId: receipt.id,
+    businessId: receipt.business_id,
+    outcome: { status: "rejected", reason },
+  });
 }
 
 async function finalizeWithoutParse(

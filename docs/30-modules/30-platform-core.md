@@ -121,8 +121,9 @@ Adding a kind = code + this table (never schema, 25). `data` always `{route, par
 
 | kind | Phase | Default channels | Payload (`data`) | Deep link |
 |---|---|---|---|---|
-| `points_awarded` | [MVP] | push, in_app | `{receipt_id, business_id, points}` | `/wallet/{business_id}` |
-| `receipt_rejected` | [MVP] | push, in_app | `{receipt_id, reject_reason}` | `/receipts/{receipt_id}` |
+| `points_awarded` | [MVP] | push, in_app | `{receipt_id, business_id, points}` | `/scan/{receipt_id}` until `/wallet/{business_id}` exists as a route |
+| `receipt_rejected` | [MVP] | push, in_app | `{receipt_id, reject_reason}` | `/scan/{receipt_id}` (the receipt status screen, which renders the same consumer-safe copy) |
+| `receipt_in_review` | [MVP] | in_app | `{receipt_id}` — raised when `36-receipt-ocr-pipeline.md` Stage 9 routes a receipt to a human, so the consumer is not left with a silent receipt for up to a day | `/scan/{receipt_id}` |
 | `reward_claimed` | [MVP] | push, in_app | `{claim_id, reward_id, business_id}` | `/rewards/claims/{claim_id}` |
 | `staff_invite` | [MVP] | email | `{business_id, invite_token, role}` | `/invite/{token}` |
 | `verification_decision` | [MVP] | email, in_app | `{verification_id, status, decision_reason}` | `/business/verification` |

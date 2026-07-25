@@ -60,7 +60,7 @@ function isBusinessOnboardingRoute(pathname: string): boolean {
  * Consumer routes that are meaningless without a session and must bounce to
  * /login rather than render an empty or broken screen.
  *
- * WHY THESE SIX, AND WHY NOT THE OTHERS:
+ * WHY THESE SEVEN, AND WHY NOT THE OTHERS:
  *
  *   * `/home`     - the worst of the set. It rendered a greeting by name over a
  *                   points total and a balance strip, so an anonymous visitor
@@ -82,6 +82,12 @@ function isBusinessOnboardingRoute(pathname: string): boolean {
  *                   correct status but the wrong recovery: "sign in" is the
  *                   action, not "this page does not exist". Its own
  *                   `notFound()` stays as belt and braces.
+ *   * `/notifications` - doc 33 registers it as an auth route, and an inbox is
+ *                   by definition somebody's inbox. 0026 revokes SELECT on
+ *                   `notifications` from `anon` entirely, so an ungated
+ *                   signed-out visit would render an empty "You are all caught
+ *                   up" that reads as an account with no messages rather than
+ *                   as no account. The page redirects on its own too.
  *
  * NOT gated here:
  *   * `/b/[slug]` - deliberately public. It is a business's shareable page and
@@ -100,6 +106,7 @@ const AUTHENTICATED_CONSUMER_ROUTES = [
   "/rewards",
   "/scan",
   "/receipts",
+  "/notifications",
 ] as const;
 
 export function isAuthenticatedConsumerRoute(pathname: string): boolean {
