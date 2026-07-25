@@ -11,10 +11,50 @@ import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/brand/logo";
 import { cn } from "@/lib/utils";
 import { completeConsumerOnboarding } from "@/features/identity/actions";
+import { createClient } from "@/lib/supabase/client";
 
 const STEP_COUNT = 4;
 
-const CITIES = ["Cebu", "Manila", "Davao", "Iloilo", "Baguio", "Cagayan de Oro"];
+/**
+ * The city step reads `ref_cities` rather than a hardcoded list.
+ *
+ * It used to be `const CITIES = ["Cebu", "Manila", "Davao", "Iloilo",
+ * "Baguio", "Cagayan de Oro"]`, a client-side copy of the six-row stub seed in
+ * 0002_identity.sql. 0027_reference_data.sql seeds all 149 chartered
+ * Philippine cities, and that seed reaches nobody through a literal, so a
+ * consumer in Naga or Bacolod still had no way to say where they live.
+ *
+ * `ref_cities` carries a public select policy (`ref_cities_public_select`), so
+ * the browser client can read it without a session, which is what this step
+ * needs: onboarding runs before the profile exists. The step already had a
+ * search field, an empty state and a `max-h-64 overflow-y-auto` list, so it was
+ * built for more rows than it was ever given.
+ *
+ * The names are unique by construction (0027 disambiguates San Fernando, San
+ * Carlos, Talisay and Naga with a parenthesised province) because
+ * `completeConsumerOnboarding` resolves the chosen name with `.ilike(...)
+ * .maybeSingle()`, which raises on a tie.
+ */
+function useCities() {
+  const [cities, setCities] = React.useState<string[]>([]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const { data } = await createClient()
+        .from("ref_cities")
+        .select("name")
+        .eq("is_active", true)
+        .order("name");
+      if (!cancelled && data) setCities(data.map((row) => row.name));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return cities;
+}
 
 const INTERESTS = [
   "Milk tea",
@@ -220,9 +260,10 @@ export default function OnboardingPage() {
   const [pending, setPending] = React.useState(false);
   const cityRefs = React.useRef<Record<string, HTMLDivElement | null>>({});
 
+  const cities = useCities();
   const filteredCities = React.useMemo(
-    () => CITIES.filter((c) => c.toLowerCase().includes(citySearch.trim().toLowerCase())),
-    [citySearch],
+    () => cities.filter((c) => c.toLowerCase().includes(citySearch.trim().toLowerCase())),
+    [cities, citySearch],
   );
 
   const canContinue = step !== 1 || city !== null;

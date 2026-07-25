@@ -15,6 +15,10 @@ vi.mock("server-only", () => ({}));
 const mocks = vi.hoisted(() => ({
   push: vi.fn(),
   completeConsumerOnboarding: vi.fn(),
+  // Stands in for ref_cities. Deliberately includes a city that is NOT one of
+  // the six the wizard used to hardcode, so a regression back to a literal
+  // list fails here instead of shipping.
+  cities: [{ name: "Cebu" }, { name: "Davao" }, { name: "Naga" }],
 }));
 
 vi.mock("next/navigation", () => ({
@@ -25,6 +29,20 @@ vi.mock("@/features/identity/actions", () => ({
   completeConsumerOnboarding: mocks.completeConsumerOnboarding,
 }));
 
+// The city step reads ref_cities through the browser client now, so the list
+// arrives asynchronously and every step that touches it has to await it.
+vi.mock("@/lib/supabase/client", () => ({
+  createClient: () => ({
+    from: () => ({
+      select: () => ({
+        eq: () => ({
+          order: () => Promise.resolve({ data: mocks.cities, error: null }),
+        }),
+      }),
+    }),
+  }),
+}));
+
 const OnboardingPage = (await import("./page")).default;
 
 beforeEach(() => {
@@ -33,10 +51,10 @@ beforeEach(() => {
 });
 
 /** Walks the wizard to its last step by clicking Continue. */
-function advanceToFinish(): void {
+async function advanceToFinish(): Promise<void> {
   // Step 0 (welcome) -> 1 (city) -> 2 (interests) -> 3 (notifications).
   fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-  fireEvent.click(screen.getByRole("radio", { name: /Cebu/ }));
+  fireEvent.click(await screen.findByRole("radio", { name: /Cebu/ }));
   fireEvent.click(screen.getByRole("button", { name: "Continue" }));
   fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 }
@@ -60,7 +78,7 @@ describe("Skip for now", () => {
     render(<OnboardingPage />);
 
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-    fireEvent.click(screen.getByRole("radio", { name: /Davao/ }));
+    fireEvent.click(await screen.findByRole("radio", { name: /Davao/ }));
     fireEvent.click(screen.getByRole("button", { name: "Skip for now" }));
 
     await waitFor(() =>
@@ -87,7 +105,7 @@ describe("Skip for now", () => {
 describe("Finish", () => {
   it("stamps completion and moves to /home", async () => {
     render(<OnboardingPage />);
-    advanceToFinish();
+    await advanceToFinish();
 
     fireEvent.click(screen.getByRole("button", { name: "Finish" }));
 
@@ -104,10 +122,38 @@ describe("Finish", () => {
     mocks.completeConsumerOnboarding.mockResolvedValue({ ok: false, message: "Network is down" });
 
     render(<OnboardingPage />);
-    advanceToFinish();
+    await advanceToFinish();
     fireEvent.click(screen.getByRole("button", { name: "Finish" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Network is down");
     expect(mocks.push).not.toHaveBeenCalled();
+  });
+});
+
+// ref_cities held six rows until 0027_reference_data.sql seeded all 149
+// chartered Philippine cities, and this wizard held its own copy of those six
+// as a literal, so the seed reached nobody: a consumer in Naga had no way to
+// say where they live. The picker is now fed by the table.
+describe("City step", () => {
+  it("offers whatever ref_cities holds, not a hardcoded six", async () => {
+    render(<OnboardingPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(await screen.findByRole("radio", { name: /Naga/ })).toBeInTheDocument();
+    expect(screen.getAllByRole("radio")).toHaveLength(mocks.cities.length);
+  });
+
+  it("passes the chosen city through to the completion action", async () => {
+    render(<OnboardingPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(await screen.findByRole("radio", { name: /Naga/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Skip for now" }));
+
+    await waitFor(() =>
+      expect(mocks.completeConsumerOnboarding).toHaveBeenCalledWith({
+        cityName: "Naga",
+        pushEnabled: false,
+      }),
+    );
   });
 });

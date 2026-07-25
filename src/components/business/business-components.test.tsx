@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 
 vi.mock("next/navigation", () => ({ usePathname: () => "/business/dashboard" }));
@@ -6,6 +6,7 @@ vi.mock("next/navigation", () => ({ usePathname: () => "/business/dashboard" }))
 import { Sidebar } from "./sidebar";
 import { KpiCard } from "./kpi-card";
 import { BarChart } from "./bar-chart";
+import { VerificationBanner } from "./verification-banner";
 import type { DashboardKpi } from "@/features/analytics/types";
 
 describe("Sidebar", () => {
@@ -119,5 +120,48 @@ describe("BarChart", () => {
       screen.getByRole("img", { name: "Visits per day for the last 7 days, no visits recorded yet" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Sun")).toBeInTheDocument();
+  });
+});
+
+// The banner is the only thing on the dashboard that makes a claim about KYC,
+// and there is no KYC. `register_business` creates every business as `draft`,
+// nothing moves it off `draft`, the onboarding wizard's document step uploads
+// nothing, and `business_documents` / `business_verifications` are both empty.
+// The banner previously told every one of those merchants that their documents
+// were under review. These tests pin the copy to what is actually true, so the
+// claim cannot drift back in ahead of the flow that would justify it.
+describe("VerificationBanner", () => {
+  it("does not claim a review is happening while the business is a draft", () => {
+    render(<VerificationBanner status="draft" />);
+
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent(/not verified yet/i);
+    expect(banner).toHaveTextContent(/nothing is under review/i);
+    expect(banner).not.toHaveTextContent(/documents are under review/i);
+  });
+
+  // Kept honest for the day the submission flow lands: this status is only
+  // reachable from a real submission that writes business_verifications and
+  // links the uploaded documents (doc 32 section 2.2).
+  it("keeps the review copy once documents really have been submitted", () => {
+    render(<VerificationBanner status="pending_verification" />);
+
+    expect(screen.getByRole("status")).toHaveTextContent(/documents are under review/i);
+  });
+
+  it("renders nothing for an active business or a missing status", () => {
+    const { container: active } = render(<VerificationBanner status="active" />);
+    expect(active).toBeEmptyDOMElement();
+
+    const { container: none } = render(<VerificationBanner status={null} />);
+    expect(none).toBeEmptyDOMElement();
+  });
+
+  it("hides itself when dismissed", () => {
+    render(<VerificationBanner status="draft" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });
