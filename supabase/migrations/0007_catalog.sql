@@ -90,10 +90,12 @@ create index products_name_trgm on public.products using gin (name extensions.gi
 -- category lookups need their own index
 create index products_category_idx on public.products (category_id);
 
--- P1 + public read: anyone sees active, non-deleted products (consumer menu)
+-- P1 + public read: anyone sees non-deleted products that are active or
+-- sold_out (doc 22: sold_out shows greyed-out on the consumer menu, so it must
+-- be publicly readable; only 'hidden' and soft-deleted rows are withheld).
 create policy products_public_select on public.products
   for select to anon, authenticated
-  using (status = 'active' and deleted_at is null);
+  using (status in ('active', 'sold_out') and deleted_at is null);
 -- P1: staff of the tenant read their products in any status
 create policy products_staff_select on public.products
   for select to authenticated
