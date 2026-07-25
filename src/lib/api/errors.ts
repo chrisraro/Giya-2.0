@@ -53,18 +53,26 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly details: readonly ErrorDetail[] | undefined;
+  // Extra response headers this error must carry. Added for the small set of
+  // errors whose CONTRACT is a header rather than a body field: doc 13's 429
+  // and doc 37's 403 CONSUMER_SCAN_BLOCKED both specify `Retry-After`, and a
+  // client that has to regex a human sentence to learn when it may retry is a
+  // client that will get it wrong. Header names are ours, never a caller's.
+  readonly headers: Readonly<Record<string, string>> | undefined;
 
   constructor(
     status: number,
     code: string,
     message: string,
     details?: readonly ErrorDetail[],
+    headers?: Readonly<Record<string, string>>,
   ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.details = details;
+    this.headers = headers;
   }
 }
 

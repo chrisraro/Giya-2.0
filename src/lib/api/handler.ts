@@ -234,7 +234,11 @@ function errorResponse(
       request_id: requestId,
     },
   };
-  return jsonResponse(body, error.status, requestId, headers);
+  // The error's own headers win over the accumulated pipeline headers: an
+  // error that names a header (doc 37's CONSUMER_SCAN_BLOCKED carries the
+  // cooldown end in `Retry-After`) is stating its contract, and a rate-limit
+  // `Retry-After` picked up earlier in the pipeline must not overwrite it.
+  return jsonResponse(body, error.status, requestId, { ...headers, ...(error.headers ?? {}) });
 }
 
 function buildSuccessPayload<TData>(

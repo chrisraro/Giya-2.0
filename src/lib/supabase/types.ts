@@ -2227,6 +2227,16 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      award_receipt_points: {
+        Args: {
+          p_campaign_id?: string
+          p_expires_at?: string
+          p_points: number
+          p_receipt_id: string
+          p_rule_snapshot?: Json
+        }
+        Returns: string
+      }
       claim_reward: { Args: { p_reward_id: string }; Returns: string }
       expire_claims: { Args: { p_limit?: number }; Returns: number }
       register_business: {

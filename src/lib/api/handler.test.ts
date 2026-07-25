@@ -597,6 +597,58 @@ describe("defineHandler - rate limiting", () => {
   });
 });
 
+describe("defineHandler - error-carried headers", () => {
+  it("emits headers an ApiError declares", async () => {
+    // Some errors ARE a header: doc 37's 403 CONSUMER_SCAN_BLOCKED states when
+    // scanning resumes in Retry-After, and a client should never have to parse
+    // a sentence to find that out.
+    const route = defineHandler({
+      route: "receipts.submit",
+      requireSession: true,
+      handler: async () => {
+        throw new ApiError(
+          403,
+          "CONSUMER_SCAN_BLOCKED",
+          "Receipt scanning is paused on your account for now.",
+          undefined,
+          { "Retry-After": "3600" },
+        );
+      },
+    });
+
+    const response = await route(makeRequest());
+    const body = (await response.json()) as { error: { code: string } };
+
+    expect(response.status).toBe(403);
+    expect(body.error.code).toBe("CONSUMER_SCAN_BLOCKED");
+    expect(response.headers.get("Retry-After")).toBe("3600");
+  });
+
+  it("lets the error's own header win over one the pipeline already set", async () => {
+    // The limiter records Retry-After on every request it allows through as
+    // well; an error that names its own value is stating a different fact and
+    // must not be overwritten by the ambient one.
+    hoisted.incr.mockResolvedValue(1);
+    hoisted.ttl.mockResolvedValue(59);
+    const route = defineHandler({
+      route: "receipts.submit",
+      requireSession: true,
+      rateLimit: { limit: 6, windowSeconds: 60, keyBy: "user" },
+      handler: async () => {
+        throw new ApiError(429, "RATE_LIMITED", "Daily limit reached.", undefined, {
+          "Retry-After": "86400",
+        });
+      },
+    });
+
+    const response = await route(makeRequest());
+
+    expect(response.headers.get("Retry-After")).toBe("86400");
+    // Headers the error did not name still come through.
+    expect(response.headers.get("X-RateLimit-Limit")).toBe("6");
+  });
+});
+
 describe("defineHandler - unexpected errors", () => {
   it("returns 500 INTERNAL without leaking the message or stack", async () => {
     const route = defineHandler({
