@@ -1742,6 +1742,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      claim_reward: { Args: { p_reward_id: string }; Returns: string }
       register_business: {
         Args: {
           p_address: string
@@ -1750,6 +1751,10 @@ export type Database = {
           p_type: string
         }
         Returns: string
+      }
+      validate_redemption: {
+        Args: { p_claim_id: string; p_method?: string; p_token_jti: string }
+        Returns: Json
       }
     }
     Enums: {
