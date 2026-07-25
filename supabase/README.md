@@ -51,7 +51,9 @@ claims. The hook remains the fast path and is still REQUIRED for the
 claims-only surfaces: `business_verifications` / `business_documents` staff
 reads, staff updates on `businesses` / `business_customers`, roster reads
 beyond your own row, and admin policies. Enable it before shipping those
-surfaces.
+surfaces. The admin fraud/receipt-review queue (doc 31) and the admin read on
+`audit_logs` are both blocked on this: a claim-based admin policy would
+evaluate null for every session today and silently deny.
 
 After changing hook configuration, existing sessions keep their old claims
 until the next token refresh (up to 1 hour); sign out and back in to see new
@@ -76,7 +78,7 @@ is transaction-wrapped (`begin ... rollback`) and leaves no data behind:
 psql "$DATABASE_URL" -f supabase/tests/rls_identity_smoke.sql
 ```
 
-Seven suites, one per domain:
+Nine suites, one per domain:
 
 | file | covers |
 |---|---|
@@ -87,6 +89,8 @@ Seven suites, one per domain:
 | `rls_receipts_smoke.sql` | receipts evidence fences, column grant, the three unique amendments, the delete and immutability triggers (0017) |
 | `rpc_award_smoke.sql` | `award_receipt_points`: guard order, one earn per receipt, the `balance_after` chain, the Manila-day visit rule (0018) |
 | `rls_consumer_fence_smoke.sql` | the `consumers` / `profiles` self-update column fence: legitimate profile and onboarding writes still land, fraud and trust columns raise 42501 (0021) |
+| `rls_audit_logs_smoke.sql` | `audit_logs`: the owner-only tenant read and the manager narrowing, platform-level rows (null `business_id`) invisible to every tenant, the `ip` / `user_agent` column fence, client writes refused at the privilege layer, the append-only row trigger and the no-truncate statement trigger, the service_role split (INSERT stays, everything else revoked), and the `action` / `entity_type` shape constraints plus the mandatory admin reason (0022) |
+| `rpc_record_visit_smoke.sql` | `record_receipt_visit`: guard order, the doc 40 Asia/Manila visit rule including the UTC/Manila date-boundary case and backdated receipts, spend accumulation, the points columns left untouched, idempotency of a second call, the service_role-only grant, and the interaction with the award path (an award after a recorded visit mints points without adding the same receipt's spend twice) (0023) |
 
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
@@ -168,6 +172,8 @@ the only one.
   So `consumers.scan_blocked_until` (doc 37 ladder step 2) and `profiles.is_suspended` / `suspended_reason` (ladder step 4) are no longer self-clearable, and neither are `lifetime_points_earned`, `last_scan_at`, `referral_code`, `referred_by`, `deleted_at`, or the A21.1 `birth_date` / `birth_date_updated_at` pair (fenced together: granting the value without its once-per-rolling-year enforcement column, or vice versa, defeats the rule either way, and nothing writes them yet). Covered by `rls_consumer_fence_smoke.sql`. The `authenticated` allowlists are asserted there as exact sorted strings, so adding a column to either table without deciding whether it is self-writable fails the suite.
 - Column-granularity gaps that REMAIN (follow-up migration owed before these columns become load-bearing): owner updates could touch `businesses.status` / `verified_at` / `plan`; `business_customers` staff updates can write `segment` and `notes` only since 0013, but the `businesses` surface has no equivalent fence yet; roster reads expose `invite_token` (must be column-restricted before the invites module ships). Deliberately not fenced in 0021 because they are staff/tenant surfaces rather than the consumer self-update surface this slice made load-bearing, and `businesses.status` in particular needs the verification state machine settled first.
 - Policy deviation vs doc 21 (record in doc 26 next docs pass): `business_verifications` / `business_documents` are staff READ-only with service-role writes (doc 21 said owner insert/read); tightened deliberately for TIN-adjacent data.
+- **`audit_logs` reads are OWNER-only; a manager cannot read them at all.** This will surprise someone, because every neighbouring table in the receipts domain (`receipts`, `fraud_signals`, `ai_usage_events`) settled on `array['owner','manager']`, and a manager is precisely the person who decides the receipts this table records. That is the reason, not an oversight: doc 01's permission matrix has "View audit logs (own tenant)" as the one row in the Platform block where owner is ticked and manager is not, and an audience that can read the file kept on itself is doc 15's threat-model item 6 (insider abuse). Owner is the only business role accountable for the tenant. Asserted in `rls_audit_logs_smoke.sql`, so widening it fails the suite rather than passing quietly. Two related consequences of the same policy: rows with a null `business_id` (admin and system actions) are visible to NO tenant and are read through the service role until the token hook lands, and `ip` / `user_agent` are revoked from `authenticated` entirely, so `select *` on `audit_logs` raises 42501 and client reads must name their columns.
+- No admin policy on `audit_logs`, against doc 25's "select admin; select owner where business_id matches". Same call 0017 made for `receipts` and `fraud_signals`: every admin predicate reads the platform-admin claim and the custom access token hook is not enabled on this project, so a claim-based admin policy would evaluate null for every session and silently deny. Admin audit surfaces read via the service role until the hook is enabled.
 
 ## Advisor acceptances (2026-07-25)
 
@@ -183,6 +189,12 @@ the only one.
   leaked-password toggle below. `award_receipt_points` is absent from that
   definer list because EXECUTE is granted to `service_role` only, and
   `private.manila_day` pins `search_path = ''`.
+- Migrations 0021-0023 (`consumers`/`profiles` column fence, `audit_logs`,
+  `record_receipt_visit`) added: no new advisors of any level. Verified live on
+  2026-07-25 after 0023: still 0 ERROR and the same 7 WARN. `record_receipt_visit`
+  and `private.apply_receipt_visit` are absent from the definer list because
+  EXECUTE on the first is granted to `service_role` only and revoked from every
+  role on the second, and both pin `search_path = ''`.
 
 ## Manual dashboard steps (pending)
 
@@ -219,6 +231,8 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0019_receipts_storage.sql | 20260725113309 | 0019_receipts_storage |
 | 0020_realtime_receipts.sql | 20260725123010 | realtime_receipts |
 | 0021_consumer_selfupdate_column_fence.sql | 20260725131247 | 0021_consumer_selfupdate_column_fence |
+| 0022_audit_logs.sql | 20260725141733 | 0022_audit_logs |
+| 0023_record_receipt_visit.sql | 20260725143104 | 0023_record_receipt_visit |
 
 Notes:
 - **0020's live ledger name is `realtime_receipts`, without the ordinal

@@ -67,6 +67,68 @@ export type Database = {
           },
         ]
       }
+      audit_logs: {
+        Row: {
+          action: string
+          actor_id: string | null
+          actor_kind: string
+          actor_role: string | null
+          after: Json | null
+          before: Json | null
+          business_id: string | null
+          created_at: string
+          entity_id: string | null
+          entity_type: string
+          id: string
+          ip: unknown
+          reason: string | null
+          request_id: string | null
+          user_agent: string | null
+        }
+        Insert: {
+          action: string
+          actor_id?: string | null
+          actor_kind: string
+          actor_role?: string | null
+          after?: Json | null
+          before?: Json | null
+          business_id?: string | null
+          created_at?: string
+          entity_id?: string | null
+          entity_type: string
+          id?: string
+          ip?: unknown
+          reason?: string | null
+          request_id?: string | null
+          user_agent?: string | null
+        }
+        Update: {
+          action?: string
+          actor_id?: string | null
+          actor_kind?: string
+          actor_role?: string | null
+          after?: Json | null
+          before?: Json | null
+          business_id?: string | null
+          created_at?: string
+          entity_id?: string | null
+          entity_type?: string
+          id?: string
+          ip?: unknown
+          reason?: string | null
+          request_id?: string | null
+          user_agent?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "audit_logs_actor_id_fkey"
+            columns: ["actor_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       business_customers: {
         Row: {
           business_id: string
@@ -1651,6 +1713,7 @@ export type Database = {
           updated_at: string
           updated_by: string | null
           user_id: string
+          visit_recorded_at: string | null
         }
         Insert: {
           business_id?: string | null
@@ -1683,6 +1746,7 @@ export type Database = {
           updated_at?: string
           updated_by?: string | null
           user_id: string
+          visit_recorded_at?: string | null
         }
         Update: {
           business_id?: string | null
@@ -1715,6 +1779,7 @@ export type Database = {
           updated_at?: string
           updated_by?: string | null
           user_id?: string
+          visit_recorded_at?: string | null
         }
         Relationships: [
           {
@@ -2239,6 +2304,10 @@ export type Database = {
       }
       claim_reward: { Args: { p_reward_id: string }; Returns: string }
       expire_claims: { Args: { p_limit?: number }; Returns: number }
+      record_receipt_visit: {
+        Args: { p_receipt_id: string }
+        Returns: undefined
+      }
       register_business: {
         Args: {
           p_address: string
