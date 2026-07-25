@@ -261,7 +261,26 @@ Notes:
 
 ## Project history (why the ledger was rewritten on 2026-07-26)
 
-The live project is **`zlfxfzlnklqhajacngxf`**.
+The live project is **`zlfxfzlnklqhajacngxf`**, named **"Giya"**, in organization
+`wztsksqtupnkwskxrhmq`, created 2026-07-24 14:50 UTC.
+
+The retired one, `dcnpuvtbftpbcjcvfnlt`, is named **"latag-ph"** and belongs to a
+DIFFERENT Supabase account, in the Vercel-linked organization
+`vercel_icfg_0cIUClNbOJ7jyuSdWy9qoyTq`, alongside LPG-IMS and BUCS PolicyPulse.
+It is a separate live application of the same owner, not a spare project. That is
+why it already held tables when this schema was first applied, and it is why
+migrations 0000a and 0000b dropped `licenses`, `payments`, `pricing`, `profiles`,
+`feature_flags` and `feedback` from an app that was actually using them. Treat
+"this project already has tables in it" as a signal to identify the project
+before dropping anything, not as evidence that the tables are stale.
+
+**The trap that caused it, and how to avoid repeating it.** A persisted
+User-level `SUPABASE_ACCESS_TOKEN` environment variable on the workstation points
+at the latag-ph account, and it OVERRIDES `supabase login`. Logging out and back
+in does not change which account the CLI acts as; `supabase projects list` keeps
+showing the other account's projects. Either remove that variable, or pass the
+right token explicitly per command. The two accounts share no projects, so
+`projects list` is the reliable check: the Giya account sees exactly one project.
 
 Everything through 2026-07-25 was applied to a different project,
 `dcnpuvtbftpbcjcvfnlt`, because that ref was hard-coded in the Supabase MCP
