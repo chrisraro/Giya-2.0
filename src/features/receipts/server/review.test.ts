@@ -1437,3 +1437,164 @@ describe("reviewReceipt wiring", () => {
     expect(load.columns).not.toContain("parse_meta");
   });
 });
+
+// ===========================================================================
+// The consumer notification (doc 36 Stage 10, "approved (auto or human)")
+// ===========================================================================
+//
+// Doc 36 draws no distinction between an auto-approval and a reviewer's, and
+// neither does this service: both go through ./notify.ts and therefore through
+// the same tested copy matrix. What these tests own is the wiring and the two
+// properties that make it safe - the reviewer's free-text note never reaches
+// the consumer, and a failed notification cannot undo a decision that has
+// already been persisted, audited and paid.
+
+describe("reviewReceipt notification", () => {
+  function raised(harness: Harness): Record<string, unknown>[] {
+    return harness.supabase
+      .opsFor("notifications", "insert")
+      .map((op) => op.payload as Record<string, unknown>);
+  }
+
+  it("raises points_awarded when a reviewer approves", async () => {
+    const harness = createHarness();
+
+    await reviewReceipt({
+      receiptId: RECEIPT_ID,
+      actorId: MANAGER_ID,
+      action: "approve",
+      fields: APPROVE_FIELDS,
+      requestId: REQUEST_ID,
+      deps: harness.deps,
+    });
+
+    const rows = raised(harness);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe("points_awarded");
+    expect(rows[0]?.user_id).toBe(CONSUMER_ID);
+    expect(rows[0]?.business_id).toBe(BUSINESS_ID);
+    // 19,000 centavos at 100 centavos per point = 190.
+    expect(String(rows[0]?.body)).toContain("190");
+  });
+
+  it("addresses it to the SUBMITTER, never to the reviewer", async () => {
+    const harness = createHarness();
+
+    await reviewReceipt({
+      receiptId: RECEIPT_ID,
+      actorId: MANAGER_ID,
+      action: "approve",
+      fields: APPROVE_FIELDS,
+      requestId: REQUEST_ID,
+      deps: harness.deps,
+    });
+
+    expect(raised(harness)[0]?.user_id).not.toBe(MANAGER_ID);
+  });
+
+  it("raises receipt_rejected when a reviewer rejects, carrying the enum reason", async () => {
+    const harness = createHarness();
+
+    await reviewReceipt({
+      receiptId: RECEIPT_ID,
+      actorId: MANAGER_ID,
+      action: "reject",
+      rejectReason: "fraud_suspected",
+      requestId: REQUEST_ID,
+      deps: harness.deps,
+    });
+
+    const rows = raised(harness);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe("receipt_rejected");
+    expect(
+      (rows[0]?.data as { params?: Record<string, unknown> }).params?.reject_reason,
+    ).toBe("fraud_suspected");
+  });
+
+  it("CRITICAL: the reviewer's free-text note never reaches the consumer", async () => {
+    // A reviewer doing their job writes things like this. 0017 makes the column
+    // unreadable by the client and receipt-copy.ts has no parameter for it;
+    // this asserts the same at the point where the two meet.
+    const note = "same receipt Ana scanned at 2pm, matched image hash";
+    const harness = createHarness();
+
+    await reviewReceipt({
+      receiptId: RECEIPT_ID,
+      actorId: MANAGER_ID,
+      action: "reject",
+      rejectReason: "duplicate",
+      rejectNote: note,
+      requestId: REQUEST_ID,
+      deps: harness.deps,
+    });
+
+    const row = raised(harness)[0];
+    const serialized = JSON.stringify(row);
+    expect(serialized).not.toContain(note);
+    expect(serialized).not.toContain("Ana");
+    expect(serialized).not.toMatch(/hash/i);
+    // ...while the audit row, which is tenant-private, keeps it.
+    expect(JSON.stringify(harness.auditRows()[0])).toContain(note);
+  });
+
+  it("raises nothing on a refused decision, because nothing happened to report", async () => {
+    const harness = createHarness(createWorld({ receipt: null }));
+
+    await reviewReceipt({
+      receiptId: RECEIPT_ID,
+      actorId: MANAGER_ID,
+      action: "approve",
+      fields: APPROVE_FIELDS,
+      requestId: REQUEST_ID,
+      deps: harness.deps,
+    });
+
+    expect(raised(harness)).toHaveLength(0);
+  });
+
+  it("raises nothing when the audit write failed, because the consequences were stopped", async () => {
+    const harness = createHarness(
+      createWorld({ auditError: { message: "audit unavailable" } }),
+    );
+
+    const result = await reviewReceipt({
+      receiptId: RECEIPT_ID,
+      actorId: MANAGER_ID,
+      action: "approve",
+      fields: APPROVE_FIELDS,
+      requestId: REQUEST_ID,
+      deps: harness.deps,
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "AUDIT_WRITE_FAILED" });
+    expect(raised(harness)).toHaveLength(0);
+  });
+
+  it("CRITICAL: a failed notification does not turn a completed approval into an error", async () => {
+    const harness = createHarness();
+    const client = harness.deps.supabase as unknown as {
+      from: (table: string) => unknown;
+    };
+    const realFrom = client.from.bind(client);
+    client.from = (table: string) => {
+      if (table === "notifications") {
+        return { insert: () => Promise.reject(new Error("notifications table is on fire")) };
+      }
+      return realFrom(table);
+    };
+
+    const result = await reviewReceipt({
+      receiptId: RECEIPT_ID,
+      actorId: MANAGER_ID,
+      action: "approve",
+      fields: APPROVE_FIELDS,
+      requestId: REQUEST_ID,
+      deps: harness.deps,
+    });
+
+    expect(result).toMatchObject({ ok: true, status: "approved" });
+    // The award went through the shared path regardless.
+    expect(awardApprovedReceipt).toHaveBeenCalledTimes(1);
+  });
+});

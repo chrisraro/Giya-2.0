@@ -11,6 +11,7 @@ import type { ReceiptRejectReason } from "../types";
 import { awardApprovedReceipt } from "./award";
 import type { AwardResult } from "./award";
 import { applyCooldownIfEarned, isFraudFamilyRejectReason } from "./cooldown";
+import { notifyReceiptOutcome } from "./notify";
 import { getReceiptSettings } from "./settings";
 import type { ReceiptSettings } from "./settings";
 
@@ -625,6 +626,29 @@ async function approve(context: DecisionContext): Promise<ReviewOutcome> {
   // null on purpose - that is 0018's own marker for "approved, award pending",
   // and it is how support finds the row.
 
+  // ---- Tell the consumer -------------------------------------------------
+  // Doc 36 Stage 10 makes no distinction between an auto-approval and a human
+  // one ("On `approved` (auto or human) ... enqueues notify.push
+  // (kind='points_awarded')"), and neither does this: the same adapter, the
+  // same copy matrix, the same shared `AwardResult`, so a reviewer's approval
+  // reads identically to the pipeline's in the consumer's inbox.
+  //
+  // LAST, AND FAIL-SOFT. The decision is persisted, the audit row is written
+  // and the points are minted by the time this runs, and
+  // `notifyReceiptOutcome` cannot throw - a message that could not be composed
+  // must not turn a completed approval into an error the reviewer sees.
+  //
+  // TODO(queue): doc 39's `notify.push`. The push send is enqueued from
+  // ../../notifications/server/raise.ts once the jobs slice and the delivery
+  // credentials land; this call site does not change shape.
+  await notifyReceiptOutcome({
+    deps: { supabase },
+    userId: receipt.user_id,
+    receiptId: receipt.id,
+    businessId,
+    outcome: { status: "approved", award },
+  });
+
   console.info(
     `[receipts/review] receipt ${receipt.id} approved by ${actorRole} ${actorId} (award=${award.kind}) request=${requestId}`,
   );
@@ -743,6 +767,25 @@ async function reject(context: DecisionContext): Promise<ReviewOutcome> {
       settings,
     );
   }
+
+  // ---- Tell the consumer -------------------------------------------------
+  // The CONSUMER-SAFE reason only. `rejectionCopy(reason)` in ./notify.ts maps
+  // the six enum values onto the tested copy matrix, and `rejectNote` - the
+  // reviewer's free text, which may legitimately name another consumer's
+  // receipt - is not passed to it and has no parameter that could carry it.
+  // The reviewer's note stays where 0017 put it: unreadable by the client.
+  //
+  // Fail-soft and last, for the same reason as the approve path: the rejection
+  // and the strike are already recorded.
+  //
+  // TODO(queue): doc 39's `notify.push`, as above.
+  await notifyReceiptOutcome({
+    deps: { supabase },
+    userId: receipt.user_id,
+    receiptId: receipt.id,
+    businessId,
+    outcome: { status: "rejected", reason },
+  });
 
   console.info(
     `[receipts/review] receipt ${receipt.id} rejected (${reason}) by ${actorRole} ${actorId} request=${requestId}`,

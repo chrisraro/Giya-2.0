@@ -1434,6 +1434,187 @@ describe("consequences ladder step 2", () => {
 });
 
 // ===========================================================================
+// Stage 10: the consumer notification (doc 36 Stage 10, doc 37 ladder step 1)
+// ===========================================================================
+//
+// The pipeline's job here is narrow: raise exactly one notification of the
+// right kind for the outcome it just wrote, and never let that raise disturb
+// anything above it. The MESSAGE is composed by ./notify.ts from the tested
+// copy matrix and is asserted in notify.test.ts, including the
+// no-fraud-vocabulary sweep; what these tests own is the WIRING.
+
+describe("Stage 10 notification", () => {
+  function raised(harness: Harness): Record<string, unknown>[] {
+    return harness.insertedRows("notifications");
+  }
+
+  it("raises points_awarded on an auto-approved receipt, with the points and the shop", async () => {
+    const harness = createHarness();
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const rows = raised(harness);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe("points_awarded");
+    expect(rows[0]?.user_id).toBe(CONSUMER_ID);
+    expect(rows[0]?.business_id).toBe(BUSINESS_ID);
+    // 190 points, and the fixture business is "Sari Sari Express".
+    expect(String(rows[0]?.body)).toContain("190");
+    expect(String(rows[0]?.body)).toContain("Sari Sari Express");
+  });
+
+  it("raises receipt_in_review when the receipt is routed to a human", async () => {
+    const harness = createHarness({ velocityCount: () => 99 });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const rows = raised(harness);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe("receipt_in_review");
+  });
+
+  it("raises receipt_rejected when the pipeline rejects", async () => {
+    const world = createWorld({
+      phashNeighbours: [
+        { id: OTHER_RECEIPT_ID, user_id: CONSUMER_ID, image_hash: IMAGE_HASH },
+      ],
+    });
+    const harness = createHarness({ world });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const rows = raised(harness);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe("receipt_rejected");
+    expect(
+      (rows[0]?.data as { params?: Record<string, unknown> }).params?.reject_reason,
+    ).toBe("duplicate");
+  });
+
+  it("CRITICAL: tells the consumer nothing about WHY, only what", async () => {
+    // The evidence that decided this receipt names the matched receipt id and
+    // the hamming distance; none of it may reach the message. The full sweep
+    // lives in notify.test.ts - this is the end-to-end spot check that the
+    // pipeline hands the adapter nothing extra.
+    const world = createWorld({
+      phashNeighbours: [
+        { id: OTHER_RECEIPT_ID, user_id: "someone-else", image_hash: IMAGE_HASH },
+      ],
+    });
+    const harness = createHarness({ world });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const message = `${String(raised(harness)[0]?.title)} ${String(raised(harness)[0]?.body)}`;
+    expect(message).not.toContain(OTHER_RECEIPT_ID);
+    expect(message).not.toMatch(/\bhamming\b/i);
+    expect(message).not.toMatch(/\bfraud\b/i);
+    expect(message).not.toMatch(/\bsignal\b/i);
+  });
+
+  it("notifies on the IMAGE_UNREADABLE dead end, which is the most actionable rejection", async () => {
+    const harness = createHarness({
+      ocrError: new OcrError("OCR_IMAGE_UNREADABLE", "unreadable", {
+        retryable: false,
+        status: 422,
+      }),
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const rows = raised(harness);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe("receipt_rejected");
+    expect(
+      (rows[0]?.data as { params?: Record<string, unknown> }).params?.reject_reason,
+    ).toBe("unreadable");
+  });
+
+  it("notifies on the exhausted-attempts dead end (doc 36: consumer notified and may resubmit)", async () => {
+    const harness = createHarness({
+      settings: { ocrMaxAttempts: 1 },
+      ocrError: new OcrError("OCR_BAD_RESPONSE", "garbage", {
+        retryable: true,
+        status: 500,
+      }),
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const rows = raised(harness);
+    expect(rows).toHaveLength(1);
+    expect(
+      (rows[0]?.data as { params?: Record<string, unknown> }).params?.reject_reason,
+    ).toBe("manual");
+    // The internal note is NOT the message: 0017 withholds the column from the
+    // client and nothing here re-publishes it.
+    expect(`${String(rows[0]?.title)} ${String(rows[0]?.body)}`).not.toContain(
+      "processing_failed",
+    );
+  });
+
+  it("stays silent on a retryable failure, which is not an outcome yet", async () => {
+    const harness = createHarness({
+      ocrError: new OcrError("OCR_UNAVAILABLE", "overloaded", {
+        retryable: true,
+        status: 503,
+      }),
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    expect(raised(harness)).toHaveLength(0);
+  });
+
+  it("stays silent on an already-decided receipt (the idempotency ack)", async () => {
+    const world = createWorld({
+      receipt: { ...(createWorld().receipt as Record<string, unknown>), status: "approved" },
+    });
+    const harness = createHarness({ world });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    expect(raised(harness)).toHaveLength(0);
+  });
+
+  it("raises nothing for a zero-point approval rather than saying 0 points landed", async () => {
+    const harness = createHarness({ world: createWorld({ pointsRules: [] }) });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    expect(harness.receiptUpdate()?.status).toBe("approved");
+    expect(raised(harness)).toHaveLength(0);
+  });
+
+  it("CRITICAL: a failed notification does not undo the award", async () => {
+    // The whole fail-soft contract, end to end: the notifications insert
+    // throws, and the receipt is still approved and the ledger RPC still ran.
+    const world = createWorld();
+    const harness = createHarness({ world });
+    const client = harness.supabase.client as unknown as {
+      from: (table: string) => unknown;
+    };
+    const realFrom = client.from.bind(client);
+    client.from = (table: string) => {
+      if (table === "notifications") {
+        return {
+          insert: () => Promise.reject(new Error("notifications table is on fire")),
+        };
+      }
+      return realFrom(table);
+    };
+
+    await expect(processReceipt(RECEIPT_ID, harness.deps)).resolves.toBeUndefined();
+
+    expect(harness.receiptUpdate()?.status).toBe("approved");
+    expect(harness.supabase.rpcCalls).toHaveLength(1);
+    expect((harness.supabase.rpcCalls[0]?.args as Record<string, unknown>).p_points).toBe(
+      190,
+    );
+  });
+});
+
+// ===========================================================================
 // Pure helpers
 // ===========================================================================
 

@@ -8,6 +8,8 @@ import { Card } from "@/components/ui/card";
 import { listActiveBusinesses } from "@/features/businesses/server/public-repo";
 import { firstNameFrom } from "@/features/identity/display-name";
 import { getMyConsumerProfile } from "@/features/identity/server/repo";
+import { NotificationBell } from "@/features/notifications/components/notification-bell";
+import { getMyUnreadNotificationCount } from "@/features/notifications/server/repo";
 import { getMyBalances } from "@/features/rewards/server/repo";
 import { filipinoGreeting, manilaDateCaption } from "@/lib/greeting";
 
@@ -33,11 +35,14 @@ export default async function HomePage() {
   const profile = await getMyConsumerProfile();
   if (!profile) redirect(`/login?next=${encodeURIComponent("/home")}`);
 
-  const [balances, activeBusinesses] = await Promise.all([
+  const [balances, activeBusinesses, unreadNotifications] = await Promise.all([
     // The same read /wallet renders, rather than a second balances query with
     // its own semantics.
     getMyBalances(),
     listActiveBusinesses({ limit: HOME_DISCOVER_FETCH }),
+    // A count, not a list: `head: true` sends no rows, and it runs in parallel
+    // with the two reads this page already makes rather than after them.
+    getMyUnreadNotificationCount(),
   ]);
 
   const now = new Date();
@@ -62,7 +67,16 @@ export default async function HomePage() {
           </p>
           <p className="mt-0.5 text-body-s text-on-surface-variant">{manilaDateCaption(now)}</p>
         </div>
-        <Logo variant="mark" className="shrink-0 text-primary" />
+        {/* The inbox affordance lives here rather than in the bottom nav: that
+            row is full at MD3's five destinations (see notification-bell.tsx
+            and bottom-nav.tsx), and an unread badge has to be visible on a
+            screen that is NOT the inbox to do its job. Home is the first screen
+            after sign-in and the one a consumer opens asking exactly what this
+            badge answers. */}
+        <div className="flex shrink-0 items-center gap-1">
+          <NotificationBell unreadCount={unreadNotifications} />
+          <Logo variant="mark" className="shrink-0 text-primary" />
+        </div>
       </header>
 
       {balances.length === 0 ? (

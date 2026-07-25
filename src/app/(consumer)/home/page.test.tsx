@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   getMyConsumerProfile: vi.fn(),
   getMyBalances: vi.fn(),
   listActiveBusinesses: vi.fn(),
+  getMyUnreadNotificationCount: vi.fn(),
   redirect: vi.fn(),
 }));
 
@@ -29,6 +30,9 @@ vi.mock("@/features/rewards/server/repo", () => ({
 }));
 vi.mock("@/features/businesses/server/public-repo", () => ({
   listActiveBusinesses: mocks.listActiveBusinesses,
+}));
+vi.mock("@/features/notifications/server/repo", () => ({
+  getMyUnreadNotificationCount: mocks.getMyUnreadNotificationCount,
 }));
 vi.mock("next/navigation", () => ({
   // The real redirect() signals by throwing; throwing here is what stops the
@@ -100,6 +104,45 @@ beforeEach(() => {
   signedInAs("Ana Cruz");
   mocks.getMyBalances.mockResolvedValue([]);
   mocks.listActiveBusinesses.mockResolvedValue([]);
+  mocks.getMyUnreadNotificationCount.mockResolvedValue(0);
+});
+
+// The notifications slice put the inbox affordance in this header rather than
+// in the bottom nav, which is full at MD3's five destinations. These pin the
+// two things that decision has to get right: the badge only exists when there
+// is something to say, and the count is legible to a screen reader.
+describe("/home notification bell", () => {
+  it("links to the inbox", async () => {
+    await renderHome();
+
+    expect(screen.getByRole("link", { name: /Notifications/ })).toHaveAttribute(
+      "href",
+      "/notifications",
+    );
+  });
+
+  it("shows no count at all when nothing is unread", async () => {
+    await renderHome();
+
+    const bell = screen.getByRole("link", { name: "Notifications" });
+    expect(bell.textContent).toBe("notifications");
+  });
+
+  it("carries the unread count in the accessible name, not only in the glyph", async () => {
+    mocks.getMyUnreadNotificationCount.mockResolvedValue(3);
+    await renderHome();
+
+    expect(
+      screen.getByRole("link", { name: "Notifications, 3 unread" }),
+    ).toBeInTheDocument();
+  });
+
+  it("caps the visible badge at 99+ so a long backlog cannot widen the header", async () => {
+    mocks.getMyUnreadNotificationCount.mockResolvedValue(412);
+    await renderHome();
+
+    expect(screen.getByText("99+")).toBeInTheDocument();
+  });
 });
 
 describe("/home auth gate", () => {
@@ -175,8 +218,14 @@ describe("/home on real data", () => {
   it("CRITICAL: every card on the page is a link, so none of them is inert", async () => {
     await renderHome();
 
-    // Two balance cards plus one shop card.
-    expect(screen.getAllByRole("link")).toHaveLength(3);
+    // Two balance cards plus one shop card. The header's notification bell is
+    // a link too and is deliberately excluded here: this assertion is about
+    // the CARDS, and counting a header affordance among them would make it
+    // fail the next time the shell grows one.
+    const cards = screen
+      .getAllByRole("link")
+      .filter((link) => link.getAttribute("href") !== "/notifications");
+    expect(cards).toHaveLength(3);
   });
 
   it("does not offer a shop the consumer already collects points at", async () => {

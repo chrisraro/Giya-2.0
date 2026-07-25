@@ -11,6 +11,7 @@ vi.mock("server-only", () => ({}));
 
 const mocks = vi.hoisted(() => ({
   getMyConsumerProfile: vi.fn(),
+  getMyUnreadNotificationCount: vi.fn(),
   signOut: vi.fn(),
   redirect: vi.fn(),
 }));
@@ -20,6 +21,9 @@ vi.mock("@/features/identity/server/repo", () => ({
 }));
 vi.mock("@/features/identity/actions", () => ({
   signOut: mocks.signOut,
+}));
+vi.mock("@/features/notifications/server/repo", () => ({
+  getMyUnreadNotificationCount: mocks.getMyUnreadNotificationCount,
 }));
 vi.mock("next/navigation", () => ({
   redirect: (url: string) => {
@@ -49,6 +53,42 @@ async function renderProfile(): Promise<void> {
 beforeEach(() => {
   vi.clearAllMocks();
   signedInAs();
+  mocks.getMyUnreadNotificationCount.mockResolvedValue(0);
+});
+
+// The "Notifications" settings row rendered with no href and went nowhere
+// until the notifications slice. It is the inbox's quieter entry point (the
+// other is the home header bell), so it has to actually go somewhere and it has
+// to carry the same count.
+describe("/profile notifications row", () => {
+  it("CRITICAL: is a real link now, not a dead row", async () => {
+    await renderProfile();
+
+    expect(screen.getByRole("link", { name: /Notifications/ })).toHaveAttribute(
+      "href",
+      "/notifications",
+    );
+  });
+
+  it("shows no count when nothing is unread", async () => {
+    await renderProfile();
+
+    const row = screen.getByRole("link", { name: /Notifications/ });
+    expect(row.textContent).not.toMatch(/\d/);
+  });
+
+  it("shows the unread count when there is one", async () => {
+    mocks.getMyUnreadNotificationCount.mockResolvedValue(4);
+    await renderProfile();
+
+    expect(screen.getByText("4 unread notifications")).toBeInTheDocument();
+  });
+
+  it("leaves the rows that genuinely have nowhere to go as plain rows", async () => {
+    await renderProfile();
+
+    expect(screen.queryByRole("link", { name: /Devices/ })).not.toBeInTheDocument();
+  });
 });
 
 describe("/profile auth gate", () => {

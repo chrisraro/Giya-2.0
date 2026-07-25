@@ -4,9 +4,16 @@ import { redirect } from "next/navigation";
 import { signOut } from "@/features/identity/actions";
 import { emailLocalPart, initialsFrom } from "@/features/identity/display-name";
 import { getMyConsumerProfile } from "@/features/identity/server/repo";
+import { NotificationBadge } from "@/features/notifications/components/notification-badge";
+import { getMyUnreadNotificationCount } from "@/features/notifications/server/repo";
 
+// The "Notifications" row was a dead affordance until this slice: it rendered
+// with no href and went nowhere. It is the quieter of the inbox's two entry
+// points (the other is the home header bell) and it is the one for people who
+// go looking rather than glancing, so it now links to the inbox and carries the
+// same unread count.
 const SETTINGS_ROWS = [
-  { icon: "notifications", label: "Notifications", href: undefined },
+  { icon: "notifications", label: "Notifications", href: "/notifications" },
   { icon: "devices", label: "Devices", href: undefined },
   { icon: "privacy_tip", label: "Privacy policy", href: "/privacy" },
   { icon: "description", label: "Terms", href: "/terms" },
@@ -22,6 +29,8 @@ export default async function ProfilePage() {
   // somebody's profile, and an anonymous visitor must never be shown one.
   const profile = await getMyConsumerProfile();
   if (!profile) redirect(`/login?next=${encodeURIComponent("/profile")}`);
+
+  const unreadNotifications = await getMyUnreadNotificationCount();
 
   // profiles.display_name is NOT NULL, so the fallbacks below only fire when
   // the row is missing entirely (a session that predates its profile row).
@@ -61,6 +70,9 @@ export default async function ProfilePage() {
                 {row.icon}
               </span>
               <span className="flex-1 text-body-l text-on-surface">{row.label}</span>
+              {row.href === "/notifications" ? (
+                <NotificationBadge count={unreadNotifications} className="mr-1" />
+              ) : null}
               <span aria-hidden className="material-symbols-rounded text-on-surface-variant">
                 chevron_right
               </span>

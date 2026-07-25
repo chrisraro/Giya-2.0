@@ -48,7 +48,7 @@ beforeEach(() => {
 });
 
 describe("isAuthenticatedConsumerRoute - the consumer account routes", () => {
-  it.each(["/home", "/profile"])("gates %s", (pathname) => {
+  it.each(["/home", "/profile", "/notifications"])("gates %s", (pathname) => {
     expect(isAuthenticatedConsumerRoute(pathname)).toBe(true);
   });
 
