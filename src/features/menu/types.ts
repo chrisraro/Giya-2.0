@@ -8,12 +8,9 @@ export type ProductVariantRow = Database["public"]["Tables"]["product_variants"]
 export type ProductAddonRow = Database["public"]["Tables"]["product_addons"]["Row"];
 export type ProductUpdatePatch = Database["public"]["Tables"]["products"]["Update"];
 
-export type OwnerBusiness = {
-  id: string;
-  slug: string;
-  name: string;
-  status: string;
-};
+// OwnerBusiness now lives in the shared businesses feature; re-exported here
+// so existing imports from "../types" within this feature keep working.
+export type { OwnerBusiness } from "@/features/businesses/server/resolve-owner-business";
 
 export type ActionResult<T = undefined> =
   | { ok: true; data?: T }

@@ -1,9 +1,9 @@
 import { createClient } from "@/lib/supabase/server";
+import { resolveOwnerBusiness } from "@/features/businesses/server/resolve-owner-business";
 
 import type { AddonInput, CategoryInput, ProductInput, ProductStatus, ProductUpdateInput, VariantInput } from "../schemas";
 import type {
   MenuCategoryRow,
-  OwnerBusiness,
   ProductAddonRow,
   ProductRow,
   ProductUpdatePatch,
@@ -54,39 +54,12 @@ async function categoryExistsForBusiness(businessId: string, categoryId: string)
   return data !== null;
 }
 
-/**
- * Resolves the signed-in caller's business by looking up their first active
- * `business_staff` row, then loading that business's id/slug/name/status.
- * Returns null if the caller has no session or no active membership.
- * Never accepts a business id from the client - this is the only path
- * server actions use to learn "whose" catalog they're mutating.
- */
-export async function resolveOwnerBusiness(): Promise<OwnerBusiness | null> {
-  const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return null;
-
-  const { data: membership } = await supabase
-    .from("business_staff")
-    .select("business_id")
-    .eq("user_id", user.id)
-    .eq("status", "active")
-    .limit(1)
-    .maybeSingle();
-
-  if (!membership) return null;
-
-  const { data: business } = await supabase
-    .from("businesses")
-    .select("id, slug, name, status")
-    .eq("id", membership.business_id)
-    .maybeSingle();
-
-  return business ?? null;
-}
+// resolveOwnerBusiness used to live here; it is now shared across feature
+// slices (menu, campaigns, ...) at
+// src/features/businesses/server/resolve-owner-business.ts. Re-exported so
+// existing imports of `repo.resolveOwnerBusiness` (actions.ts, menu.test.ts)
+// keep working unchanged.
+export { resolveOwnerBusiness };
 
 export async function listCategories(businessId: string): Promise<Result<MenuCategoryRow[]>> {
   const supabase = await createClient();
