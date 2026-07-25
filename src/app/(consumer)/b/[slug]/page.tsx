@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
-import { getBusinessBySlug, getPublicMenu } from "@/features/businesses/server/public-repo";
+import { Badge } from "@/components/ui/badge";
+import { getBusinessBySlug, getPublicMenu, getPublicRewards } from "@/features/businesses/server/public-repo";
 import { PublicMenu } from "@/features/menu/components/public-menu";
 import { formatHoursSummary } from "@/lib/hours";
 
@@ -40,7 +41,10 @@ export default async function PublicBusinessPage({
 
   if (!business) notFound();
 
-  const menuGroups = await getPublicMenu(business.id);
+  const [menuGroups, rewards] = await Promise.all([
+    getPublicMenu(business.id),
+    getPublicRewards(business.id),
+  ]);
   const hoursSummary = formatHoursSummary(business.openingHours);
   const caption = [business.businessTypeName, business.cityName].filter(Boolean).join(" · ");
 
@@ -76,6 +80,28 @@ export default async function PublicBusinessPage({
         ) : null}
         <p className="mt-2 text-label-l text-primary">{hoursSummary}</p>
       </div>
+
+      {rewards.length > 0 ? (
+        <div className="mt-6 px-4">
+          <h2 className="text-title-l text-on-surface">Rewards</h2>
+          <ul className="mt-3 flex flex-col gap-3">
+            {rewards.map((reward) => (
+              <li
+                key={reward.id}
+                className="rounded-md3-md border border-outline-variant bg-surface p-4"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-title-m text-on-surface">{reward.name}</p>
+                  <Badge className="shrink-0">{reward.pointsCost} pts</Badge>
+                </div>
+                {reward.description ? (
+                  <p className="mt-1 text-body-s text-on-surface-variant">{reward.description}</p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       <div className="mt-6 px-4">
         <PublicMenu groups={menuGroups} />

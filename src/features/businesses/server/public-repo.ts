@@ -59,6 +59,13 @@ export type PublicMenuGroup = {
   products: PublicProduct[];
 };
 
+export type PublicReward = {
+  id: string;
+  name: string;
+  description: string | null;
+  pointsCost: number;
+};
+
 /**
  * Loads a business by its public slug, but only if it is active and not
  * soft-deleted - returns null otherwise (including "not found"), which the
@@ -212,6 +219,56 @@ export async function getPublicMenu(businessId: string): Promise<PublicMenuGroup
   }
 
   return groups;
+}
+
+/**
+ * A business's currently claimable rewards for its public `/b/[slug]` page:
+ * active, non-deleted rewards belonging to a campaign that is active and
+ * inside its schedule window - the same eligibility rule as
+ * src/features/rewards/server/repo.ts's listClaimableRewards (see its
+ * comment for why the window check can't live in RLS alone), just scoped to
+ * one business_id instead of the whole catalog. An empty result means the
+ * page's Rewards section is omitted entirely, not rendered empty.
+ */
+export async function getPublicRewards(businessId: string): Promise<PublicReward[]> {
+  const supabase = await createClient();
+
+  const { data: rewards, error } = await supabase
+    .from("rewards")
+    .select("id, campaign_id, name, description, points_cost")
+    .eq("business_id", businessId)
+    .eq("is_active", true)
+    .is("deleted_at", null);
+
+  if (error || !rewards || rewards.length === 0) return [];
+
+  const campaignIds = Array.from(new Set(rewards.map((reward) => reward.campaign_id)));
+  const { data: campaigns } = await supabase
+    .from("campaigns")
+    .select("id, starts_at, ends_at")
+    .in("id", campaignIds)
+    .eq("status", "active")
+    .is("deleted_at", null);
+
+  const now = new Date();
+  const liveCampaignIds = new Set(
+    (campaigns ?? [])
+      .filter((campaign) => {
+        const startsOk = !campaign.starts_at || new Date(campaign.starts_at) <= now;
+        const endsOk = !campaign.ends_at || new Date(campaign.ends_at) > now;
+        return startsOk && endsOk;
+      })
+      .map((campaign) => campaign.id),
+  );
+
+  return rewards
+    .filter((reward) => liveCampaignIds.has(reward.campaign_id))
+    .map((reward) => ({
+      id: reward.id,
+      name: reward.name,
+      description: reward.description,
+      pointsCost: reward.points_cost,
+    }));
 }
 
 function groupBy<Row, Item>(
