@@ -15,6 +15,7 @@ supabase/
     0007_catalog.sql        menu_categories, products, product_variants, product_addons
   tests/
     rls_identity_smoke.sql  pgTAP smoke suite (transaction-wrapped, rolls back)
+    ... one suite per domain; see "Running the pgTAP suite" below
 ```
 
 The directory listing above is abridged; see "Migration ledger" at the end of
@@ -74,6 +75,24 @@ is transaction-wrapped (`begin ... rollback`) and leaves no data behind:
 ```sh
 psql "$DATABASE_URL" -f supabase/tests/rls_identity_smoke.sql
 ```
+
+Seven suites, one per domain:
+
+| file | covers |
+|---|---|
+| `rls_identity_smoke.sql` | identity tables and their policies (0001-0006, 0011) |
+| `rls_catalog_smoke.sql` | catalog tenancy and composite FKs (0007-0010) |
+| `rls_campaigns_smoke.sql` | campaigns, points rules, ledger immutability (0012) |
+| `rpc_claim_smoke.sql` | `claim_reward`, `validate_redemption`, `expire_claims` (0013, 0016) |
+| `rls_receipts_smoke.sql` | receipts evidence fences, column grant, the three unique amendments, the delete and immutability triggers (0017) |
+| `rpc_award_smoke.sql` | `award_receipt_points`: guard order, one earn per receipt, the `balance_after` chain, the Manila-day visit rule (0018) |
+| `rls_consumer_fence_smoke.sql` | the `consumers` / `profiles` self-update column fence: legitimate profile and onboarding writes still land, fraud and trust columns raise 42501 (0021) |
+
+Each suite states the migration range it needs in its header. New suites take
+their fixture ids from insert-returning CTEs rather than looking rows up by
+name: a name lookup collides with live data on a shared project, which is how
+`rpc_claim_smoke.sql` broke on a real `Free Milk Tea` row before it was
+rewritten.
 
 Run it as a privileged role (`postgres`); the suite switches to
 `authenticated` / `anon` with `set local role` plus `request.jwt.claims` to
@@ -142,7 +161,12 @@ the only one.
 
 - `private.jwt_biz_role()` keeps doc 12's table-lookup fallback for `biz_overflow` users (>20 memberships). Under RLS this recurses (policy -> helper -> same table) and Postgres aborts the query for those users. [SCALE]-only surface; fixing requires a security definer lookup variant and an ADR against the Locked doc 12. Do not ship overflow accounts before that ADR.
 - The custom access token hook runs as `supabase_auth_admin` with explicit grants/policies (current Supabase-documented pattern) instead of doc 12's literal `security definer` wording. Functionally equivalent; noted as doc drift.
-- Column-granularity gaps (follow-up migration owed before these columns become load-bearing): self-update policies do not column-restrict, so today a user could clear their own `is_suspended` / `scan_blocked_until` or write `lifetime_points_earned`; owner updates could touch `businesses.status` / `verified_at` / `plan`; `business_customers` staff updates can write balance columns (service-layer enforced for now); roster reads expose `invite_token` (must be column-restricted before the invites module ships).
+- ~~**`consumers.scan_blocked_until` is now load-bearing and still self-writable.**~~ **CLOSED by `0021_consumer_selfupdate_column_fence.sql`.** `consumers_owner_update` and `profiles_owner_update` are still row-scoped only (RLS cannot express column grants), but `authenticated` no longer holds table-level UPDATE on either table. It now holds UPDATE on exactly these columns, and nothing else:
+  - `public.consumers`: `city_id`, `marketing_opt_in`, `push_enabled`, `email_enabled`, `gps_fraud_opt_in`, `updated_by`.
+  - `public.profiles`: `display_name`, `avatar_url`, `phone`, `locale`, `onboarded_at`, `updated_by`.
+
+  So `consumers.scan_blocked_until` (doc 37 ladder step 2) and `profiles.is_suspended` / `suspended_reason` (ladder step 4) are no longer self-clearable, and neither are `lifetime_points_earned`, `last_scan_at`, `referral_code`, `referred_by`, `deleted_at`, or the A21.1 `birth_date` / `birth_date_updated_at` pair (fenced together: granting the value without its once-per-rolling-year enforcement column, or vice versa, defeats the rule either way, and nothing writes them yet). Covered by `rls_consumer_fence_smoke.sql`. The `authenticated` allowlists are asserted there as exact sorted strings, so adding a column to either table without deciding whether it is self-writable fails the suite.
+- Column-granularity gaps that REMAIN (follow-up migration owed before these columns become load-bearing): owner updates could touch `businesses.status` / `verified_at` / `plan`; `business_customers` staff updates can write `segment` and `notes` only since 0013, but the `businesses` surface has no equivalent fence yet; roster reads expose `invite_token` (must be column-restricted before the invites module ships). Deliberately not fenced in 0021 because they are staff/tenant surfaces rather than the consumer self-update surface this slice made load-bearing, and `businesses.status` in particular needs the verification state machine settled first.
 - Policy deviation vs doc 21 (record in doc 26 next docs pass): `business_verifications` / `business_documents` are staff READ-only with service-role writes (doc 21 said owner insert/read); tightened deliberately for TIN-adjacent data.
 
 ## Advisor acceptances (2026-07-25)
@@ -151,6 +175,14 @@ the only one.
 - WARN authenticated-callable SECURITY DEFINER public.register_business: accepted, it is the designed tenant-registration entry point (doc 12 tenant lifecycle).
 - Legacy note: the wiped pre-existing app left an on_auth_user_created trigger on auth.users; 0003 drops and replaces it.
 - Migration 0007 (catalog domain) added: no new ERROR advisors.
+- Migrations 0017-0020 (receipts domain, `award_receipt_points`, the storage
+  bucket, Realtime) added: no new advisors of any level. The security set is
+  still 0 ERROR and 7 WARN, being the three claim-helper search_path warnings,
+  three authenticated-callable SECURITY DEFINER functions
+  (`register_business`, `claim_reward`, `validate_redemption`) and the
+  leaked-password toggle below. `award_receipt_points` is absent from that
+  definer list because EXECUTE is granted to `service_role` only, and
+  `private.manila_day` pins `search_path = ''`.
 
 ## Manual dashboard steps (pending)
 
@@ -181,11 +213,12 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0013_reward_claim_rpcs.sql | 20260725055852 | 0013_reward_claim_rpcs |
 | 0014_realtime_reward_claims.sql | 20260725070033 | 0014_realtime_reward_claims |
 | 0015_campaign_budget_lock.sql | 20260725073038 | 0015_campaign_budget_lock |
-| 0016_claim_expiry_sweep.sql | (applied 2026-07-25) | 0016_claim_expiry_sweep |
+| 0016_claim_expiry_sweep.sql | 20260725082951 | 0016_claim_expiry_sweep |
 | 0017_receipts.sql | 20260725111658 | 0017_receipts |
 | 0018_award_receipt_points.sql | 20260725114121 | 0018_award_receipt_points |
 | 0019_receipts_storage.sql | 20260725113309 | 0019_receipts_storage |
 | 0020_realtime_receipts.sql | 20260725123010 | realtime_receipts |
+| 0021_consumer_selfupdate_column_fence.sql | 20260725131247 | 0021_consumer_selfupdate_column_fence |
 
 Notes:
 - **0020's live ledger name is `realtime_receipts`, without the ordinal
