@@ -20,6 +20,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "geist": "^1.7.2",
+    "jose": "^6.2.4",
     "material-symbols": "^0.45.9",
     "motion": "^12.42.2",
     "next": "16.2.11",

@@ -64,3 +64,97 @@ describe("env", () => {
     expect(env.NEXT_PUBLIC_HCAPTCHA_SITE_KEY).toBe("10000000-ffff-ffff-ffff-000000000001");
   });
 });
+
+describe("getServerEnv", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  function stubClientEnv() {
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "sb_publishable_abcdefghijklmnopqrstuvwxyz");
+  }
+
+  it("is not evaluated at module scope (importing it does not throw even with no server env set)", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "");
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "");
+    vi.stubEnv("REDEMPTION_TOKEN_SECRET", "");
+
+    await expect(import("./env")).resolves.toBeDefined();
+  });
+
+  it("throws a readable error listing missing/invalid keys", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "");
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "");
+    vi.stubEnv("REDEMPTION_TOKEN_SECRET", "");
+
+    const { getServerEnv } = await import("./env");
+
+    expect(() => getServerEnv()).toThrow(/UPSTASH_REDIS_REST_URL/);
+    expect(() => getServerEnv()).toThrow(/UPSTASH_REDIS_REST_TOKEN/);
+    expect(() => getServerEnv()).toThrow(/REDEMPTION_TOKEN_SECRET/);
+  });
+
+  it("throws when the token is too short", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "short");
+    vi.stubEnv("REDEMPTION_TOKEN_SECRET", "a".repeat(32));
+
+    const { getServerEnv } = await import("./env");
+
+    expect(() => getServerEnv()).toThrow(/UPSTASH_REDIS_REST_TOKEN/);
+  });
+
+  it("throws when the redemption secret is too short", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
+    vi.stubEnv("REDEMPTION_TOKEN_SECRET", "short");
+
+    const { getServerEnv } = await import("./env");
+
+    expect(() => getServerEnv()).toThrow(/REDEMPTION_TOKEN_SECRET/);
+  });
+
+  it("parses and returns the server env when all vars are valid", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
+    vi.stubEnv("REDEMPTION_TOKEN_SECRET", "a".repeat(32));
+
+    const { getServerEnv } = await import("./env");
+    const result = getServerEnv();
+
+    expect(result.UPSTASH_REDIS_REST_URL).toBe("https://example.upstash.io");
+    expect(result.UPSTASH_REDIS_REST_TOKEN).toBe("a".repeat(20));
+    expect(result.REDEMPTION_TOKEN_SECRET).toBe("a".repeat(32));
+  });
+
+  it("memoizes: a second call returns the same object without re-parsing", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
+    vi.stubEnv("REDEMPTION_TOKEN_SECRET", "a".repeat(32));
+
+    const { getServerEnv } = await import("./env");
+    const first = getServerEnv();
+
+    // Mutate process.env after the first call; memoization means the second
+    // call must NOT re-parse and must return the exact same object.
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://changed.upstash.io");
+    const second = getServerEnv();
+
+    expect(second).toBe(first);
+    expect(second.UPSTASH_REDIS_REST_URL).toBe("https://example.upstash.io");
+  });
+});

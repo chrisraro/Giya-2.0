@@ -32,3 +32,41 @@ function loadEnv() {
 }
 
 export const env = loadEnv();
+
+// Server-only environment schema. These keys must never be referenced at
+// module scope (that would pull them into any bundle that imports this
+// file, including client bundles) so evaluation is deferred to first call
+// of getServerEnv() and memoized from then on.
+const serverEnvSchema = z.object({
+  UPSTASH_REDIS_REST_URL: z.string().url(),
+  UPSTASH_REDIS_REST_TOKEN: z.string().min(20),
+  REDEMPTION_TOKEN_SECRET: z.string().min(32),
+});
+
+type ServerEnv = z.infer<typeof serverEnvSchema>;
+
+let cachedServerEnv: ServerEnv | undefined;
+
+export function getServerEnv(): ServerEnv {
+  if (cachedServerEnv) {
+    return cachedServerEnv;
+  }
+
+  const parsed = serverEnvSchema.safeParse({
+    UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL,
+    UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN,
+    REDEMPTION_TOKEN_SECRET: process.env.REDEMPTION_TOKEN_SECRET,
+  });
+
+  if (!parsed.success) {
+    const missing = parsed.error.issues
+      .map((issue) => issue.path.join("."))
+      .join(", ");
+    throw new Error(
+      `Invalid or missing server environment variables: ${missing}. Check .env.local.`,
+    );
+  }
+
+  cachedServerEnv = parsed.data;
+  return cachedServerEnv;
+}
