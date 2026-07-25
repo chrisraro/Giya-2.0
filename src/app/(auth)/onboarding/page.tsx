@@ -235,11 +235,14 @@ export default function OnboardingPage() {
     const result = await completeConsumerOnboarding({ cityName: city, pushEnabled: notifications });
     setPending(false);
     if (!result.ok) {
-      // v0 tolerance: onboarding is non-blocking, so a save failure still
-      // navigates the user forward. The inline error only has this instant
-      // to be seen before the route change unmounts the page; a real toast
-      // system would let it persist across navigation.
+      // This used to navigate to /home anyway ("onboarding is non-blocking").
+      // It cannot anymore: the consumer layout now redirects anyone whose
+      // profiles.onboarded_at is still null straight back here, so pushing
+      // forward on a failed save would bounce the user to a freshly reset
+      // wizard with the error already gone. Staying put keeps the message on
+      // screen and lets them retry.
       setError(result.message);
+      return;
     }
     router.push("/home");
   }
@@ -263,17 +266,25 @@ export default function OnboardingPage() {
     // this keeps behavior consistent and rate-safe.
     if (pending) return;
     setPending(true);
-    if (city !== null) {
-      const result = await completeConsumerOnboarding({
-        cityName: city,
-        pushEnabled: notifications,
-      });
-      if (!result.ok) {
-        // Same v0 tolerance as finish(): non-blocking, still navigates.
-        setError(result.message);
-      }
-    }
+    // CRITICAL: this call is now unconditional. It used to be skipped when no
+    // city had been picked, which left profiles.onboarded_at null - and the
+    // consumer layout's gate reads exactly that column to decide whether to
+    // send someone here. Skipping without stamping would therefore mean
+    // "Skip for now" pushes to /home, the layout sees a null stamp and
+    // redirects back to /onboarding, forever. The action already tolerates a
+    // null city (it resolves to a null city_id and still succeeds), so
+    // "skipped" is recorded as a completed-with-no-answers onboarding.
+    const result = await completeConsumerOnboarding({
+      cityName: city,
+      pushEnabled: notifications,
+    });
     setPending(false);
+    if (!result.ok) {
+      // Same reasoning as finish(): a failed stamp means the gate will bounce
+      // them straight back, so stay here and show why.
+      setError(result.message);
+      return;
+    }
     router.push("/home");
   }
 

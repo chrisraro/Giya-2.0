@@ -5,62 +5,11 @@ import { KpiCard } from "@/components/business/kpi-card";
 import { BarChart } from "@/components/business/bar-chart";
 import { VerificationBanner } from "@/components/business/verification-banner";
 import { EmptyState } from "@/components/consumer/empty-state";
+import { loadBusinessDashboard } from "@/features/analytics/server/dashboard";
+import { resolvePortalContext } from "@/features/businesses/server/portal-context";
 import { resolveReviewerContext } from "@/features/receipts/review/access";
 import { countPendingReview, PENDING_COUNT_CAP } from "@/features/receipts/review/queue";
-import { MOCK_KPIS, MOCK_WEEK_VISITS, MOCK_ACTIVITY } from "@/lib/mock/business"; // TODO(api): replace mock
-import { createClient } from "@/lib/supabase/server";
 import { cn } from "@/lib/utils";
-
-const FULL_DAY_NAMES: Record<string, string> = {
-  Mon: "Monday",
-  Tue: "Tuesday",
-  Wed: "Wednesday",
-  Thu: "Thursday",
-  Fri: "Friday",
-  Sat: "Saturday",
-  Sun: "Sunday",
-};
-
-function busiestDayLabel(data: { day: string; value: number }[]) {
-  const first = data[0];
-  if (!first) return "Visits per day this week";
-  const busiest = data.reduce((max, current) => (current.value > max.value ? current : max), first);
-  const fullName = FULL_DAY_NAMES[busiest.day] ?? busiest.day;
-  return `Visits per day this week, highest ${fullName}`;
-}
-
-// The banner needs the caller's business verification status, which only
-// the server client can read safely (RLS-scoped to the signed-in user).
-// This page is already a server component, so it fetches directly here
-// instead of threading the value through (portal)/layout.tsx: that layout
-// renders PortalShell, a client component, and `children` there is already
-// the resolved page element by the time the layout runs, so there is no
-// clean prop-injection point above this page for a single-route value.
-async function getBusinessStatus(): Promise<string | null> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return null;
-
-  const { data: membership } = await supabase
-    .from("business_staff")
-    .select("business_id")
-    .eq("user_id", user.id)
-    .eq("status", "active")
-    .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  if (!membership) return null;
-
-  const { data: business } = await supabase
-    .from("businesses")
-    .select("status")
-    .eq("id", membership.business_id)
-    .maybeSingle();
-
-  return business?.status ?? null;
-}
 
 /**
  * The review-queue tile (doc 32 section 3: "Receipts approved vs rejected ...
@@ -96,8 +45,23 @@ function ReviewQueueTile({ pending }: { pending: number }) {
   );
 }
 
+/**
+ * The business dashboard.
+ *
+ * Every figure below comes from this tenant's own rows. There are no fixtures
+ * left on this page, and that is the point: the numbers a merchant sees on day
+ * one are their real zeros, a chart of seven real empty days, and a feed that
+ * says nothing has happened yet. A dashboard that invents "128 visits, +12% vs
+ * last week" for an empty database is not a placeholder, it is a false report
+ * about somebody's business.
+ *
+ * The tenant is resolved once per request by `resolvePortalContext`, which
+ * delegates to the shared `resolveOwnerBusiness` (the caller's first ACTIVE
+ * `business_staff` row, read under their own session). Nothing on this page
+ * accepts a business id from the URL or from a prop.
+ */
 export default async function BusinessDashboardPage() {
-  const businessStatus = await getBusinessStatus();
+  const portal = await resolvePortalContext();
 
   // Memoized per request alongside the portal layout's own call, so the tile
   // costs one indexed count and no extra session round trip.
@@ -111,9 +75,14 @@ export default async function BusinessDashboardPage() {
   const pendingReviewCount =
     reviewer === null ? null : await countPendingReview(reviewer.businessId);
 
+  // Null means a read ERRORED, not that the merchant has no data. Zeros are a
+  // legitimate answer and are rendered as zeros; an unproven number is not
+  // rendered at all.
+  const dashboard = portal === null ? null : await loadBusinessDashboard(portal.business.id);
+
   return (
     <div className="flex flex-col gap-6">
-      <VerificationBanner status={businessStatus} />
+      <VerificationBanner status={portal?.business.status ?? null} />
 
       {pendingReviewCount !== null && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -121,53 +90,67 @@ export default async function BusinessDashboardPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {MOCK_KPIS.map((kpi) => (
-          <KpiCard key={kpi.label} kpi={kpi} />
-        ))}
-      </div>
-
-      <Card variant="outlined">
-        <CardHeader>
-          <CardTitle>Visits this week</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <BarChart data={MOCK_WEEK_VISITS} ariaLabel={busiestDayLabel(MOCK_WEEK_VISITS)} />
-        </CardContent>
-      </Card>
-
-      <Card variant="outlined">
-        <CardHeader>
-          <CardTitle>Recent activity</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {MOCK_ACTIVITY.length > 0 ? (
-            <ul className="flex flex-col gap-3">
-              {MOCK_ACTIVITY.map((item) => (
-                <li key={item.id} className="flex items-center gap-3">
-                  <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-secondary-container text-on-secondary-container">
-                    <span aria-hidden className="material-symbols-rounded text-[18px]">
-                      {item.icon}
-                    </span>
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-body-m text-on-surface">
-                    {item.text}
-                  </span>
-                  <span className="shrink-0 text-body-s text-on-surface-variant">
-                    {item.timeLabel}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          ) : (
+      {dashboard === null ? (
+        <Card variant="outlined">
+          <CardContent className="py-8">
             <EmptyState
-              icon="receipt_long"
-              title="No activity yet"
-              body="Customer scans and redemptions will show up here as they happen."
+              icon="cloud_off"
+              title="Your numbers are not available right now"
+              body="We could not read this week's activity. Nothing is wrong with your data; try again in a moment."
             />
-          )}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            {dashboard.kpis.map((kpi) => (
+              <KpiCard key={kpi.label} kpi={kpi} />
+            ))}
+          </div>
+
+          <Card variant="outlined">
+            <CardHeader>
+              <CardTitle>Visits per day</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <BarChart data={dashboard.visitsByDay} ariaLabel={dashboard.visitsChartLabel} />
+            </CardContent>
+          </Card>
+
+          <Card variant="outlined">
+            <CardHeader>
+              <CardTitle>Recent activity</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {dashboard.activity.length > 0 ? (
+                <ul className="flex flex-col gap-3">
+                  {dashboard.activity.map((item) => (
+                    <li key={item.id} className="flex items-center gap-3">
+                      <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-secondary-container text-on-secondary-container">
+                        <span aria-hidden className="material-symbols-rounded text-[18px]">
+                          {item.icon}
+                        </span>
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-body-m text-on-surface">
+                        {item.text}
+                      </span>
+                      <span className="shrink-0 text-body-s text-on-surface-variant">
+                        {item.timeLabel}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <EmptyState
+                  icon="receipt_long"
+                  title="No activity yet"
+                  body="Customer scans and redemptions will show up here as they happen."
+                />
+              )}
+            </CardContent>
+          </Card>
+        </>
+      )}
     </div>
   );
 }

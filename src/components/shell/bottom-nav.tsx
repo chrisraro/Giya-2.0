@@ -4,6 +4,19 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 
+// Four destinations plus the centre Scan FAB. MD3's navigation bar tops out
+// at five destinations, and the FAB already occupies the fifth slot inside a
+// max-w-md row, so this list is full.
+//
+// /receipts IS NOT HERE ON PURPOSE. It was unreachable on a fresh account and
+// the tempting fix was to add it as a fifth item, which would have meant six
+// tap targets in a 448px row and would have broken the symmetric two-FAB-two
+// layout for a screen people visit occasionally, not constantly. Receipt
+// history is a detail view of the wallet, so the wallet is where it is linked
+// from: WalletReceiptActivity's "See all" now renders even when the consumer
+// has zero receipts (it used to hide the whole section, which is what made
+// the route unreachable). Every entry here is a top-level place; /receipts is
+// somewhere you go from one.
 const DESTINATIONS = [
   { href: "/home", label: "Home", icon: "home" },
   { href: "/wallet", label: "Wallet", icon: "account_balance_wallet" },

@@ -25,6 +25,9 @@ const PAGE_TITLES: Record<string, string> = {
 export function PortalShell({
   children,
   pendingReviewCount = null,
+  userName = null,
+  userInitials = null,
+  businessName = null,
 }: {
   children: React.ReactNode;
   /**
@@ -32,6 +35,15 @@ export function PortalShell({
    * means the count could not be read, and the Sidebar renders no badge for it.
    */
   pendingReviewCount?: number | null;
+  /**
+   * The signed-in user's identity and tenant, resolved server-side in the
+   * portal layout. All three are nullable and all three render an honest
+   * absence rather than a placeholder: this chrome is on every portal route,
+   * so a stand-in here would be a lie repeated eight times.
+   */
+  userName?: string | null;
+  userInitials?: string | null;
+  businessName?: string | null;
 }) {
   const pathname = usePathname();
   // The decision screen is a child route, so the topbar title has to fall back
@@ -60,6 +72,9 @@ export function PortalShell({
           title={title}
           onMenuClick={() => setMobileNavOpen(true)}
           menuButtonRef={menuButtonRef}
+          userName={userName}
+          userInitials={userInitials}
+          businessName={businessName}
         />
         <main className="flex-1 px-4 py-6 lg:px-8 lg:py-8">{children}</main>
       </div>

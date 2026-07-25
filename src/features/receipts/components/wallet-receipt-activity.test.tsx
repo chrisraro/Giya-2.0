@@ -120,9 +120,34 @@ describe("the pending entry", () => {
     );
   });
 
-  it("renders nothing at all when the consumer has never scanned", () => {
-    const { container } = renderWallet([]);
-    expect(container).toBeEmptyDOMElement();
+  // This section used to render NOTHING when the consumer had never scanned,
+  // and that was the whole reason /receipts was unreachable on a fresh
+  // account: "See all" is the only consumer-facing link to receipt history
+  // anywhere in the app (it is deliberately not a fifth bottom-nav
+  // destination), so hiding it hid the route from exactly the people who
+  // needed to be told it exists.
+  describe("with no receipts yet", () => {
+    it("CRITICAL: still links to /receipts, which nothing else in the app does", () => {
+      renderWallet([]);
+
+      expect(screen.getByRole("heading", { name: "Receipts" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "See all" })).toHaveAttribute("href", "/receipts");
+    });
+
+    it("explains the emptiness and points at the scanner", () => {
+      renderWallet([]);
+
+      expect(screen.getByText("No receipts yet")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Scan a receipt" })).toHaveAttribute("href", "/scan");
+    });
+
+    it("still opens no Realtime subscription", () => {
+      // Nothing is pending, so the strip must not start watching just because
+      // it now renders.
+      renderWallet([]);
+
+      expect(mocks.configs).toHaveLength(0);
+    });
   });
 
   it("shows at most the strip's limit and defers the rest to /receipts", () => {

@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { redirect } from "next/navigation";
 import { PortalShell } from "@/components/business/portal-shell";
+import { initialsOf, resolvePortalContext } from "@/features/businesses/server/portal-context";
 import { resolveReviewerContext } from "@/features/receipts/review/access";
 import { countPendingReview } from "@/features/receipts/review/queue";
 import { createClient } from "@/lib/supabase/server";
@@ -10,18 +11,19 @@ import { createClient } from "@/lib/supabase/server";
 // chrome-free. Stays a server component; PortalShell is the client glue
 // that owns the shared mobile drawer state.
 //
-// The verification banner's businessStatus is intentionally NOT fetched
-// here: `children` is already the resolved page element by the time this
-// layout runs, so there is no clean way to inject a prop into it from
-// above, and only the dashboard page needs the value. The dashboard page
-// (a server component) fetches it directly instead. See its
-// getBusinessStatus() for details.
-//
 // Membership enforcement lives here, not in middleware (doc 12: claims are
 // hints, tables are truth). middleware.ts only checks for a session; this
-// layout is the authoritative gate, querying business_staff directly so it
-// is correct even before the custom access token hook stamps biz claims
-// into a user's JWT (or if the hook isn't enabled at all).
+// layout is the authoritative gate, resolving the caller's business from
+// `business_staff` directly so it is correct even before the custom access
+// token hook stamps biz claims into a user's JWT (or if the hook isn't
+// enabled at all).
+//
+// The resolution itself is `resolvePortalContext`, which delegates to the
+// shared `resolveOwnerBusiness` (migration 0004's business_staff self-select
+// policy is what lets a signed-in user read their own membership rows). This
+// layout used to query `business_staff` inline; it no longer does, because the
+// dashboard page under it needs the same answer and two independent membership
+// queries in one request are two chances to disagree about the tenant.
 export default async function PortalLayout({ children }: { children: ReactNode }) {
   const supabase = await createClient();
 
@@ -36,17 +38,10 @@ export default async function PortalLayout({ children }: { children: ReactNode }
     redirect("/login");
   }
 
-  // Migration 0004 added a business_staff self-select RLS policy, so a
-  // signed-in user can always read their own membership rows regardless of
-  // what (if anything) their JWT's claims say.
-  const { data: membership } = await supabase
-    .from("business_staff")
-    .select("business_id")
-    .eq("user_id", user.id)
-    .eq("status", "active")
-    .limit(1);
-
-  if (!membership || membership.length === 0) {
+  // Null here means "signed in, but no active membership" (the no-session case
+  // was already handled above), which is exactly the onboarding condition.
+  const portal = await resolvePortalContext();
+  if (portal === null) {
     redirect("/business/onboarding");
   }
 
@@ -67,5 +62,14 @@ export default async function PortalLayout({ children }: { children: ReactNode }
   const pendingReviewCount =
     reviewer === null ? null : await countPendingReview(reviewer.businessId);
 
-  return <PortalShell pendingReviewCount={pendingReviewCount}>{children}</PortalShell>;
+  return (
+    <PortalShell
+      pendingReviewCount={pendingReviewCount}
+      userName={portal.displayName}
+      userInitials={initialsOf(portal.displayName)}
+      businessName={portal.business.name}
+    >
+      {children}
+    </PortalShell>
+  );
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -50,7 +51,22 @@ export function RewardCard({ reward }: RewardCardProps) {
   return (
     <Card variant="filled" className="flex flex-col gap-2 p-4">
       <p className="text-title-s text-on-surface">{reward.name}</p>
-      <p className="text-body-s text-on-surface-variant">{reward.businessName}</p>
+      {/* The business name is a link to the shop's public page, not decoration.
+          `/b/[slug]` had no consumer entry point anywhere in the app, and this
+          is the natural one: someone reading "300 pts for a free latte" wants
+          to know where, and what else is on offer there. The slug can be empty
+          when the businesses read missed, in which case this stays plain text
+          rather than linking to `/b/`. */}
+      {reward.businessSlug ? (
+        <Link
+          href={`/b/${reward.businessSlug}`}
+          className="w-fit text-body-s text-on-surface-variant underline-offset-4 hover:underline"
+        >
+          {reward.businessName}
+        </Link>
+      ) : (
+        <p className="text-body-s text-on-surface-variant">{reward.businessName}</p>
+      )}
       <Badge className="w-fit">{reward.pointsCost} pts</Badge>
       {reward.remaining !== null ? (
         <p className="text-label-s text-on-surface-variant">

@@ -6,7 +6,7 @@ vi.mock("next/navigation", () => ({ usePathname: () => "/business/dashboard" }))
 import { Sidebar } from "./sidebar";
 import { KpiCard } from "./kpi-card";
 import { BarChart } from "./bar-chart";
-import { MOCK_KPIS, MOCK_WEEK_VISITS } from "@/lib/mock/business";
+import type { DashboardKpi } from "@/features/analytics/types";
 
 describe("Sidebar", () => {
   it("renders the nav items with accessible names", () => {
@@ -57,10 +57,36 @@ describe("Sidebar", () => {
 });
 
 describe("KpiCard", () => {
-  it("renders label and value", () => {
-    render(<KpiCard kpi={MOCK_KPIS[0]} />);
-    expect(screen.getByText("Visits this week")).toBeInTheDocument();
-    expect(screen.getByText("128")).toBeInTheDocument();
+  const measured: DashboardKpi = {
+    label: "Visits, last 7 days",
+    value: "12",
+    delta: { text: "+20% vs previous 7 days", tone: "trend" },
+  };
+
+  const unmeasurable: DashboardKpi = {
+    label: "Visits, last 7 days",
+    value: "0",
+    delta: { text: "No comparison yet", tone: "muted" },
+  };
+
+  it("renders label, value and delta", () => {
+    render(<KpiCard kpi={measured} />);
+    expect(screen.getByText("Visits, last 7 days")).toBeInTheDocument();
+    expect(screen.getByText("12")).toBeInTheDocument();
+    expect(screen.getByText("+20% vs previous 7 days")).toBeInTheDocument();
+  });
+
+  // A measured change earns the accent. "No comparison yet" is not a
+  // measurement and must not be dressed as one, or the accent stops meaning
+  // anything at all.
+  it("accents a measured change and keeps an absent one calm", () => {
+    const { rerender } = render(<KpiCard kpi={measured} />);
+    expect(screen.getByText("+20% vs previous 7 days")).toHaveClass("text-secondary");
+
+    rerender(<KpiCard kpi={unmeasurable} />);
+    const calm = screen.getByText("No comparison yet");
+    expect(calm).toHaveClass("text-on-surface-variant");
+    expect(calm).not.toHaveClass("text-secondary");
   });
 });
 
@@ -68,12 +94,30 @@ describe("BarChart", () => {
   it('renders role="img" with an aria-label', () => {
     render(
       <BarChart
-        data={MOCK_WEEK_VISITS}
-        ariaLabel="Visits per day this week, highest Saturday"
+        data={[
+          { day: "Mon", value: 3 },
+          { day: "Tue", value: 7 },
+        ]}
+        ariaLabel="Visits per day for the last 7 days, highest Tuesday"
       />,
     );
     expect(
-      screen.getByRole("img", { name: "Visits per day this week, highest Saturday" }),
+      screen.getByRole("img", { name: "Visits per day for the last 7 days, highest Tuesday" }),
     ).toBeInTheDocument();
+  });
+
+  // A week of zeros is the correct picture of a merchant's first week. The
+  // chart must draw it rather than divide by zero or collapse.
+  it("renders a full week of zero bars without breaking", () => {
+    render(
+      <BarChart
+        data={["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => ({ day, value: 0 }))}
+        ariaLabel="Visits per day for the last 7 days, no visits recorded yet"
+      />,
+    );
+    expect(
+      screen.getByRole("img", { name: "Visits per day for the last 7 days, no visits recorded yet" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Sun")).toBeInTheDocument();
   });
 });

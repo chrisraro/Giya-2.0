@@ -1,3 +1,5 @@
+import { notFound } from "next/navigation";
+
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TextField } from "@/components/ui/text-field";
@@ -6,6 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Logo } from "@/components/brand/logo";
 import { ThemeToggle } from "@/components/design/theme-toggle";
+
+import { isDesignRouteEnabled } from "./dev-only";
 
 const COLOR_ROLES = [
   "primary","on-primary","primary-container","on-primary-container",
@@ -24,7 +28,41 @@ const TYPE_RAMP = [
   ["text-label-l", "Label L"], ["text-label-m", "Label M"], ["text-label-s", "Label S"],
 ] as const;
 
+/**
+ * The internal MD3 swatch board: every colour role, the full type ramp, and a
+ * gallery of every component, on one screen in both themes. It is how colour
+ * and type regressions get caught, and it is DEVELOPMENT ONLY.
+ *
+ * IT USED TO BE PUBLICLY LIVE. `src/middleware.ts`'s matcher excludes
+ * `_next`, `favicon` and `brand/` and nothing else, so this internal tool was
+ * served to anyone who guessed the URL on the production deployment.
+ *
+ * WHY IT IS NOT DELETED: it is a working development tool, and deleting one
+ * to fix a routing problem is the wrong trade.
+ *
+ * WHY THE GUARD IS HERE AND NOT IN MIDDLEWARE: a middleware branch was the
+ * first attempt and was measured and rejected. Middleware can only 404 by
+ * returning a bare `NextResponse(null, { status: 404 })` - which hands the
+ * visitor the browser's blank error page instead of the app's designed one -
+ * or by rewriting to an unmatched path, which rendered the right page but
+ * answered HTTP 200 for `/design` itself. A soft 404 is worse than the
+ * original bug, because it is indexable. It would also have put route-specific
+ * product logic on the hot path of every request in the app.
+ *
+ * WHY NOT A `layout.tsx` GUARD, WHICH WOULD ALSO COVER FUTURE CHILDREN: also
+ * tried, also measured, also rejected. See the note in `./dev-only` - a layout
+ * receives `children` already resolved, so the page's component tree still
+ * lands in the response's RSC payload and the swatches leak inside a 404.
+ *
+ * `notFound()` here is the framework's own mechanism: a real 404 status with
+ * the root `not-found.tsx` body, decided at prerender time by `next build`
+ * rather than per request, and with nothing of this page in the output.
+ */
 export default function DesignPage() {
+  if (!isDesignRouteEnabled(process.env.NODE_ENV)) {
+    notFound();
+  }
+
   return (
     <main className="mx-auto max-w-3xl space-y-12 px-4 py-10">
       <header className="flex items-center justify-between">

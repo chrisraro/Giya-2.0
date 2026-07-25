@@ -17,6 +17,9 @@ const BUSINESS_C = "9a4d6f3e-6666-4666-8666-666666666666";
 function business(id: string, name: string, overrides: Partial<BusinessSummary> = {}): BusinessSummary {
   return {
     id,
+    // BusinessSummary carries the public slug so a picker row can also link to
+    // /b/[slug]; the chooser itself only ever links by id.
+    slug: name.toLowerCase().replace(/\s+/g, "-"),
     name,
     logoUrl: null,
     cityName: "Cebu City",
