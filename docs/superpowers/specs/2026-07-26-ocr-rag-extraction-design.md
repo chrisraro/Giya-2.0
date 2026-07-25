@@ -11,6 +11,43 @@ The proposal: Supabase Storage + Edge Functions running `@huggingface/inference`
 
 **The architecture is sound and three parts of it are better than what we had.** Adopt those. Three other parts move money on unverified AI output and must not ship as described. This spec keeps the shape and adds the rails.
 
+### Verified against Hugging Face (2026-07-26)
+
+Checked which models are actually served, because serverless availability has
+narrowed and the plan depends on it:
+
+- **No classic OCR model is served.** `naver-clova-ix/donut-base-finetuned-cord-v2`,
+  `microsoft/trocr-base-printed` and `trocr-large-printed` all report no inference
+  provider, and a sweep of the top 12 models in both `image-to-text` and
+  `document-question-answering` found **zero** served. Building on donut or trocr
+  via the serverless API is not possible.
+- **Vision-language models are served.** 9 of the top 12 `image-text-to-text`
+  models are live, including `Qwen/Qwen2.5-VL-7B-Instruct`,
+  `Qwen/Qwen3-VL-8B-Instruct` and `google/gemma-4-31B-it`.
+- **Embeddings are served.** `sentence-transformers/all-MiniLM-L6-v2` is live on
+  `hf-inference` (384 dims, the dimension this spec pins).
+
+**Consequence:** the OCR step uses a VLM, not a dedicated OCR model. This is not
+a downgrade. trocr is line-level and needs the receipt pre-cropped into text
+lines; donut is tuned to one receipt corpus and emits its own schema. A VLM reads
+a whole tilted, shadowed phone photo, which is the actual input. `@huggingface/inference`
+is still the client, exactly as proposed.
+
+**Two operational notes on this choice:**
+
+- The VLM is asked for **verbatim transcription only**, never interpretation.
+  Keeping transcription separate from extraction is what makes the section 4.2
+  rail work at all: `ocr_results.raw_text` is the ground truth that the Groq
+  extraction is then checked against. If one model both read and interpreted the
+  image, there would be nothing independent left to validate against.
+- HF routes these to third-party providers (`featherless-ai`, `deepinfra`,
+  `novita`, `together`). Receipt images carry merchant, date, totals and
+  sometimes a consumer's name, so provider choice is a data-processing decision
+  under RA 10173, not just a latency one. Prefer a model with several providers
+  (`google/gemma-4-31B-it` has five) over one served by a single provider
+  (`Qwen2.5-VL-7B` currently has one), so an outage or a provider change does not
+  take the scanner down.
+
 ### Verified against the live Groq key (2026-07-26)
 
 - The key authenticates and inference works (`llama-3.3-70b-versatile`, round-trip confirmed).
@@ -109,7 +146,9 @@ Consumer scan:   photo -> Storage -> submit (sha256, pHash, dedupe)
 ### Env
 
 - `GROQ_API_KEY` - set and verified 2026-07-26. Rotate before production, it was pasted in chat.
-- `HF_TOKEN` - **still needed.** Without it the embedding and Edge OCR calls are unauthenticated and heavily rate limited.
+- `HF_TOKEN` - **still needed.** Two calls depend on it: the VLM transcription and the embedding. Without it both are unauthenticated and heavily rate limited.
+- `HF_VLM_MODEL` - defaults to `google/gemma-4-31B-it` (five providers, so provider outages do not take the scanner down). `Qwen/Qwen2.5-VL-7B-Instruct` is the alternative if transcription quality is better in testing, at the cost of a single provider.
+- `HF_EMBED_MODEL` - defaults to `sentence-transformers/all-MiniLM-L6-v2`, 384 dims, matching the pinned vector column width.
 - `GROQ_MODEL` - defaults to `llama-3.3-70b-versatile`; `llama-3.1-8b-instant` is the cheap path if extraction quality holds.
 
 ## 8. What the user sees
