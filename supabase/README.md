@@ -17,10 +17,9 @@ supabase/
     rls_identity_smoke.sql  pgTAP smoke suite (transaction-wrapped, rolls back)
 ```
 
-Live-ledger note: the hosted project's migration history also contains two
-pre-0001 cleanup entries (`drop_legacy_*`) that removed an unrelated app's
-tables before Giya's chain was applied. They are intentionally not in this
-directory; a fresh replay needs no cleanup.
+The directory listing above is abridged; see "Migration ledger" at the end of
+this file for the complete file set and how it maps onto the live migration
+history (including the pre-0001 legacy-cleanup entries).
 
 ## How migrations are applied
 
