@@ -82,6 +82,11 @@ beforeEach(() => {
   };
   table("business_staff").__result = { data: BUSINESS_STAFF_ROW, error: null };
   table("businesses").__result = { data: BUSINESS_ROW, error: null };
+  // Sane defaults for the tenant-check existence lookups (repo.ts
+  // productExistsForBusiness / categoryExistsForBusiness): "found" unless a
+  // specific test overrides it to `null` to exercise the not-found path.
+  table("products").__result = { data: { id: "prod-1" }, error: null };
+  table("menu_categories").__result = { data: { id: "cat-1" }, error: null };
 
   mocks.from.mockImplementation((name: string) => table(name));
 
@@ -204,6 +209,26 @@ describe("repo child-visibility cascade", () => {
     expect(table("products").update).toHaveBeenCalledWith({ is_available: false });
     expect(table("product_variants").update).not.toHaveBeenCalled();
     expect(table("product_addons").update).not.toHaveBeenCalled();
+  });
+
+  it("archiveProduct propagates the error and reports failure when the variants cascade update fails", async () => {
+    table("products").__result = { data: { id: "prod-1", deleted_at: "now" }, error: null };
+    table("product_variants").__result = { data: null, error: { message: "db error" } };
+
+    const { data, error } = await repo.archiveProduct("biz-1", "prod-1");
+
+    expect(data).toBeNull();
+    expect(error).not.toBeNull();
+  });
+
+  it("setProductStatus('hidden') propagates the error when the add-ons cascade update fails", async () => {
+    table("products").__result = { data: { id: "prod-1", status: "hidden" }, error: null };
+    table("product_addons").__result = { data: null, error: { message: "db error" } };
+
+    const { data, error } = await repo.setProductStatus("biz-1", "prod-1", "hidden");
+
+    expect(data).toBeNull();
+    expect(error).not.toBeNull();
   });
 });
 
@@ -456,6 +481,33 @@ describe("actions: createProduct", () => {
       expect.objectContaining({ availability: { days: [1, 2, 3], from: "07:00", to: "14:00" } }),
     );
   });
+
+  it("returns ok:false with 'Category not found.' when categoryId does not belong to the caller's business", async () => {
+    table("menu_categories").__result = { data: null, error: null };
+
+    const result = await actions.createProduct({
+      ...VALID_PRODUCT_INPUT,
+      categoryId: "33333333-3333-4333-8333-333333333333",
+    });
+
+    expect(result).toEqual({ ok: false, message: "Category not found." });
+    expect(table("products").insert).not.toHaveBeenCalled();
+  });
+
+  it("proceeds when categoryId belongs to the caller's business", async () => {
+    table("menu_categories").__result = { data: { id: "cat-1" }, error: null };
+    table("products").__result = { data: { id: "prod-1" }, error: null };
+
+    const result = await actions.createProduct({
+      ...VALID_PRODUCT_INPUT,
+      categoryId: "33333333-3333-4333-8333-333333333333",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(table("products").insert).toHaveBeenCalledWith(
+      expect.objectContaining({ category_id: "33333333-3333-4333-8333-333333333333" }),
+    );
+  });
 });
 
 describe("actions: updateProduct", () => {
@@ -492,6 +544,30 @@ describe("actions: updateProduct", () => {
     expect(result.ok).toBe(false);
     expect(table("products").update).not.toHaveBeenCalled();
   });
+
+  it("returns ok:false with 'Category not found.' when the new categoryId does not belong to the caller's business", async () => {
+    table("menu_categories").__result = { data: null, error: null };
+
+    const result = await actions.updateProduct({
+      productId: "11111111-1111-4111-8111-111111111111",
+      categoryId: "33333333-3333-4333-8333-333333333333",
+    });
+
+    expect(result).toEqual({ ok: false, message: "Category not found." });
+    expect(table("products").update).not.toHaveBeenCalled();
+  });
+
+  it("does not check category ownership when categoryId is not part of the patch", async () => {
+    table("menu_categories").__result = { data: null, error: null };
+    table("products").__result = { data: { id: "prod-1", name: "New name" }, error: null };
+
+    const result = await actions.updateProduct({
+      productId: "11111111-1111-4111-8111-111111111111",
+      name: "New name",
+    });
+
+    expect(result.ok).toBe(true);
+  });
 });
 
 describe("actions: archiveProduct", () => {
@@ -513,6 +589,15 @@ describe("actions: archiveProduct", () => {
 
     expect(result.ok).toBe(false);
     expect(table("products").update).not.toHaveBeenCalled();
+  });
+
+  it("returns ok:false (not ok:true) when the child-hide cascade fails partway through", async () => {
+    table("products").__result = { data: { id: "prod-1", deleted_at: "now" }, error: null };
+    table("product_variants").__result = { data: null, error: { message: "db error" } };
+
+    const result = await actions.archiveProduct({ productId: "11111111-1111-4111-8111-111111111111" });
+
+    expect(result.ok).toBe(false);
   });
 });
 
@@ -612,6 +697,19 @@ describe("actions: addVariant / removeVariant", () => {
     expect(result.ok).toBe(false);
     expect(table("product_variants").delete).not.toHaveBeenCalled();
   });
+
+  it("addVariant returns ok:false with 'Product not found.' when productId does not belong to the caller's business", async () => {
+    table("products").__result = { data: null, error: null };
+
+    const result = await actions.addVariant({
+      productId: "11111111-1111-4111-8111-111111111111",
+      name: "Large",
+      priceCentavos: 15000,
+    });
+
+    expect(result).toEqual({ ok: false, message: "Product not found." });
+    expect(table("product_variants").insert).not.toHaveBeenCalled();
+  });
 });
 
 describe("actions: addAddon / removeAddon", () => {
@@ -658,6 +756,19 @@ describe("actions: addAddon / removeAddon", () => {
 
     expect(result.ok).toBe(false);
     expect(table("product_addons").delete).not.toHaveBeenCalled();
+  });
+
+  it("addAddon returns ok:false with 'Product not found.' when productId does not belong to the caller's business", async () => {
+    table("products").__result = { data: null, error: null };
+
+    const result = await actions.addAddon({
+      productId: "11111111-1111-4111-8111-111111111111",
+      name: "Pearls",
+      priceDeltaCentavos: 1500,
+    });
+
+    expect(result).toEqual({ ok: false, message: "Product not found." });
+    expect(table("product_addons").insert).not.toHaveBeenCalled();
   });
 });
 

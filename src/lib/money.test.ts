@@ -73,8 +73,34 @@ describe("pesoToCentavos", () => {
     expect(() => pesoToCentavos(-5)).toThrow();
   });
 
-  it("rounds sub-centavo fractions to the nearest centavo", () => {
-    expect(pesoToCentavos("10.005")).toBe(1001);
+  it("throws on more than 2 decimal digits instead of rounding", () => {
+    expect(() => pesoToCentavos("1.005")).toThrow();
+    expect(() => pesoToCentavos("10.005")).toThrow();
+    expect(() => pesoToCentavos("1.999")).toThrow();
+  });
+
+  it("parses two decimal digits exactly", () => {
+    expect(pesoToCentavos("1.01")).toBe(101);
+  });
+
+  it("pads a single decimal digit to a full centavo", () => {
+    expect(pesoToCentavos("1.1")).toBe(110);
+  });
+
+  it("parses a bare integer string", () => {
+    expect(pesoToCentavos("1")).toBe(100);
+  });
+
+  it("parses a larger decimal amount", () => {
+    expect(pesoToCentavos("1250.50")).toBe(125050);
+  });
+
+  it("throws on non-numeric input", () => {
+    expect(() => pesoToCentavos("abc")).toThrow();
+  });
+
+  it("throws on a negative amount string", () => {
+    expect(() => pesoToCentavos("-5")).toThrow();
   });
 });
 

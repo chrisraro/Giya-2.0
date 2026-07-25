@@ -20,6 +20,40 @@ import type {
 
 type Result<T> = { data: T | null; error: { message: string } | null };
 
+// App-layer tenant checks for nested foreign ids. Migration 0008
+// (supabase/migrations/0008_catalog_composite_fks.sql) already enforces
+// these at the DB level via composite FKs on (product_id, business_id) /
+// (category_id, business_id), so a cross-tenant id will be rejected either
+// way. These checks exist so that rejection surfaces as a clean
+// { ok: false, message: "Product not found." } / "Category not found."
+// instead of a raw Postgres foreign-key-violation error bubbling up.
+
+async function productExistsForBusiness(businessId: string, productId: string): Promise<boolean> {
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("products")
+    .select("id")
+    .eq("id", productId)
+    .eq("business_id", businessId)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  return data !== null;
+}
+
+async function categoryExistsForBusiness(businessId: string, categoryId: string): Promise<boolean> {
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("menu_categories")
+    .select("id")
+    .eq("id", categoryId)
+    .eq("business_id", businessId)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  return data !== null;
+}
+
 /**
  * Resolves the signed-in caller's business by looking up their first active
  * `business_staff` row, then loading that business's id/slug/name/status.
@@ -175,6 +209,11 @@ export async function insertProduct(
   businessId: string,
   input: ProductInput,
 ): Promise<Result<ProductRow>> {
+  if (input.categoryId !== null) {
+    const exists = await categoryExistsForBusiness(businessId, input.categoryId);
+    if (!exists) return { data: null, error: { message: "Category not found." } };
+  }
+
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("products")
@@ -200,6 +239,11 @@ export async function updateProduct(
   productId: string,
   input: ProductUpdateInput,
 ): Promise<Result<ProductRow>> {
+  if (input.categoryId !== undefined && input.categoryId !== null) {
+    const exists = await categoryExistsForBusiness(businessId, input.categoryId);
+    if (!exists) return { data: null, error: { message: "Category not found." } };
+  }
+
   const supabase = await createClient();
 
   const patch: ProductUpdatePatch = {};
@@ -227,7 +271,8 @@ export async function updateProduct(
   // setProductStatus below). Cascade there too - see cascadeHideChildren's
   // comment for why this matters.
   if (input.status === "hidden") {
-    await cascadeHideChildren(productId);
+    const cascadeError = await cascadeHideChildren(productId);
+    if (cascadeError) return { data: null, error: cascadeError };
   }
 
   return { data, error: null };
@@ -244,12 +289,26 @@ export async function updateProduct(
 // 'active') deliberately does NOT auto re-enable children - that's left to
 // explicit addVariant/removeVariant-style toggles so a merchant doesn't
 // accidentally resurrect a variant/add-on they'd manually 86'd earlier.
-async function cascadeHideChildren(productId: string): Promise<void> {
+// Returns null on success, or an error to propagate when either child update
+// fails. Both updates are awaited via Promise.all and their results checked
+// individually - the caller must not report ok:true if either one errored,
+// since that would silently leave a hidden/archived product's children
+// visible on the public menu (the exact leak this cascade exists to close).
+async function cascadeHideChildren(productId: string): Promise<{ message: string } | null> {
   const supabase = await createClient();
-  await Promise.all([
+  const [variantsResult, addonsResult] = await Promise.all([
     supabase.from("product_variants").update({ is_available: false }).eq("product_id", productId),
     supabase.from("product_addons").update({ is_available: false }).eq("product_id", productId),
   ]);
+
+  if (variantsResult.error) {
+    return { message: `Failed to hide product variants: ${variantsResult.error.message}` };
+  }
+  if (addonsResult.error) {
+    return { message: `Failed to hide product add-ons: ${addonsResult.error.message}` };
+  }
+
+  return null;
 }
 
 export async function setProductStatus(
@@ -269,7 +328,8 @@ export async function setProductStatus(
   if (error) return { data: null, error };
 
   if (status === "hidden") {
-    await cascadeHideChildren(productId);
+    const cascadeError = await cascadeHideChildren(productId);
+    if (cascadeError) return { data: null, error: cascadeError };
   }
 
   return { data, error: null };
@@ -290,7 +350,8 @@ export async function archiveProduct(
 
   if (error) return { data: null, error };
 
-  await cascadeHideChildren(productId);
+  const cascadeError = await cascadeHideChildren(productId);
+  if (cascadeError) return { data: null, error: cascadeError };
 
   return { data, error: null };
 }
@@ -317,6 +378,9 @@ export async function addVariant(
   productId: string,
   input: VariantInput,
 ): Promise<Result<ProductVariantRow>> {
+  const exists = await productExistsForBusiness(businessId, productId);
+  if (!exists) return { data: null, error: { message: "Product not found." } };
+
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("product_variants")
@@ -351,6 +415,9 @@ export async function addAddon(
   productId: string,
   input: AddonInput,
 ): Promise<Result<ProductAddonRow>> {
+  const exists = await productExistsForBusiness(businessId, productId);
+  if (!exists) return { data: null, error: { message: "Product not found." } };
+
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("product_addons")

@@ -32,19 +32,29 @@ export function formatPeso(centavos: number, opts: { symbol?: boolean } = {}): s
  * Parses a peso amount (string or number) into an integer number of
  * centavos, e.g. "1,250.50" -> 125050. Strips the peso sign, thousands
  * commas, and surrounding/internal whitespace before parsing. Throws on
- * non-numeric input or negative amounts.
+ * non-numeric input, amounts with more than 2 decimal digits, or negative
+ * amounts.
+ *
+ * Parsing is string-first (never `value * 100`) so half-centavo boundaries
+ * can't be nudged by float rounding: the cleaned string is validated against
+ * `-?\d+(\.\d{1,2})?`, split on ".", and the whole/fractional parts are
+ * combined as integers. A third decimal digit (e.g. "1.005") is rejected
+ * rather than silently rounded, since a centavo is the smallest unit money
+ * is stored in.
  */
 export function pesoToCentavos(input: string | number): number {
   const raw = typeof input === "number" ? input.toString() : input;
   const cleaned = raw.replace(new RegExp(`[${PESO_SIGN},\\s]`, "g"), "");
 
-  const value = Number(cleaned);
-  if (cleaned === "" || Number.isNaN(value)) {
+  if (!/^-?\d+(\.\d{1,2})?$/.test(cleaned)) {
     throw new Error(`pesoToCentavos: could not parse "${input}" as a number.`);
   }
-  if (value < 0) {
+  if (cleaned.startsWith("-")) {
     throw new Error(`pesoToCentavos: expected a non-negative amount, got "${input}".`);
   }
 
-  return Math.round(value * 100);
+  const [wholePart, fractionPart = ""] = cleaned.split(".");
+  const paddedFraction = fractionPart.padEnd(2, "0");
+
+  return Number(wholePart) * 100 + Number(paddedFraction);
 }

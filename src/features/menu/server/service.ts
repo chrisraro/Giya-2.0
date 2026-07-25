@@ -28,8 +28,7 @@ export async function createCategory(
   input: CategoryInput,
 ): Promise<ActionResult<MenuCategoryRow>> {
   const { data, error } = await repo.insertCategory(businessId, input);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
 
@@ -39,8 +38,7 @@ export async function renameCategory(
   name: string,
 ): Promise<ActionResult<MenuCategoryRow>> {
   const { data, error } = await repo.renameCategory(businessId, categoryId, name);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
 
@@ -50,8 +48,7 @@ export async function reorderCategory(
   sort: number,
 ): Promise<ActionResult<MenuCategoryRow>> {
   const { data, error } = await repo.reorderCategory(businessId, categoryId, sort);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
 
@@ -60,8 +57,7 @@ export async function archiveCategory(
   categoryId: string,
 ): Promise<ActionResult<MenuCategoryRow>> {
   const { data, error } = await repo.archiveCategory(businessId, categoryId);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
 
@@ -70,8 +66,7 @@ export async function createProduct(
   input: ProductInput,
 ): Promise<ActionResult<ProductRow>> {
   const { data, error } = await repo.insertProduct(businessId, input);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
 
@@ -81,37 +76,35 @@ export async function updateProduct(
   input: ProductUpdateInput,
 ): Promise<ActionResult<ProductRow>> {
   const { data, error } = await repo.updateProduct(businessId, productId, input);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
 
 // Archiving is a visibility-changing mutation: repo.archiveProduct already
 // cascades is_available=false to the product's variants/addons (see the
 // comment on cascadeHideChildren in repo.ts) so this layer just needs to
-// forward the call and notify.
+// forward the call and notify. If the cascade itself fails, repo.archiveProduct
+// surfaces that as `error`, so this stays ok:false rather than notifying.
 export async function archiveProduct(
   businessId: string,
   productId: string,
 ): Promise<ActionResult<ProductRow>> {
   const { data, error } = await repo.archiveProduct(businessId, productId);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
 
 // Setting status to 'hidden' is a visibility-changing mutation: repo.
 // setProductStatus cascades is_available=false to the product's variants/
 // addons in that case (see repo.ts). Setting status to 'active'/'sold_out'
-// does not touch children.
+// does not touch children. A failed cascade surfaces as `error` here too.
 export async function setProductStatus(
   businessId: string,
   productId: string,
   status: ProductStatus,
 ): Promise<ActionResult<ProductRow>> {
   const { data, error } = await repo.setProductStatus(businessId, productId, status);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
 
@@ -121,8 +114,7 @@ export async function toggleProductAvailability(
   isAvailable: boolean,
 ): Promise<ActionResult<ProductRow>> {
   const { data, error } = await repo.toggleProductAvailability(businessId, productId, isAvailable);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
 
@@ -132,8 +124,7 @@ export async function addVariant(
   input: VariantInput,
 ): Promise<ActionResult<ProductVariantRow>> {
   const { data, error } = await repo.addVariant(businessId, productId, input);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
 
@@ -142,8 +133,7 @@ export async function removeVariant(
   variantId: string,
 ): Promise<ActionResult<null>> {
   const { data, error } = await repo.removeVariant(businessId, variantId);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
 
@@ -153,8 +143,7 @@ export async function addAddon(
   input: AddonInput,
 ): Promise<ActionResult<ProductAddonRow>> {
   const { data, error } = await repo.addAddon(businessId, productId, input);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
 
@@ -163,7 +152,6 @@ export async function removeAddon(
   addonId: string,
 ): Promise<ActionResult<null>> {
   const { data, error } = await repo.removeAddon(businessId, addonId);
-  if (error) return toResult(data, error);
-  emitCatalogUpdated(businessId);
+  if (!error) emitCatalogUpdated(businessId);
   return toResult(data, error);
 }
