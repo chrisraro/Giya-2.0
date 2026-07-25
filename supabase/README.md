@@ -207,39 +207,40 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 
 | file | live version | live name |
 |---|---|---|
-| 0000a_drop_legacy_licenses_payments.sql | 20260724180330 | drop_legacy_licenses_payments |
-| 0000b_drop_legacy_profiles_flags_feedback.sql | 20260724180338 | drop_legacy_profiles_flags_feedback |
-| 0001_foundations.sql | 20260724180457 | 0001_foundations |
-| 0002_identity.sql | 20260724180622 | 0002_identity |
-| 0003_auth_plumbing.sql | 20260724180740 | 0003_auth_plumbing |
-| 0004_business_staff_self_select.sql | 20260724190529 | 0004_business_staff_self_select |
-| 0005_businesses_staff_table_select.sql | 20260724191136 | 0005_businesses_staff_table_select |
-| 0006_fix_businesses_staff_table_select.sql | 20260724191228 | 0006_fix_businesses_staff_table_select |
-| 0007_catalog.sql | 20260725012057 | 0007_catalog |
-| 0008_catalog_composite_fks.sql | 20260725014424 | 0008_catalog_composite_fks |
-| 0009_fix_category_fk_set_null_column.sql | 20260725020639 | 0009_fix_category_fk_set_null_column |
-| 0010_catalog_table_staff_policies.sql | 20260725023446 | 0010_catalog_table_staff_policies |
-| 0011_identity_table_staff_policies.sql | 20260725024946 | 0011_identity_table_staff_policies |
-| 0011b_business_food_types_table_staff.sql | 20260725025010 | 0011b_business_food_types_table_staff |
-| 0012_campaigns.sql | 20260725035425 | 0012_campaigns |
-| 0013_reward_claim_rpcs.sql | 20260725055852 | 0013_reward_claim_rpcs |
-| 0014_realtime_reward_claims.sql | 20260725070033 | 0014_realtime_reward_claims |
-| 0015_campaign_budget_lock.sql | 20260725073038 | 0015_campaign_budget_lock |
-| 0016_claim_expiry_sweep.sql | 20260725082951 | 0016_claim_expiry_sweep |
-| 0017_receipts.sql | 20260725111658 | 0017_receipts |
-| 0018_award_receipt_points.sql | 20260725114121 | 0018_award_receipt_points |
-| 0019_receipts_storage.sql | 20260725113309 | 0019_receipts_storage |
-| 0020_realtime_receipts.sql | 20260725123010 | realtime_receipts |
-| 0021_consumer_selfupdate_column_fence.sql | 20260725131247 | 0021_consumer_selfupdate_column_fence |
-| 0022_audit_logs.sql | 20260725141733 | 0022_audit_logs |
-| 0023_record_receipt_visit.sql | 20260725143104 | 0023_record_receipt_visit |
+| 0000a_drop_legacy_licenses_payments.sql | 20260725161610 | 0000a_drop_legacy_licenses_payments |
+| 0000b_drop_legacy_profiles_flags_feedback.sql | 20260725161619 | 0000b_drop_legacy_profiles_flags_feedback |
+| 0001_foundations.sql | 20260725161645 | 0001_foundations |
+| 0002_identity.sql | 20260725161811 | 0002_identity |
+| 0003_auth_plumbing.sql | 20260725161844 | 0003_auth_plumbing |
+| 0004_business_staff_self_select.sql | 20260725161855 | 0004_business_staff_self_select |
+| 0005_businesses_staff_table_select.sql | 20260725161902 | 0005_businesses_staff_table_select |
+| 0006_fix_businesses_staff_table_select.sql | 20260725161909 | 0006_fix_businesses_staff_table_select |
+| 0007_catalog.sql | 20260725161952 | 0007_catalog |
+| 0008_catalog_composite_fks.sql | 20260725162010 | 0008_catalog_composite_fks |
+| 0009_fix_category_fk_set_null_column.sql | 20260725162020 | 0009_fix_category_fk_set_null_column |
+| 0010_catalog_table_staff_policies.sql | 20260725162044 | 0010_catalog_table_staff_policies |
+| 0011_identity_table_staff_policies.sql | 20260725162105 | 0011_identity_table_staff_policies |
+| 0011b_business_food_types_table_staff.sql | 20260725162115 | 0011b_business_food_types_table_staff |
+| 0012_campaigns.sql | 20260725162301 | 0012_campaigns |
+| 0013_reward_claim_rpcs.sql | 20260725162402 | 0013_reward_claim_rpcs |
+| 0014_realtime_reward_claims.sql | 20260725162415 | 0014_realtime_reward_claims |
+| 0015_campaign_budget_lock.sql | 20260725162451 | 0015_campaign_budget_lock |
+| 0016_claim_expiry_sweep.sql | 20260725162524 | 0016_claim_expiry_sweep |
+| 0017_receipts.sql | 20260725162801 | 0017_receipts |
+| 0018_award_receipt_points.sql | 20260725162910 | 0018_award_receipt_points |
+| 0019_receipts_storage.sql | 20260725162949 | 0019_receipts_storage |
+| 0020_realtime_receipts.sql | 20260725163012 | 0020_realtime_receipts |
+| 0021_consumer_selfupdate_column_fence.sql | 20260725163042 | 0021_consumer_selfupdate_column_fence |
+| 0022_audit_logs.sql | 20260725163156 | 0022_audit_logs |
+| 0023_record_receipt_visit.sql | 20260725163327 | 0023_record_receipt_visit |
+
+**These versions are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`.**
+Every migration was applied in file order in a single pass, so unlike the
+first run there is no ordering inversion and no ledger-name drift: live names
+match the file base names 1:1. See "Project history" below for why the replay
+happened.
 
 Notes:
-- **0020's live ledger name is `realtime_receipts`, without the ordinal
-  prefix**, unlike every row above it. Recorded rather than corrected: the
-  ledger name is what `supabase migration list` matches on, so editing it after
-  the fact would make the CLI believe the migration had never been applied. The
-  file keeps the `0020_` prefix for authoring order.
 - **0020 makes `receipts` a Realtime table.** Before it, the `supabase_realtime`
   publication contained only `reward_claims` (added by 0014), so
   `postgres_changes` subscriptions on `receipts` subscribed cleanly and then
@@ -247,22 +248,62 @@ Notes:
   applies 0017's column-level grant to the payload, so a consumer still receives
   only the 13 granted columns of their own rows.
 - `0000a`/`0000b` are historical one-time cleanups of an unrelated app that
-  already occupied this Supabase project. They are `if exists` no-ops on a
-  fresh database.
+  occupied the FIRST project this schema was built on. They are `if exists`
+  no-ops on a fresh database and were no-ops on the 2026-07-26 replay. They are
+  kept so the file set and the ledger stay 1:1.
 - `0011b` is deliberately a no-op file: the policy conversion it applied live
   is contained in the amended `0011` for fresh replays. It exists only to keep
   the file set and the ledger aligned.
-- **0018 and 0019 are inverted in the live ledger.** 0019 was applied at
-  `20260725113309` and 0018 at `20260725114121`, because the two were authored
-  in parallel and the storage migration finished first. They are independent
-  (0019 creates a storage bucket and its policies; 0018 creates an RPC over
-  tables that 0017 already created), so neither ordering changes the result and
-  nothing needs re-applying. It matters only for the rename below: renaming to
-  timestamp form makes 0019 sort BEFORE 0018, which is correct for the CLI and
-  deliberately disagrees with the ordinal prefixes. Do not "fix" the ordinals
-  to match; the ordinals record authoring order and the timestamps record
-  application order.
 - **Before adopting the Supabase CLI** (`supabase db push` / `migration list`),
   rename these files to the timestamp form `<version>_<name>.sql` using the
   table above, so the CLI recognises them as already applied. Skipping that
   rename makes the CLI try to re-apply everything.
+
+## Project history (why the ledger was rewritten on 2026-07-26)
+
+The live project is **`zlfxfzlnklqhajacngxf`**.
+
+Everything through 2026-07-25 was applied to a different project,
+`dcnpuvtbftpbcjcvfnlt`, because that ref was hard-coded in the Supabase MCP
+server config (`~/.claude.json`, `mcpServers.supabase.args`,
+`--project-ref=`). A pinned-ref MCP server exposes exactly one project and
+offers no way to create one or choose an organization, so every migration went
+to the only database the tooling could see. The mix-up was not caught earlier
+because a ref pasted in chat and the ref in the config were treated as the same
+thing.
+
+The correction was cheap precisely because these files are the source of truth:
+the full set replayed onto the correct project in one pass with no edits, all
+nine pgTAP suites passed (275 assertions), and the regenerated TypeScript types
+came back **byte-identical** to the committed ones, which is the strongest
+available evidence that both databases ended up with the same schema.
+
+Two consequences worth knowing:
+
+- **Live versions in the ledger above changed.** They are the replay
+  timestamps, not the original ones. Any older note quoting a `202607241…` or
+  early `202607251…` version refers to the retired project.
+- **`dcnpuvtbftpbcjcvfnlt` still exists** and holds this schema plus a handful
+  of E2E test rows. It has no production value and should be decommissioned so
+  there is no ambiguity about which project is live.
+
+### Environment difference on the current project
+
+`zlfxfzlnklqhajacngxf` carries a pre-existing event trigger, `ensure_rls` on
+`ddl_command_end`, calling `public.rls_auto_enable()`. It re-runs
+`alter table ... enable row level security` on newly created `public` tables and
+swallows every exception. It is harmless here because every migration enables
+RLS explicitly, and it never touches the `private` schema.
+
+It does however carry the default `EXECUTE` grant to `PUBLIC`, so PostgREST
+exposes it at `/rest/v1/rpc/rls_auto_enable` as a `SECURITY DEFINER` function
+callable by `anon`. That is the only security advisor on this project beyond the
+accepted baseline. An event trigger fires regardless of `EXECUTE` grants, so the
+fix costs nothing:
+
+```sql
+revoke execute on function public.rls_auto_enable() from public, anon, authenticated;
+```
+
+Left in place pending a decision, since the function predates this schema and is
+not created by any migration here.
