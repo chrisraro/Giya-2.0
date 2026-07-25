@@ -1,6 +1,5 @@
 import {
   activationGates,
-  canTransition,
   CampaignTransitionError,
   nextStatus,
 } from "../lifecycle";
@@ -129,11 +128,17 @@ export async function activateCampaign(
     return failResult("Campaign is not ready to activate.");
   }
 
-  if (!canTransition(row.status as CampaignStatus, "active")) {
-    return failResult(`Cannot activate a campaign in status '${row.status}'.`);
+  let target: CampaignStatus;
+  try {
+    target = nextStatus({ status: row.status as CampaignStatus }, "activate");
+  } catch (err) {
+    if (err instanceof CampaignTransitionError) {
+      return failResult(err.message, err.code);
+    }
+    throw err;
   }
 
-  const patch: { status: CampaignStatus; starts_at?: string } = { status: "active" };
+  const patch: { status: CampaignStatus; starts_at?: string } = { status: target };
   if (row.starts_at === null) {
     patch.starts_at = new Date().toISOString();
   }

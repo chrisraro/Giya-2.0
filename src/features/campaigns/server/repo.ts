@@ -336,6 +336,7 @@ export async function getCampaignPayloadPresence(
         .select("id")
         .eq("campaign_id", campaignId)
         .eq("business_id", businessId)
+        .eq("is_active", true)
         .is("deleted_at", null),
     ]);
 

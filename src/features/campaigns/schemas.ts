@@ -34,6 +34,24 @@ const campaignScheduleFields = {
   timezone: z.string().min(1).optional(),
 };
 
+// Cross-field check mirroring the DB's campaigns date-order check
+// constraint (supabase/migrations/0012_campaigns.sql): when both bounds are
+// present, endsAt must be strictly after startsAt. Runs at the Zod layer so
+// the app returns a friendly { ok:false, message } instead of leaking the
+// raw Postgres check-constraint violation up to the caller.
+function refineDateOrder(
+  value: { startsAt?: Date | null | undefined; endsAt?: Date | null | undefined },
+  ctx: z.RefinementCtx,
+): void {
+  if (value.startsAt && value.endsAt && value.endsAt.getTime() <= value.startsAt.getTime()) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["endsAt"],
+      message: "endsAt must be after startsAt.",
+    });
+  }
+}
+
 // ------------------------------------------------------------- promotions
 
 // Exactly promotions.offer_kind's check constraint.
@@ -100,11 +118,13 @@ export const promotionPayloadSchema = z
   });
 export type PromotionPayloadInput = z.infer<typeof promotionPayloadSchema>;
 
-export const createPromotionCampaignSchema = z.object({
-  name: campaignNameSchema,
-  ...campaignScheduleFields,
-  promotion: promotionPayloadSchema,
-});
+export const createPromotionCampaignSchema = z
+  .object({
+    name: campaignNameSchema,
+    ...campaignScheduleFields,
+    promotion: promotionPayloadSchema,
+  })
+  .superRefine(refineDateOrder);
 export type CreatePromotionCampaignInput = z.infer<typeof createPromotionCampaignSchema>;
 
 // ----------------------------------------------------------------- rewards
@@ -120,11 +140,13 @@ export const rewardPayloadSchema = z.object({
 });
 export type RewardPayloadInput = z.infer<typeof rewardPayloadSchema>;
 
-export const createRewardCampaignSchema = z.object({
-  name: campaignNameSchema,
-  ...campaignScheduleFields,
-  reward: rewardPayloadSchema,
-});
+export const createRewardCampaignSchema = z
+  .object({
+    name: campaignNameSchema,
+    ...campaignScheduleFields,
+    reward: rewardPayloadSchema,
+  })
+  .superRefine(refineDateOrder);
 export type CreateRewardCampaignInput = z.infer<typeof createRewardCampaignSchema>;
 
 // --------------------------------------------------------- loyalty programs
@@ -162,11 +184,13 @@ export const loyaltyProgramPayloadSchema = z.object({
 });
 export type LoyaltyProgramPayloadInput = z.infer<typeof loyaltyProgramPayloadSchema>;
 
-export const createLoyaltyCampaignSchema = z.object({
-  name: campaignNameSchema,
-  ...campaignScheduleFields,
-  loyaltyProgram: loyaltyProgramPayloadSchema,
-});
+export const createLoyaltyCampaignSchema = z
+  .object({
+    name: campaignNameSchema,
+    ...campaignScheduleFields,
+    loyaltyProgram: loyaltyProgramPayloadSchema,
+  })
+  .superRefine(refineDateOrder);
 export type CreateLoyaltyCampaignInput = z.infer<typeof createLoyaltyCampaignSchema>;
 
 // ------------------------------------------------------------ points rules

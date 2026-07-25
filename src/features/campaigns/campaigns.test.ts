@@ -214,6 +214,21 @@ describe("actions: createPromotionCampaign", () => {
     expect(table("campaigns").insert).not.toHaveBeenCalled();
   });
 
+  it("rejects endsAt at or before startsAt with a friendly message instead of hitting the DB", async () => {
+    const result = await actions.createPromotionCampaign({
+      name: "Happy Hour",
+      startsAt: new Date("2026-08-01T00:00:00Z"),
+      endsAt: new Date("2026-07-01T00:00:00Z"),
+      promotion: { offerKind: "percent_off", percentOff: 20 },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message.toLowerCase()).toContain("endsat");
+    }
+    expect(table("campaigns").insert).not.toHaveBeenCalled();
+  });
+
   it("soft-deletes the campaign and returns ok:false when the promotion insert fails", async () => {
     table("campaigns").__result = { data: { id: "camp-1" }, error: null };
     table("promotions").__result = { data: null, error: { message: "db error" } };
@@ -446,6 +461,53 @@ describe("actions: activateCampaign gate enforcement", () => {
     expect(result.ok).toBe(false);
     expect(table("campaigns").update).not.toHaveBeenCalled();
   });
+
+  it("returns ok:false with CAMPAIGN_INVALID_STATE when activating an already-archived campaign", async () => {
+    table("campaigns").__result = {
+      data: {
+        id: CAMPAIGN_ID,
+        business_id: "biz-1",
+        type: "promotion",
+        status: "archived",
+        starts_at: null,
+        ends_at: null,
+        timezone: "Asia/Manila",
+        budget: {},
+        deleted_at: null,
+      },
+      error: null,
+    };
+    // Gates (payload/business) are satisfied so only the transition check fails.
+    table("promotions").__result = { data: { id: "promo-1" }, error: null };
+
+    const result = await actions.activateCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "CAMPAIGN_INVALID_STATE" }));
+    expect(table("campaigns").update).not.toHaveBeenCalled();
+  });
+
+  it("returns ok:false with CAMPAIGN_INVALID_STATE when activating an ended campaign", async () => {
+    table("campaigns").__result = {
+      data: {
+        id: CAMPAIGN_ID,
+        business_id: "biz-1",
+        type: "promotion",
+        status: "ended",
+        starts_at: null,
+        ends_at: null,
+        timezone: "Asia/Manila",
+        budget: {},
+        deleted_at: null,
+      },
+      error: null,
+    };
+    table("promotions").__result = { data: { id: "promo-1" }, error: null };
+
+    const result = await actions.activateCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "CAMPAIGN_INVALID_STATE" }));
+    expect(table("campaigns").update).not.toHaveBeenCalled();
+  });
 });
 
 // --------------------------------------------------- pauseCampaign / archive
@@ -574,6 +636,31 @@ describe("actions: upsertBaseRule", () => {
 
     expect(result.ok).toBe(false);
     expect(table("points_rules").insert).not.toHaveBeenCalled();
+  });
+});
+
+// -------------------------------------------- repo.getCampaignPayloadPresence
+
+describe("repo.getCampaignPayloadPresence", () => {
+  it("scopes the points_rules count to active, non-deleted rows", async () => {
+    const repo = await import("./server/repo");
+    table("points_rules").__result = { data: [{ id: "rule-1" }], error: null };
+
+    const presence = await repo.getCampaignPayloadPresence("biz-1", CAMPAIGN_ID);
+
+    expect(presence.pointsRuleCount).toBe(1);
+    expect(table("points_rules").eq).toHaveBeenCalledWith("is_active", true);
+    expect(table("points_rules").is).toHaveBeenCalledWith("deleted_at", null);
+  });
+
+  it("does not count an inactive points rule toward presence", async () => {
+    const repo = await import("./server/repo");
+    // Simulates the filtered query correctly excluding the inactive row.
+    table("points_rules").__result = { data: [], error: null };
+
+    const presence = await repo.getCampaignPayloadPresence("biz-1", CAMPAIGN_ID);
+
+    expect(presence.pointsRuleCount).toBe(0);
   });
 });
 
