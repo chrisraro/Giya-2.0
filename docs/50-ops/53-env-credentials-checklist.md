@@ -30,7 +30,8 @@ this file, only names.
 |---|---|---|---|
 | `OCR_SERVICE_URL` | PaddleOCR container | Real receipt reading | Until set, a deterministic stub runs and every `ocr_results` row is written `engine='stub'`. Setting this switches providers with no code change |
 | `OCR_SERVICE_TOKEN` | PaddleOCR container | Same | If the URL is set and this is not, provider selection throws rather than silently falling back to the stub, which in production would mint points for receipts nobody photographed |
-| `GROQ_API_KEY` | Groq | LLM parse-assist (V1), AI chat and RAG | All LLM access goes through `src/lib/ai/llm.ts` per doc 38, so one variable covers every AI surface |
+| `GROQ_API_KEY` | Groq | LLM parse-assist (now MVP), AI chat and RAG | **SET and verified 2026-07-26.** All LLM access goes through `src/lib/ai/llm.ts` per doc 38. The account has 15 text-only models and NO vision model, which is why a separate OCR step is required rather than optional. Rotate before production, it was pasted in chat. |
+| `HF_TOKEN` | Hugging Face | Edge Function OCR and the embeddings behind template retrieval | **NEEDED for the OCR/RAG slice.** Groq has no embedding model, so embeddings come from HF. Without a token the calls are unauthenticated and heavily rate limited. |
 | `QSTASH_TOKEN` | Upstash QStash | Background jobs | Publishing side. Confirm the exact name against the Upstash SDK when the jobs slice lands |
 | `QSTASH_CURRENT_SIGNING_KEY` | Upstash QStash | Background jobs | Worker verifies `Upstash-Signature` against current plus next (doc 39) |
 | `QSTASH_NEXT_SIGNING_KEY` | Upstash QStash | Background jobs | Rotation pair for the above |
