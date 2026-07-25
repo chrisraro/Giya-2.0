@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { jwtVerify, SignJWT } from "jose";
 
 import { getServerEnv } from "@/lib/env";
-import { del, get, getDel, redisKey, set, setNx } from "@/lib/redis";
+import { del, getDel, redisKey, setGet, setNx } from "@/lib/redis";
 
 // Single-use redemption tokens: a business scans a customer's claim QR, the
 // server mints a short-lived signed token, the business's confirm action
@@ -18,9 +18,9 @@ import { del, get, getDel, redisKey, set, setNx } from "@/lib/redis";
 // used to leave the previous jti valid, so a customer could screenshot or
 // share several concurrently-valid codes. A "pointer" key
 // (redeem:claim:{claimId} -> current jti) tracks the single live code for a
-// claim; every mint reads the pointer, deletes the previous jti's key (so
-// the old QR immediately stops validating), then writes the new jti and
-// overwrites the pointer. Double redemption was already impossible
+// claim; every mint atomically swaps the pointer to its own jti (via
+// setGet, see below) and deletes whichever jti it displaced, so the old QR
+// immediately stops validating. Double redemption was already impossible
 // (redemptions.claim_id is unique plus the claim row lock) - this closes
 // the separate "multiple live codes exist at once" gap.
 const TOKEN_TTL_SECONDS = 300;
@@ -83,15 +83,6 @@ export async function mintRedemptionToken(
     .setExpirationTime(expiresAtSeconds)
     .sign(getSecretKey());
 
-  const pointerKey = redisKey("redeem", "claim", claimId);
-  const previousJti = await get(pointerKey);
-  if (previousJti !== null) {
-    // Best-effort by nature of DEL itself (it is a no-op if the key already
-    // expired or was consumed) - invalidates the previously minted code the
-    // instant a new one is minted.
-    await del(redisKey("redeem", "jti", previousJti));
-  }
-
   const stored = await setNx(
     redisKey("redeem", "jti", jti),
     claimId,
@@ -103,7 +94,35 @@ export async function mintRedemptionToken(
     throw new RedemptionTokenError("Failed to mint redemption token: jti collision");
   }
 
-  await set(pointerKey, jti, TOKEN_TTL_SECONDS);
+  // Atomic pointer swap. `SET key value EX ttl GET` sets the pointer to
+  // this mint's jti and, in the SAME command, returns whatever value the
+  // pointer held immediately before - there is no separate read step for a
+  // concurrent mint to interleave with. Redis executes commands one at a
+  // time, so two concurrent mints' SET...GET calls against the same
+  // pointer key are strictly ordered: whichever lands second at Redis
+  // necessarily observes the first one's jti as "previous" and deletes it.
+  //
+  // Walk both orderings for two concurrent mints A (jti a) and B (jti b) of
+  // the SAME claim, starting from whatever the pointer held before either
+  // ran (P, possibly null):
+  //   A's SET...GET lands first:  pointer P->a, A reads P,  deletes jti P.
+  //     B's SET...GET lands second: pointer a->b, B reads a, deletes jti a.
+  //     Final state: pointer=b, live jti={b}. Exactly one.
+  //   B's SET...GET lands first:  pointer P->b, B reads P,  deletes jti P.
+  //     A's SET...GET lands second: pointer b->a, A reads b, deletes jti b.
+  //     Final state: pointer=a, live jti={a}. Exactly one.
+  // Either way, whichever mint's swap lands last "wins" the pointer, and it
+  // deletes precisely the jti it displaced - never its own (guarded by the
+  // `!== jti` check below), never a key some other mint has not yet
+  // written, and always the one live code left over from every earlier
+  // mint of this claim.
+  const pointerKey = redisKey("redeem", "claim", claimId);
+  const previousJti = await setGet(pointerKey, jti, TOKEN_TTL_SECONDS);
+  if (previousJti !== null && previousJti !== jti) {
+    // Best-effort by nature of DEL itself (it is a no-op if the key already
+    // expired or was consumed) - invalidates the code this mint displaced.
+    await del(redisKey("redeem", "jti", previousJti));
+  }
 
   return {
     token,
@@ -149,16 +168,19 @@ export async function consumeRedemptionToken(
     throw new RedemptionTokenError();
   }
 
-  // Best-effort cleanup of the pointer key: the consume itself already
-  // succeeded via the atomic GETDEL above, so a failure here must not
-  // surface as a failed redemption. Worst case the pointer lingers and
-  // points at an already-deleted jti key until its own TTL expires, which
-  // is harmless (the next mint will just no-op the DEL of a missing key).
-  try {
-    await del(redisKey("redeem", "claim", payload.claimId));
-  } catch {
-    // Swallowed intentionally - see comment above.
-  }
-
+  // Pointer cleanup is deliberately SKIPPED here (this used to be a blind
+  // `del(pointerKey)`). The consume itself already succeeded via the atomic
+  // GETDEL above; a plain DEL of redeem:claim:{claimId} risks deleting a
+  // pointer that a concurrent, newer mintRedemptionToken call for the SAME
+  // claim just wrote via its own atomic SET...GET swap - and unlike that
+  // swap, there is no single Redis command to delete a key conditionally
+  // on its current value, so "read then delete only on match" would just
+  // reopen a read/delete race between two separate commands. The pointer's
+  // only purpose is letting the NEXT mint find the PREVIOUS jti to
+  // invalidate; once a code is consumed here there is nothing left for it
+  // to point at that matters, so leaving it to expire on its own
+  // TOKEN_TTL_SECONDS TTL is simplest and correct - it can at worst make a
+  // future mint's "delete the previous jti" step a no-op on an already-gone
+  // key, never resurrect or orphan a live code.
   return payload;
 }

@@ -406,3 +406,190 @@ describe("expire", () => {
     await expect(expire("k1", 60)).rejects.toThrow();
   });
 });
+
+describe("expireNx", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("sends the exact EXPIRE ... NX command payload and returns true when the TTL was set", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 1 }),
+    });
+
+    const { expireNx } = await import("./redis");
+    const result = await expireNx("k1", 60);
+
+    expect(result).toBe(true);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual(["EXPIRE", "k1", "60", "NX"]);
+  });
+
+  it("returns false when the key already had a TTL (no-op)", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 0 }),
+    });
+
+    const { expireNx } = await import("./redis");
+
+    await expect(expireNx("k1", 60)).resolves.toBe(false);
+  });
+
+  it("throws on a non-200 response", async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+      text: async () => "boom",
+    });
+
+    const { expireNx } = await import("./redis");
+
+    await expect(expireNx("k1", 60)).rejects.toThrow();
+  });
+});
+
+describe("ttl", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("sends the exact TTL command payload and returns the remaining seconds", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 42 }),
+    });
+
+    const { ttl } = await import("./redis");
+    const result = await ttl("k1");
+
+    expect(result).toBe(42);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual(["TTL", "k1"]);
+  });
+
+  it("returns -1 when the key has no expiry and -2 when it does not exist, unmodified", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: -1 }),
+    });
+    const { ttl } = await import("./redis");
+    await expect(ttl("k1")).resolves.toBe(-1);
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: -2 }),
+    });
+    await expect(ttl("k1")).resolves.toBe(-2);
+  });
+
+  it("throws on a non-200 response", async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+      text: async () => "boom",
+    });
+
+    const { ttl } = await import("./redis");
+
+    await expect(ttl("k1")).rejects.toThrow();
+  });
+});
+
+describe("setGet", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("sends the exact SET EX GET command payload and returns the previous value", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: "old-jti" }),
+    });
+
+    const { setGet } = await import("./redis");
+    const result = await setGet("k1", "new-jti", 300);
+
+    expect(result).toBe("old-jti");
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual([
+      "SET",
+      "k1",
+      "new-jti",
+      "EX",
+      "300",
+      "GET",
+    ]);
+  });
+
+  it("returns null when the key did not exist before (no previous value)", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: null }),
+    });
+
+    const { setGet } = await import("./redis");
+
+    await expect(setGet("k1", "new-jti", 300)).resolves.toBeNull();
+  });
+
+  it("issues a single call, never GET followed by SET", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: null }),
+    });
+
+    const { setGet } = await import("./redis");
+    await setGet("k1", "new-jti", 300);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws on a non-200 response", async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+      text: async () => "boom",
+    });
+
+    const { setGet } = await import("./redis");
+
+    await expect(setGet("k1", "new-jti", 300)).rejects.toThrow();
+  });
+});

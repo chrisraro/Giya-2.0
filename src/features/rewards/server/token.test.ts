@@ -26,16 +26,14 @@ vi.mock("@/lib/env", () => ({
 const redisMocks = vi.hoisted(() => ({
   setNx: vi.fn(),
   getDel: vi.fn(),
-  get: vi.fn(),
-  set: vi.fn(),
+  setGet: vi.fn(),
   del: vi.fn(),
 }));
 
 vi.mock("@/lib/redis", () => ({
   setNx: redisMocks.setNx,
   getDel: redisMocks.getDel,
-  get: redisMocks.get,
-  set: redisMocks.set,
+  setGet: redisMocks.setGet,
   del: redisMocks.del,
   redisKey: (...parts: string[]) => `test:${parts.join(":")}`,
 }));
@@ -48,8 +46,7 @@ describe("mintRedemptionToken", () => {
   beforeEach(() => {
     redisMocks.setNx.mockReset();
     redisMocks.getDel.mockReset();
-    redisMocks.get.mockReset().mockResolvedValue(null);
-    redisMocks.set.mockReset().mockResolvedValue(true);
+    redisMocks.setGet.mockReset().mockResolvedValue(null);
     redisMocks.del.mockReset().mockResolvedValue(1);
   });
 
@@ -103,43 +100,49 @@ describe("mintRedemptionToken", () => {
     );
   });
 
-  it("writes the claim's pointer key to the new jti with a 300s TTL", async () => {
+  it("writes the claim's pointer key to the new jti with a 300s TTL via the atomic SET...GET swap", async () => {
     redisMocks.setNx.mockResolvedValue(true);
+    redisMocks.setGet.mockResolvedValue(null);
     const { mintRedemptionToken } = await import("./token");
 
     const minted = await mintRedemptionToken("claim-1", "biz-1");
 
-    expect(redisMocks.set).toHaveBeenCalledWith(
+    expect(redisMocks.setGet).toHaveBeenCalledWith(
       "test:redeem:claim:claim-1",
       minted.jti,
       300,
     );
   });
 
-  it("on first mint for a claim, reads the pointer but deletes nothing (no prior jti)", async () => {
+  it("on first mint for a claim, the pointer swap returns no previous jti and nothing is deleted", async () => {
     redisMocks.setNx.mockResolvedValue(true);
-    redisMocks.get.mockResolvedValue(null);
+    redisMocks.setGet.mockResolvedValue(null);
     const { mintRedemptionToken } = await import("./token");
 
-    await mintRedemptionToken("claim-1", "biz-1");
+    const minted = await mintRedemptionToken("claim-1", "biz-1");
 
-    expect(redisMocks.get).toHaveBeenCalledWith("test:redeem:claim:claim-1");
+    expect(redisMocks.setGet).toHaveBeenCalledWith(
+      "test:redeem:claim:claim-1",
+      minted.jti,
+      300,
+    );
     expect(redisMocks.del).not.toHaveBeenCalled();
   });
 
   it("minting a second time for the same claim deletes the first jti key and leaves only the second live", async () => {
     redisMocks.setNx.mockResolvedValue(true);
-    redisMocks.get.mockResolvedValueOnce(null);
+    redisMocks.setGet.mockResolvedValueOnce(null);
     const { mintRedemptionToken, consumeRedemptionToken } = await import("./token");
 
     const first = await mintRedemptionToken("claim-1", "biz-1");
 
-    // Second mint: the pointer now resolves to the first jti.
-    redisMocks.get.mockResolvedValueOnce(first.jti);
+    // Second mint's pointer swap returns the first jti as the previous
+    // value (this is what a real Redis SET...GET would return).
+    redisMocks.setGet.mockResolvedValueOnce(first.jti);
     const second = await mintRedemptionToken("claim-1", "biz-1");
 
     expect(redisMocks.del).toHaveBeenCalledWith(`test:redeem:jti:${first.jti}`);
-    expect(redisMocks.set).toHaveBeenLastCalledWith(
+    expect(redisMocks.setGet).toHaveBeenLastCalledWith(
       "test:redeem:claim:claim-1",
       second.jti,
       300,
@@ -159,14 +162,66 @@ describe("mintRedemptionToken", () => {
       jti: second.jti,
     });
   });
+
+  it("does not delete anything when the pointer swap returns this mint's own jti as 'previous' (defensive no-op)", async () => {
+    redisMocks.setNx.mockResolvedValue(true);
+    // Contrived: a real random jti can never collide with itself, but the
+    // `previousJti !== jti` guard must not delete the code it just made
+    // live if this were ever to happen.
+    redisMocks.setGet.mockImplementationOnce(async (_key: string, jti: string) => jti);
+    const { mintRedemptionToken } = await import("./token");
+
+    await mintRedemptionToken("claim-1", "biz-1");
+
+    expect(redisMocks.del).not.toHaveBeenCalled();
+  });
+
+  it("interleaved concurrent mints for the same claim leave exactly one live jti, regardless of which one's pointer swap lands at Redis first", async () => {
+    redisMocks.setNx.mockResolvedValue(true);
+
+    // Models the atomic pointer swap generically rather than assuming
+    // which mint's SET...GET call "wins": whichever call reaches this mock
+    // FIRST is treated as having landed at Redis first (no previous
+    // pointer value); whichever lands SECOND observes the first one's jti
+    // as the previous value - exactly what a real Redis SET...GET returns,
+    // regardless of which mint's request actually arrives first. Running
+    // both mints via Promise.all lets real promise-scheduling order (which
+    // we do not control) decide who lands first; the invariant under test
+    // is that the OUTCOME - exactly one live jti - holds either way.
+    let firstJti: string | null = null;
+    redisMocks.setGet.mockImplementation(async (_key: string, jti: string) => {
+      if (firstJti === null) {
+        firstJti = jti;
+        return null;
+      }
+      return firstJti;
+    });
+
+    const { mintRedemptionToken } = await import("./token");
+
+    const [a, b] = await Promise.all([
+      mintRedemptionToken("claim-1", "biz-1"),
+      mintRedemptionToken("claim-1", "biz-1"),
+    ]);
+
+    expect(a.jti).not.toBe(b.jti);
+    expect(firstJti).not.toBeNull();
+    const displacedJti = firstJti as string;
+    const survivingJti = a.jti === displacedJti ? b.jti : a.jti;
+
+    // Exactly one live jti: the one that landed first was displaced and
+    // deleted by the other; the survivor was never deleted.
+    expect(redisMocks.del).toHaveBeenCalledTimes(1);
+    expect(redisMocks.del).toHaveBeenCalledWith(`test:redeem:jti:${displacedJti}`);
+    expect(redisMocks.del).not.toHaveBeenCalledWith(`test:redeem:jti:${survivingJti}`);
+  });
 });
 
 describe("consumeRedemptionToken", () => {
   beforeEach(() => {
     redisMocks.setNx.mockReset();
     redisMocks.getDel.mockReset();
-    redisMocks.get.mockReset().mockResolvedValue(null);
-    redisMocks.set.mockReset().mockResolvedValue(true);
+    redisMocks.setGet.mockReset().mockResolvedValue(null);
     redisMocks.del.mockReset().mockResolvedValue(1);
   });
 
@@ -255,7 +310,7 @@ describe("consumeRedemptionToken", () => {
     );
   });
 
-  it("deletes the pointer key after a successful consume", async () => {
+  it("does not touch the pointer key on consume (left to expire on its own TTL - see comment in source)", async () => {
     redisMocks.setNx.mockResolvedValue(true);
     redisMocks.getDel.mockResolvedValue("claim-1");
     const { mintRedemptionToken, consumeRedemptionToken } = await import("./token");
@@ -264,19 +319,10 @@ describe("consumeRedemptionToken", () => {
     redisMocks.del.mockClear();
     await consumeRedemptionToken(minted.token);
 
-    expect(redisMocks.del).toHaveBeenCalledWith("test:redeem:claim:claim-1");
-  });
-
-  it("does not fail the consume when the best-effort pointer delete errors", async () => {
-    redisMocks.setNx.mockResolvedValue(true);
-    redisMocks.getDel.mockResolvedValue("claim-1");
-    const { mintRedemptionToken, consumeRedemptionToken } = await import("./token");
-
-    const minted = await mintRedemptionToken("claim-1", "biz-1");
-    redisMocks.del.mockRejectedValueOnce(new Error("boom"));
-
-    await expect(consumeRedemptionToken(minted.token)).resolves.toMatchObject({
-      claimId: "claim-1",
-    });
+    // A blind DEL of the pointer here could destroy a pointer a concurrent
+    // newer mint for the same claim just wrote via its own atomic
+    // SET...GET swap; the fix removes the delete entirely and lets the
+    // pointer's own TTL clean it up.
+    expect(redisMocks.del).not.toHaveBeenCalled();
   });
 });

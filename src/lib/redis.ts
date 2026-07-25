@@ -111,3 +111,49 @@ export async function expire(key: string, seconds: number): Promise<boolean> {
   const result = await sendCommand(["EXPIRE", key, String(seconds)]);
   return result === 1;
 }
+
+// EXPIRE key seconds NX: sets a TTL only if the key currently has none.
+// Self-healing complement to incr() in the rate limiter - safe (and cheap)
+// to call on EVERY request rather than only the first increment of a
+// window, because it is a no-op whenever a TTL already exists. That is what
+// lets it repair a key that somehow lost its TTL (a crash or Redis blip
+// between a previous INCR and its EXPIRE): the very next call sets one,
+// instead of the key counting up forever with no expiry. Returns true when
+// the TTL was actually (re-)set (Upstash returns 1), false when the key
+// already had a TTL or does not exist (Upstash returns 0).
+export async function expireNx(key: string, seconds: number): Promise<boolean> {
+  const result = await sendCommand(["EXPIRE", key, String(seconds), "NX"]);
+  return result === 1;
+}
+
+// TTL key: seconds remaining before the key expires. Upstash returns -1 for
+// a key with no expiry and -2 for a key that does not exist; both are
+// surfaced as-is so callers decide how to treat "no real TTL" rather than
+// this helper silently coercing them into 0 or throwing.
+export async function ttl(key: string): Promise<number> {
+  const result = await sendCommand(["TTL", key]);
+  return Number(result);
+}
+
+// SET key value EX ttlSeconds GET: atomically overwrites the key AND
+// returns whatever value it held immediately before, in a single round
+// trip. This is what makes the redemption-code pointer swap in
+// src/features/rewards/server/token.ts race-free: a separate GET-then-SET
+// would let two concurrent mints both read the same "previous" value and
+// each delete the other's freshly-written key. Returns the previous value,
+// or null if the key did not exist before this call.
+export async function setGet(
+  key: string,
+  value: string,
+  ttlSeconds: number,
+): Promise<string | null> {
+  const result = await sendCommand([
+    "SET",
+    key,
+    value,
+    "EX",
+    String(ttlSeconds),
+    "GET",
+  ]);
+  return (result as string | null) ?? null;
+}
