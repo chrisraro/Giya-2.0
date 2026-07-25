@@ -2,19 +2,24 @@ import "server-only";
 
 import { getServerEnv } from "@/lib/env";
 
+import { createEdgeOcrProvider } from "./edge";
 import { createHttpOcrProvider } from "./http";
 import { createStubOcrProvider } from "./stub";
 
 // The OCR boundary, per docs/30-modules/36-receipt-ocr-pipeline.md Stage 4 and
-// the spec's section 2. One interface, two implementations:
+// the spec's section 2. One interface, three implementations:
 //
-//   httpOcrProvider - the real PaddleOCR + OpenCV container (decision D1),
+//   httpOcrProvider - the PaddleOCR + OpenCV container (decision D1),
 //     dormant until its URL and token exist.
+//   edgeOcrProvider - the Supabase Edge Function in supabase/functions/ocr,
+//     which transcribes with a Hugging Face VLM. This is the live path
+//     (spec section 2.1).
 //   stubOcrProvider - deterministic fabricated PH receipt text, so the whole
-//     pipeline is exercisable and testable today.
+//     pipeline is exercisable and testable offline.
 //
-// Selection is by the presence of OCR_SERVICE_URL alone. When the container
-// arrives, set two environment variables; no code changes anywhere.
+// Selection is by which URL is present. Adding an implementation changed
+// nothing downstream: all three answer the same contract, so no pipeline code
+// knows which one ran.
 
 /** The request body of `POST {OCR_SERVICE_URL}/v1/ocr` (doc 36 Stage 4). */
 export interface OcrRequest {
@@ -69,13 +74,23 @@ export type OcrErrorCode =
   | "OCR_IMAGE_TOO_LARGE"
   /** 422 {"code":"IMAGE_UNREADABLE"}: the service could not read the image. */
   | "OCR_IMAGE_UNREADABLE"
-  /** 503 or a transport failure: the service is overloaded or unreachable. */
+  /**
+   * 503 or a transport failure: the service is overloaded or unreachable.
+   * Also where the Edge Function's Hugging Face 402 (credits exhausted) and
+   * 429 (throttled) land, which on a free-tier account are expected operating
+   * conditions rather than exceptions. Retryable by construction, and if the
+   * attempt budget runs out the receipt routes to review - never to a
+   * fabricated transcription.
+   */
   | "OCR_UNAVAILABLE"
   /** The 30s worker HTTP timeout elapsed. */
   | "OCR_TIMEOUT"
   /** A 200 whose body is not the documented shape, or an unmapped status. */
   | "OCR_BAD_RESPONSE"
-  /** OCR_SERVICE_URL is set but OCR_SERVICE_TOKEN is not. */
+  /**
+   * A URL is configured without its credential: OCR_SERVICE_URL without
+   * OCR_SERVICE_TOKEN, or SUPABASE_EDGE_OCR_URL without OCR_FUNCTION_SECRET.
+   */
   | "OCR_MISCONFIGURED";
 
 /**
@@ -112,17 +127,30 @@ export class OcrError extends Error {
 
 export interface OcrProvider {
   /** Which implementation this is. Recorded so stub rows are traceable. */
-  readonly name: "http" | "stub";
+  readonly name: "http" | "edge" | "stub";
   ocr(request: OcrRequest): Promise<OcrResponse>;
-  /** Present on the http provider only (doc 36 Stage 4 deploy gate). */
+  /** Present on the two network providers (doc 36 Stage 4 deploy gate). */
   healthz?(): Promise<OcrHealth>;
 }
 
 /**
  * The provider the pipeline runs against.
  *
- * OCR_SERVICE_URL set but OCR_SERVICE_TOKEN missing THROWS rather than falling
- * back to the stub. Both alternatives are bad, and this is the less bad one:
+ * SELECTION ORDER: OCR_SERVICE_URL, then SUPABASE_EDGE_OCR_URL, then the stub.
+ *
+ * The container outranks the Edge Function deliberately, and not because it is
+ * better today - it does not exist today. It is the escape hatch. The Edge
+ * Function's engine is a third-party VLM on a metered account, and the one
+ * response to it failing badly (a quality regression, a provider change, an
+ * exhausted quota) is to stand up the container and point OCR_SERVICE_URL at
+ * it. That has to work by setting one variable on an already-configured
+ * environment, without first having to find and unset the Edge Function's two.
+ * A migration path that requires unsetting configuration is a migration path
+ * people get wrong at 3am.
+ *
+ * A URL configured without its credential THROWS rather than falling back to
+ * the stub, for both pairs. Both alternatives are bad, and this is the less
+ * bad one:
  *
  *   - Falling back silently is the unacceptable failure. In production it
  *     would feed the pipeline fabricated receipt text that parses cleanly, and
@@ -141,19 +169,37 @@ export interface OcrProvider {
  * configuration is always a mistake, never an intent.
  */
 export function getOcrProvider(): OcrProvider {
-  const { OCR_SERVICE_URL, OCR_SERVICE_TOKEN } = getServerEnv();
+  const {
+    OCR_SERVICE_URL,
+    OCR_SERVICE_TOKEN,
+    SUPABASE_EDGE_OCR_URL,
+    OCR_FUNCTION_SECRET,
+  } = getServerEnv();
 
-  if (OCR_SERVICE_URL === undefined) {
-    return createStubOcrProvider();
+  if (OCR_SERVICE_URL !== undefined) {
+    if (OCR_SERVICE_TOKEN === undefined) {
+      throw new OcrError(
+        "OCR_MISCONFIGURED",
+        "OCR_SERVICE_URL is set but OCR_SERVICE_TOKEN is not. Set both to use the OCR container, or unset both to fall through to the Edge Function or the stub provider.",
+        { retryable: false },
+      );
+    }
+    return createHttpOcrProvider({ baseUrl: OCR_SERVICE_URL, token: OCR_SERVICE_TOKEN });
   }
 
-  if (OCR_SERVICE_TOKEN === undefined) {
-    throw new OcrError(
-      "OCR_MISCONFIGURED",
-      "OCR_SERVICE_URL is set but OCR_SERVICE_TOKEN is not. Set both to use the OCR container, or unset both to use the stub provider.",
-      { retryable: false },
-    );
+  if (SUPABASE_EDGE_OCR_URL !== undefined) {
+    if (OCR_FUNCTION_SECRET === undefined) {
+      throw new OcrError(
+        "OCR_MISCONFIGURED",
+        "SUPABASE_EDGE_OCR_URL is set but OCR_FUNCTION_SECRET is not. Set both to use the Edge Function, or unset both to use the stub provider.",
+        { retryable: false },
+      );
+    }
+    return createEdgeOcrProvider({
+      functionUrl: SUPABASE_EDGE_OCR_URL,
+      secret: OCR_FUNCTION_SECRET,
+    });
   }
 
-  return createHttpOcrProvider({ baseUrl: OCR_SERVICE_URL, token: OCR_SERVICE_TOKEN });
+  return createStubOcrProvider();
 }

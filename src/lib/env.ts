@@ -55,6 +55,24 @@ const serverEnvSchema = z.object({
   // exactly the pipeline that needs it.
   OCR_SERVICE_URL: z.string().url().optional(),
   OCR_SERVICE_TOKEN: z.string().min(1).optional(),
+  // The Supabase Edge Function OCR path (spec section 2.1), the second choice
+  // in the same selection ladder and optional for the same reasons. The URL is
+  // the function endpoint itself, e.g.
+  // https://{ref}.supabase.co/functions/v1/ocr.
+  //
+  // OCR_FUNCTION_SECRET is the shared secret the function authenticates on. It
+  // is deliberately NOT the service role key: the function needs no database
+  // access at all (doc 36 Stage 4: "stateless, no DB access, no business
+  // logic"), so authenticating it with the database god-key would spread our
+  // highest-privilege credential across every OCR request for a capability the
+  // function cannot use. A leaked OCR_FUNCTION_SECRET costs Hugging Face
+  // credits and rotates with one command.
+  //
+  // Not cross-validated here, exactly like the OCR_SERVICE pair above: the
+  // pairing rule lives in provider.ts where its blast radius is the receipts
+  // pipeline and not every getServerEnv() caller.
+  SUPABASE_EDGE_OCR_URL: z.string().url().optional(),
+  OCR_FUNCTION_SECRET: z.string().min(1).optional(),
   // Optional for the same reason: the service-role key is a credential and
   // credentials land at the end of the build. Server-side readers that need
   // it (the receipt settings loader, later the processing orchestrator)
@@ -114,6 +132,8 @@ export function getServerEnv(): ServerEnv {
     // for an optional key that must read as absent, not as an invalid URL.
     OCR_SERVICE_URL: emptyToUndefined(process.env.OCR_SERVICE_URL),
     OCR_SERVICE_TOKEN: emptyToUndefined(process.env.OCR_SERVICE_TOKEN),
+    SUPABASE_EDGE_OCR_URL: emptyToUndefined(process.env.SUPABASE_EDGE_OCR_URL),
+    OCR_FUNCTION_SECRET: emptyToUndefined(process.env.OCR_FUNCTION_SECRET),
     SUPABASE_SERVICE_ROLE_KEY: emptyToUndefined(process.env.SUPABASE_SERVICE_ROLE_KEY),
     HF_TOKEN: emptyToUndefined(process.env.HF_TOKEN),
     HF_EMBED_MODEL: emptyToUndefined(process.env.HF_EMBED_MODEL),

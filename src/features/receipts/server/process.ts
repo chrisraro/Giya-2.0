@@ -1089,6 +1089,20 @@ interface OcrFailureInput {
 }
 
 /**
+ * The `ocr_results.engine` value written for an attempt that FAILED, keyed by
+ * which provider was selected. On a failure there is no response body to read
+ * the engine name out of, so it is derived from the provider instead - and it
+ * has to be derived, not guessed: an edge-provider failure recorded as
+ * `paddleocr` would put rows in the OCR quality dashboards attributing our
+ * VLM's error rate to an engine that has never run here.
+ */
+const FAILED_ATTEMPT_ENGINE: Record<OcrProvider["name"], string> = {
+  stub: "stub",
+  edge: "hf-vlm",
+  http: "paddleocr",
+};
+
+/**
  * Doc 36 "Retry, timeouts, DLQ". Three outcomes, and the receipt is never left
  * in a state no future attempt can reach:
  *
@@ -1126,7 +1140,7 @@ async function handleOcrFailure(input: OcrFailureInput): Promise<void> {
     // The engine that WOULD have answered. engine_version is genuinely unknown
     // on a failed call, and inventing one would pollute the version histogram
     // the OCR quality dashboards read.
-    engine: deps.ocr.name === "stub" ? "stub" : "paddleocr",
+    engine: FAILED_ATTEMPT_ENGINE[deps.ocr.name],
     engine_version: "unknown",
     error: `${code}: ${message}`,
   });
