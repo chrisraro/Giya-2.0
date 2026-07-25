@@ -95,6 +95,12 @@ export interface ReviewQueueDeps {
  * every caller renders as an explicit "cannot load right now" rather than as
  * an empty queue: an empty queue is a claim that there is nothing to review,
  * and that claim must never be made by a misconfiguration.
+ *
+ * A FAILED READ IS THE SAME CLAIM. The two public reads below therefore return
+ * `null` for "could not be read" and only ever return `[]` or a number for
+ * "read successfully, and this is what is there". A misconfigured key and a
+ * Supabase outage are one rendering state, because they are one fact from the
+ * reviewer's side: we do not know what is in the queue.
  */
 export function defaultReviewQueueDeps(): ReviewQueueDeps | null {
   const supabase = createServiceRoleClient();
@@ -225,17 +231,24 @@ export function parseParseMeta(value: unknown): ParseMetaView | null {
 // ---------------------------------------------------------------------------
 
 /**
- * How many receipts are waiting on a human at this business.
+ * How many receipts are waiting on a human at this business, or NULL when that
+ * could not be established.
  *
  * Feeds the sidebar badge and the dashboard tile. Capped rather than counted
  * exactly: the difference between 140 and 200 changes nothing a reviewer does,
  * and "99+" is a cheaper, bounded read.
+ *
+ * Null rather than 0 on a failure, because 0 is an ASSERTION: it renders as
+ * "Nothing waiting" beside a tile that says every scan went through on its own.
+ * Callers render null as no badge and no number at all. A wrong number is worse
+ * than no number: no badge is a surface the reviewer will still open, while a
+ * confident zero is a surface they will skip.
  */
 export async function countPendingReview(
   businessId: string,
   deps: ReviewQueueDeps | null = defaultReviewQueueDeps(),
-): Promise<number> {
-  if (deps === null) return 0;
+): Promise<number | null> {
+  if (deps === null) return null;
 
   // TENANCY: `.eq("business_id", businessId)`, where businessId came from
   // resolveReviewerContext() reading business_staff under the caller's own
@@ -249,7 +262,7 @@ export async function countPendingReview(
 
   if (error !== null) {
     console.error(`[receipts/review-queue] pending count failed for business ${businessId}`, error);
-    return 0;
+    return null;
   }
   return (data ?? []).length;
 }
@@ -265,11 +278,19 @@ export interface ListReviewQueueInput {
   viewerId: string;
 }
 
+/**
+ * One page of the queue, or NULL when it could not be read.
+ *
+ * `[]` means the query ran and this business has nothing in this status. Null
+ * means we do not know, and the screen says so instead of rendering the empty
+ * state, whose copy ("every scan went through on its own") is a claim about the
+ * pipeline that a dropped connection is in no position to make.
+ */
 export async function listReviewQueue(
   input: ListReviewQueueInput,
   deps: ReviewQueueDeps | null = defaultReviewQueueDeps(),
-): Promise<ReviewQueueItem[]> {
-  if (deps === null) return [];
+): Promise<ReviewQueueItem[] | null> {
+  if (deps === null) return null;
   const { businessId, status, viewerId } = input;
 
   // TENANCY: `.eq("business_id", businessId)` from resolveReviewerContext().
@@ -289,7 +310,7 @@ export async function listReviewQueue(
 
   if (error !== null) {
     console.error(`[receipts/review-queue] queue read failed for business ${businessId}`, error);
-    return [];
+    return null;
   }
 
   const rows = (data ?? []) as QueueRow[];

@@ -32,25 +32,33 @@ export interface SidebarProps {
    * Stage 9's queue, resolved server-side in the portal layout). Zero renders
    * no badge at all: an empty review queue is the steady state and a permanent
    * "0" would train people to ignore the one place a number matters.
+   *
+   * NULL means the count could not be read, and renders the same way: no badge.
+   * That is deliberate, and it is not the same reasoning as zero. A badge here
+   * is a number people act on, so a WRONG number is worse than no number; the
+   * queue screen itself carries the "cannot be loaded" message, and it is the
+   * surface that can explain it.
    */
-  pendingReviewCount?: number;
+  pendingReviewCount?: number | null;
 }
 
 function NavList({
-  pathname,
   pendingReviewCount = 0,
+  pathname,
   onNavigate = () => {},
 }: {
   pathname: string;
-  pendingReviewCount?: number;
+  pendingReviewCount?: number | null;
   onNavigate?: () => void;
 }) {
+  // Null (unreadable) and 0 (nothing waiting) both come out as no badge.
+  const pending = pendingReviewCount ?? 0;
   return (
     <ul className="flex flex-col gap-1">
       {NAV_ITEMS.map((item) => {
         const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-        const badge = item.href === RECEIPTS_HREF && pendingReviewCount > 0;
-        const badgeLabel = pendingReviewCount > BADGE_CAP ? `${BADGE_CAP}+` : String(pendingReviewCount);
+        const badge = item.href === RECEIPTS_HREF && pending > 0;
+        const badgeLabel = pending > BADGE_CAP ? `${BADGE_CAP}+` : String(pending);
         return (
           <li key={item.href}>
             <Link
@@ -97,7 +105,7 @@ function NavList({
  * scoped to the drawer, body scroll lock while open, and focus returning to
  * the trigger via `onMobileClose`.
  */
-export function Sidebar({ mobileOpen, onMobileClose, pendingReviewCount = 0 }: SidebarProps) {
+export function Sidebar({ mobileOpen, onMobileClose, pendingReviewCount = null }: SidebarProps) {
   const pathname = usePathname();
   const reduce = useReducedMotion();
   const closeButtonRef = React.useRef<HTMLButtonElement>(null);

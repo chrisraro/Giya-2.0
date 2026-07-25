@@ -326,8 +326,18 @@ describe("countPendingReview", () => {
     expect(hasFilter(op!, "eq", "status", "review")).toBe(true);
   });
 
-  it("returns zero rather than a platform-wide count when the service role is absent", async () => {
-    expect(await countPendingReview(BUSINESS_ID, null)).toBe(0);
+  it("returns null rather than a platform-wide count when the service role is absent", async () => {
+    expect(await countPendingReview(BUSINESS_ID, null)).toBeNull();
+  });
+
+  // The badge and the dashboard tile both read this number, and 0 renders as
+  // "Nothing waiting on you". A failed count is not entitled to say that, so it
+  // has to be distinguishable from a genuine zero.
+  it("returns null rather than zero when the count could not be read", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const harness = createHarness(() => ({ data: null, error: { message: "timeout" } }));
+
+    expect(await countPendingReview(BUSINESS_ID, harness.deps)).toBeNull();
   });
 });
 
@@ -356,6 +366,31 @@ describe("listReviewQueue", () => {
     );
 
     expect(items).toEqual([]);
+  });
+
+  // `[]` and null are different claims: the first says the queue is empty, the
+  // second says we do not know. The screen renders the second as its
+  // "cannot be loaded" alert instead of the empty state, whose copy tells the
+  // manager every scan went through on its own.
+  it("returns null rather than an empty queue when the read fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const harness = createHarness(() => ({ data: null, error: { message: "connection reset" } }));
+
+    const items = await listReviewQueue(
+      { businessId: BUSINESS_ID, status: "review", viewerId: MANAGER_ID },
+      harness.deps,
+    );
+
+    expect(items).toBeNull();
+  });
+
+  it("returns null rather than an empty queue when the service role is absent", async () => {
+    const items = await listReviewQueue(
+      { businessId: BUSINESS_ID, status: "review", viewerId: MANAGER_ID },
+      null,
+    );
+
+    expect(items).toBeNull();
   });
 
   it("sorts the review queue oldest first and history newest first", async () => {
@@ -400,10 +435,11 @@ describe("listReviewQueue", () => {
     const world = defaultWorld();
     const harness = createHarness(respondFrom(world));
 
-    const [item] = await listReviewQueue(
+    const items = await listReviewQueue(
       { businessId: BUSINESS_ID, status: "review", viewerId: MANAGER_ID },
       harness.deps,
     );
+    const item = items?.[0];
 
     expect(item?.topSeverity).toBe("block");
     expect(item?.signalCount).toBe(2);
@@ -416,12 +452,12 @@ describe("listReviewQueue", () => {
     const world = defaultWorld();
     const harness = createHarness(respondFrom(world));
 
-    const [item] = await listReviewQueue(
+    const items = await listReviewQueue(
       { businessId: BUSINESS_ID, status: "review", viewerId: CONSUMER_ID },
       harness.deps,
     );
 
-    expect(item?.submittedByViewer).toBe(true);
+    expect(items?.[0]?.submittedByViewer).toBe(true);
   });
 });
 

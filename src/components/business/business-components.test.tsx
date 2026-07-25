@@ -43,6 +43,17 @@ describe("Sidebar", () => {
     expect(screen.getByRole("link", { name: "Receipts" })).toBeInTheDocument();
     expect(screen.queryByText(/receipts waiting for review/)).not.toBeInTheDocument();
   });
+
+  // Null is "the count could not be read", which the portal layout passes
+  // through rather than flattening to 0. No badge is the right rendering: a
+  // badge is a number people act on, so a wrong one is worse than none, and
+  // the queue screen is the surface that explains the failure.
+  it("shows no badge when the pending count could not be read", () => {
+    render(<Sidebar mobileOpen={false} onMobileClose={() => {}} pendingReviewCount={null} />);
+    expect(screen.getByRole("link", { name: "Receipts" })).toBeInTheDocument();
+    expect(screen.queryByText(/receipts waiting for review/)).not.toBeInTheDocument();
+    expect(screen.queryByText("0")).not.toBeInTheDocument();
+  });
 });
 
 describe("KpiCard", () => {

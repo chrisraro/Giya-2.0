@@ -481,12 +481,6 @@ by tests; do not remove the rounding.
   `fieldChip` shows that plus the receipt's `parse_confidence` rather than a
   per-field confidence, which does not exist. Genuine per-field provenance is a
   `parse.ts` change.
-- **`src/lib/supabase/types.ts` has not been regenerated since 0021.** It names
-  neither `audit_logs`, nor `record_receipt_visit`, nor
-  `receipts.visit_recorded_at`. Three structural narrowings stand in for them
-  (`ReceiptRpcClient` in `server/award.ts`, `AuditLogClient` in
-  `server/review.ts`), each marked as deletable the moment the types are
-  regenerated. Regenerate before adding a fourth.
 - **`fraud.cooldown_applied` is not audited.** Doc 37 wants an audit row when
   the strike ladder fires. 0022 landed the table with this slice, but the row
   needs an actor and a request id and the pipeline has neither
@@ -511,8 +505,10 @@ by tests; do not remove the rounding.
   `defaultProcessReceiptDeps()` returns null and logs, `defaultReviewDeps()`
   refuses with `DEPENDENCY_UNAVAILABLE`, and `defaultReviewQueueDeps()` makes the
   queue render "cannot load" rather than an empty list, since an empty list is a
-  claim that there is nothing to review. The credential lands at
-  the end of the build per standing orders.
+  claim that there is nothing to review. A FAILED READ is the same claim, so
+  `countPendingReview` and `listReviewQueue` answer `null` for it too and share
+  that one rendering state. The credential lands at the end of the build per
+  standing orders.
 - **Pre-bound match verification is structurally vacuous.** `matchBusiness` has
   a contradiction path, but `buildMatchCandidates` only ever hands it the
   pre-bound business, so the path can never fire and there is nothing for the

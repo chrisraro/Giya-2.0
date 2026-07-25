@@ -29,14 +29,14 @@ function item(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
 function renderQueue(
   status: ReviewQueueStatus,
   items: ReviewQueueItem[],
-  extra: { pendingCount?: number; unavailable?: boolean } = {},
+  extra: { pendingCount?: number | null; unavailable?: boolean } = {},
 ) {
   return render(
     <ReviewQueueScreen
       businessName="Sari Sari Express"
       status={status}
       items={items}
-      pendingCount={extra.pendingCount ?? items.length}
+      pendingCount={extra.pendingCount === undefined ? items.length : extra.pendingCount}
       now={NOW}
       {...(extra.unavailable === undefined ? {} : { unavailable: extra.unavailable })}
     />,
@@ -115,6 +115,28 @@ describe("ReviewQueueScreen", () => {
 
     expect(screen.getByRole("alert")).toHaveTextContent(/cannot be loaded right now/);
     expect(screen.queryByText("Nothing waiting on you")).not.toBeInTheDocument();
+  });
+
+  // The failed-read case as the page actually assembles it: `listReviewQueue`
+  // answered null, so there are no items AND no count, and neither the empty
+  // state nor the summary number may claim the queue is clear.
+  it("renders the unavailable state, not the empty state, when the read failed", () => {
+    renderQueue("review", [], { unavailable: true, pendingCount: null });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/cannot be loaded right now/);
+    expect(screen.queryByText("Nothing waiting on you")).not.toBeInTheDocument();
+    expect(screen.queryByText(/every scan went through on its own/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Nothing waiting")).not.toBeInTheDocument();
+  });
+
+  // A count that failed while the list loaded: the rows are real and stay, but
+  // the summary says nothing rather than saying zero.
+  it("shows no waiting count at all when the count could not be read", () => {
+    renderQueue("review", [item()], { pendingCount: null });
+
+    expect(screen.queryByText("Nothing waiting")).not.toBeInTheDocument();
+    expect(screen.queryByText(/waiting or more/)).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /SARI SARI EXPRESS/ })).toBeInTheDocument();
   });
 
   it("caps the waiting count so a runaway backlog still reads", () => {

@@ -101,6 +101,12 @@ export default async function BusinessDashboardPage() {
 
   // Memoized per request alongside the portal layout's own call, so the tile
   // costs one indexed count and no extra session round trip.
+  //
+  // Null hides the tile, and it now covers two cases: a role that cannot review
+  // receipts, and a count that could not be read. Both hide it for the same
+  // reason: the tile's zero state says "Nothing waiting on you", which is a
+  // claim about the queue, and a failed read cannot make it. The queue screen
+  // is the surface that explains the failure; a dashboard tile is not.
   const reviewer = await resolveReviewerContext();
   const pendingReviewCount =
     reviewer === null ? null : await countPendingReview(reviewer.businessId);

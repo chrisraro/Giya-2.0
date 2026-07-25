@@ -528,7 +528,11 @@ describe("auto-approval and award (doc 36 Stages 9-10)", () => {
     expect(args.p_receipt_id).toBe(RECEIPT_ID);
     // floor(19000 centavos / 100 centavos-per-point) = 190 points.
     expect(args.p_points).toBe(190);
-    expect(args.p_campaign_id).toBeNull();
+    // No campaign priced this receipt, so the argument is not sent at all.
+    // 0018 declares `p_campaign_id uuid default null`, so an omitted key and an
+    // explicit null are the same call; the generated Args render a defaulted
+    // argument as omittable, and this is the omission.
+    expect(args).not.toHaveProperty("p_campaign_id");
   });
 
   it("writes the receipt as 'approved' BEFORE calling the award RPC, which guards on it", async () => {

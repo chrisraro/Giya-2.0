@@ -227,41 +227,44 @@ interface ReceiptRow {
 const RECEIPT_COLUMNS =
   "id, business_id, user_id, status, created_at, merchant_name, receipt_number, receipt_date, subtotal_centavos, tax_centavos, total_centavos, reject_reason, reject_note, reviewed_by, reviewed_at";
 
-interface PostgrestFailure {
-  message: string;
-  code?: string;
-}
+type AuditLogColumns = Database["public"]["Tables"]["audit_logs"]["Insert"];
 
 /**
- * `audit_logs` landed in 0022, after the last regeneration of
- * src/lib/supabase/types.ts, so the generated `Database` union does not name
- * the table yet. This structural type is the 0022 column list verbatim and is
- * the single place the client is narrowed; regenerating the types deletes it.
- *
- * Note what is NOT here: no update, no delete, no upsert. The table is
- * append-only at three layers in the database (privilege revoke, row trigger,
- * truncate trigger) and this narrowing states the same thing in TypeScript, so
- * a future caller cannot even spell the mutation.
+ * The columns a STAFF DECISION always supplies. `audit_logs` (0022) also
+ * carries system-actor rows, so the generated `Insert` makes nearly everything
+ * optional and nullable; a decision made by a person has all of it, and an
+ * audit row for one with no actor, no business or no reason is not a record of
+ * anything. Listing them here re-requires them without restating their types,
+ * which the generated `Database` now owns.
  */
-interface AuditLogInsert {
-  actor_id: string;
-  actor_kind: "user";
-  actor_role: string;
-  business_id: string;
-  action: string;
-  entity_type: string;
-  entity_id: string;
-  before: Json;
-  after: Json;
-  reason: string;
-  request_id: string;
-}
+type AlwaysAudited =
+  | "actor_id"
+  | "actor_role"
+  | "business_id"
+  | "entity_id"
+  | "reason"
+  | "request_id";
 
-interface AuditLogClient {
-  from(table: "audit_logs"): {
-    insert(row: AuditLogInsert): PromiseLike<{ error: PostgrestFailure | null }>;
-  };
-}
+/**
+ * One `audit_logs` row as this service writes it, built on the generated
+ * `Database` type so the column names and their types are checked against the
+ * live schema and a later migration that renames one fails the build here.
+ *
+ * `actor_kind` is pinned to "user" rather than left as the column's `string`,
+ * because this file is only ever reached from a signed-in reviewer; a system
+ * actor writing through here would be a bug in the caller, not a widening.
+ * `before` and `after` are required but stay `Json`, which is nullable by
+ * construction: a decision that changed nothing writes two empty objects, and
+ * the diff, not the type, is what says so.
+ *
+ * Note what this does NOT open up: no update, no delete, no upsert.
+ * `writeAuditRow` below is the only statement this feature aims at the table,
+ * and the table itself is append-only at three layers in the database
+ * (privilege revoke, row trigger, truncate trigger).
+ */
+type AuditLogInsert = AuditLogColumns & {
+  [K in AlwaysAudited]: NonNullable<AuditLogColumns[K]>;
+} & { actor_kind: "user"; before: Json; after: Json };
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -757,8 +760,7 @@ async function reject(context: DecisionContext): Promise<ReviewOutcome> {
  * the same thing (stop before the consequences).
  */
 async function writeAuditRow(deps: ReviewDeps, row: AuditLogInsert): Promise<boolean> {
-  const client = deps.supabase as unknown as AuditLogClient;
-  const { error } = await client.from("audit_logs").insert(row);
+  const { error } = await deps.supabase.from("audit_logs").insert(row);
   if (error !== null) {
     console.error(
       `[receipts/review] could not audit ${row.action} on receipt ${row.entity_id}`,

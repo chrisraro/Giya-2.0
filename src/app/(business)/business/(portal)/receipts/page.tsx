@@ -59,14 +59,22 @@ export default async function BusinessReceiptsPage({
     countPendingReview(reviewer.businessId, deps),
   ]);
 
+  // Both reads answer null for "could not be read", which covers the missing
+  // service-role key AND a query that errored. They are rendered by the same
+  // unavailable state, and deliberately not distinguished for the reviewer:
+  // the actionable fact is identical, and the difference is in the server log.
+  //
+  // The two are kept apart from each other, though. A list that loaded is worth
+  // showing even if the count read failed beside it, so only the LIST drives the
+  // unavailable state; a null count just removes the summary number.
   return (
     <ReviewQueueScreen
       businessName={reviewer.businessName}
       status={status}
-      items={items}
+      items={items ?? []}
       pendingCount={pendingCount}
       now={new Date()}
-      unavailable={deps === null}
+      unavailable={items === null}
     />
   );
 }

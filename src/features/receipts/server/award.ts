@@ -568,36 +568,6 @@ function enrichRuleSnapshot(input: {
 // The two RPCs
 // ---------------------------------------------------------------------------
 
-interface AwardReceiptPointsArgs {
-  p_receipt_id: string;
-  p_points: number;
-  p_rule_snapshot: Json;
-  p_campaign_id: string | null;
-  p_expires_at: string | null;
-}
-
-interface RecordReceiptVisitArgs {
-  p_receipt_id: string;
-}
-
-interface RpcResponse {
-  data: unknown;
-  error: PostgrestFailure | null;
-}
-
-/**
- * `award_receipt_points` landed in 0018 and `record_receipt_visit` in 0023,
- * both AFTER the last regeneration of src/lib/supabase/types.ts (which already
- * carries every 0017 table but neither function), so the generated
- * `Database["public"]["Functions"]` union does not name them yet. These
- * structural overloads are the two signatures verbatim and are the single
- * place the client is narrowed; regenerating the types deletes them.
- */
-interface ReceiptRpcClient {
-  rpc(name: "award_receipt_points", args: AwardReceiptPointsArgs): PromiseLike<RpcResponse>;
-  rpc(name: "record_receipt_visit", args: RecordReceiptVisitArgs): PromiseLike<RpcResponse>;
-}
-
 /**
  * Every P0001 message 0018 and 0023 raise, verified against the migrations
  * line by line. 0023 deliberately introduces no new string: it reuses
@@ -711,10 +681,9 @@ export async function awardPoints(input: {
   plan: AwardPlan;
 }): Promise<AwardResult> {
   const { deps, receiptId, plan } = input;
-  const client = deps.supabase as unknown as ReceiptRpcClient;
 
   if (plan.points <= 0) {
-    const { error } = await client.rpc("record_receipt_visit", {
+    const { error } = await deps.supabase.rpc("record_receipt_visit", {
       p_receipt_id: receiptId,
     });
     if (error !== null) {
@@ -726,12 +695,17 @@ export async function awardPoints(input: {
     return { kind: "skipped_zero_points" };
   }
 
-  const { data, error } = await client.rpc("award_receipt_points", {
+  // 0018 declares p_campaign_id and p_expires_at as `default null`, and the
+  // generated Args render a defaulted argument as OMITTABLE rather than
+  // nullable. Omitting the key and sending null are the same call at the
+  // function (the default IS null), so the keys are dropped when there is
+  // nothing to say rather than the argument list being widened by hand.
+  const { data, error } = await deps.supabase.rpc("award_receipt_points", {
     p_receipt_id: receiptId,
     p_points: plan.points,
     p_rule_snapshot: plan.ruleSnapshot,
-    p_campaign_id: plan.campaignId,
-    p_expires_at: plan.expiresAt,
+    ...(plan.campaignId === null ? {} : { p_campaign_id: plan.campaignId }),
+    ...(plan.expiresAt === null ? {} : { p_expires_at: plan.expiresAt }),
   });
 
   if (error !== null) {

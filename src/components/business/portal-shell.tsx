@@ -24,11 +24,14 @@ const PAGE_TITLES: Record<string, string> = {
  */
 export function PortalShell({
   children,
-  pendingReviewCount = 0,
+  pendingReviewCount = null,
 }: {
   children: React.ReactNode;
-  /** Resolved server-side in the portal layout; feeds the sidebar badge. */
-  pendingReviewCount?: number;
+  /**
+   * Resolved server-side in the portal layout; feeds the sidebar badge. Null
+   * means the count could not be read, and the Sidebar renders no badge for it.
+   */
+  pendingReviewCount?: number | null;
 }) {
   const pathname = usePathname();
   // The decision screen is a child route, so the topbar title has to fall back

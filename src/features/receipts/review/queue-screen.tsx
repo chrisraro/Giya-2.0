@@ -35,10 +35,19 @@ export interface ReviewQueueScreenProps {
   businessName: string;
   status: ReviewQueueStatus;
   items: readonly ReviewQueueItem[];
-  pendingCount: number;
+  /**
+   * How many receipts are waiting, or null when the count could not be read.
+   * Null renders NO number rather than a zero: "Nothing waiting" is a claim,
+   * and a failed count is not entitled to make it.
+   */
+  pendingCount: number | null;
   /** Injected so the rendered queue age is deterministic. */
   now: Date;
-  /** The service-role client is unavailable, so "no items" would be a lie. */
+  /**
+   * The queue could not be read: the service-role client is missing, or the
+   * query failed. Either way "no items" would be a lie, so the empty state is
+   * suppressed in favour of an explicit alert.
+   */
   unavailable?: boolean;
 }
 
@@ -170,11 +179,13 @@ export function ReviewQueueScreen({
             Scans from {businessName} that need a person to look at them
           </p>
         </div>
-        <p className="text-body-s text-on-surface-variant">
-          {pendingCount === 0
-            ? "Nothing waiting"
-            : `${pendingCount} waiting${pendingCount > PENDING_COUNT_CAP ? " or more" : ""}`}
-        </p>
+        {pendingCount !== null && (
+          <p className="text-body-s text-on-surface-variant">
+            {pendingCount === 0
+              ? "Nothing waiting"
+              : `${pendingCount} waiting${pendingCount > PENDING_COUNT_CAP ? " or more" : ""}`}
+          </p>
+        )}
       </div>
 
       <nav aria-label="Receipt status" className="flex flex-wrap gap-2">

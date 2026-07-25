@@ -57,9 +57,15 @@ export default async function PortalLayout({ children }: { children: ReactNode }
   // cannot review receipts (marketing, staff), and the badge is simply absent
   // for them. It is memoized per request, so the page underneath this layout
   // reuses this resolution rather than repeating the session round trip.
+  //
+  // `countPendingReview` answers null when it could not read the count, and
+  // that is passed straight through rather than flattened to 0: the Sidebar
+  // renders no badge for null, because a badge is a number people act on and a
+  // stale or invented one is worse than none. The queue screen is where the
+  // failure is explained.
   const reviewer = await resolveReviewerContext();
   const pendingReviewCount =
-    reviewer === null ? 0 : await countPendingReview(reviewer.businessId);
+    reviewer === null ? null : await countPendingReview(reviewer.businessId);
 
   return <PortalShell pendingReviewCount={pendingReviewCount}>{children}</PortalShell>;
 }
