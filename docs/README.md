@@ -64,6 +64,7 @@
 | [50-environments-deployment.md](50-ops/50-environments-deployment.md) | Environments, CI/CD, migration workflow, secrets, rollback |
 | [51-testing-strategy.md](50-ops/51-testing-strategy.md) | Test pyramid, RLS tests, OCR golden sets, E2E, load testing |
 | [52-monitoring-observability.md](50-ops/52-monitoring-observability.md) | Sentry, OpenTelemetry, SLOs, alerting, AI/OCR quality monitoring |
+| [53-env-credentials-checklist.md](50-ops/53-env-credentials-checklist.md) | Every credential the app needs, what breaks without each, and the final-build handover list |
 
 ## Golden rules (summary)
 

@@ -1,0 +1,65 @@
+# 53 - Environment credentials checklist
+
+Running inventory of every credential Giya needs, what breaks without it, and
+when it is required. The user supplies external credentials at the end of the
+build, so this file is the handover list. Update it whenever a slice adds a
+dependency.
+
+Status legend: **SET** = present in `.env.local` today. **NEEDED NOW** = a
+shipped feature cannot run without it. **END OF BUILD** = the module that uses
+it is built and dormant, waiting on the credential.
+
+`.env.local` is gitignored and must never be committed. No value belongs in
+this file, only names.
+
+## Required now
+
+| Variable | Service | Status | Without it |
+|---|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase | SET | Nothing works |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase | SET | Nothing works |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase | **NEEDED NOW** | **The receipt pipeline cannot run.** `receipts`, `ocr_results` and `fraud_signals` are service-role-write-only by design, so a consumer cannot hand themselves an approved receipt with an invented total. Submission returns an error and no receipt is ever created. Found in the dashboard under Project Settings, API. |
+| `UPSTASH_REDIS_REST_URL` | Upstash Redis | SET | Redemption tokens fail closed, rate limiting fails open, idempotency 503s |
+| `UPSTASH_REDIS_REST_TOKEN` | Upstash Redis | SET | Same. **Rotate before production**: this value was pasted into a chat transcript |
+| `REDEMPTION_TOKEN_SECRET` | self-generated | SET | Redemption QR codes cannot be signed or verified |
+| `NEXT_PUBLIC_HCAPTCHA_SITE_KEY` | hCaptcha | SET | Signup and signin lose bot protection. The matching secret lives in the Supabase dashboard, not here |
+
+## End of build
+
+| Variable | Service | Needed for | Notes |
+|---|---|---|---|
+| `OCR_SERVICE_URL` | PaddleOCR container | Real receipt reading | Until set, a deterministic stub runs and every `ocr_results` row is written `engine='stub'`. Setting this switches providers with no code change |
+| `OCR_SERVICE_TOKEN` | PaddleOCR container | Same | If the URL is set and this is not, provider selection throws rather than silently falling back to the stub, which in production would mint points for receipts nobody photographed |
+| `GROQ_API_KEY` | Groq | LLM parse-assist (V1), AI chat and RAG | All LLM access goes through `src/lib/ai/llm.ts` per doc 38, so one variable covers every AI surface |
+| `QSTASH_TOKEN` | Upstash QStash | Background jobs | Publishing side. Confirm the exact name against the Upstash SDK when the jobs slice lands |
+| `QSTASH_CURRENT_SIGNING_KEY` | Upstash QStash | Background jobs | Worker verifies `Upstash-Signature` against current plus next (doc 39) |
+| `QSTASH_NEXT_SIGNING_KEY` | Upstash QStash | Background jobs | Rotation pair for the above |
+| `RESEND_API_KEY` | Resend | Transactional email | Also unblocks Supabase email confirmation and the leaked-password advisor, both currently blocked on having no email provider |
+| `RESEND_WEBHOOK_SECRET` | Resend | Delivery and bounce webhooks | |
+| `META_APP_ID` | Meta | Facebook auth and marketing integrations | |
+| `META_APP_SECRET` | Meta | Same | The old Giya codebase held only placeholders, so these must be created fresh |
+| `NEXT_PUBLIC_MAPS_BROWSER_KEY` | Maps provider | Store locator, browser side | |
+| `MAPS_SERVER_KEY` | Maps provider | Geocoding, server side | |
+| `INTEGRATION_TOKEN_AES_KEY` | self-generated | Encrypting stored third-party integration tokens (doc 42) | |
+| `PAYMONGO_SECRET_KEY` | PayMongo | Billing | Later phase, not MVP |
+| `PAYMONGO_WEBHOOK_SECRET` | PayMongo | Billing webhooks | Later phase, not MVP |
+| Sentry DSN | Sentry | Error tracking and OTel traces (doc 52) | Name to confirm when monitoring is wired |
+| Web push keys | Web Push / FCM | Push notifications | VAPID pair or FCM credentials depending on the transport chosen in the notifications slice |
+
+## Configured outside env
+
+These are set in a dashboard rather than a file, and are easy to forget.
+
+- **hCaptcha secret** - Supabase dashboard, Auth settings. Already configured.
+- **Google OAuth** - Supabase dashboard, Auth providers. Client id and secret.
+- **Facebook OAuth** - Supabase dashboard, Auth providers, using the Meta app above.
+- **Custom access token hook** - Supabase dashboard, Auth hooks. Currently disabled. Every policy in the database uses the table-truth helper `private.is_active_staff` instead of JWT claims, so the app works without it, but the claims-only admin surfaces need it before they ship. See `supabase/README.md`.
+- **Leaked password protection** - Supabase dashboard, Auth. Blocked on having an email provider; raises a standing advisor warning until enabled.
+- **Email confirmation** - Supabase dashboard. Currently off for dev convenience. Must be ON in production.
+
+## Before production
+
+- Rotate `UPSTASH_REDIS_REST_TOKEN` (exposed in a chat transcript).
+- Regenerate `REDEMPTION_TOKEN_SECRET` for the production environment rather than reusing the dev value.
+- Enable email confirmation and leaked-password protection once Resend is connected.
+- Enable the access token hook if any admin surface has shipped.
