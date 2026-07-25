@@ -346,7 +346,13 @@ export function MenuManager({
                   variants: variantsByProduct[dialog.product.id] ?? [],
                   addons: addonsByProduct[dialog.product.id] ?? [],
                 }
-              : {})}
+              : // Creating from within a specific category tab: default the
+                // form's category select to it so the new product lands
+                // there instead of coming out uncategorized. On "All items"
+                // there's no single category to infer, so it stays blank.
+                effectiveCategoryId !== "all"
+                ? { defaultCategoryId: effectiveCategoryId }
+                : {})}
             onSubmit={handleSubmitProduct}
             onCancel={closeDialog}
             submitting={formSubmitting}

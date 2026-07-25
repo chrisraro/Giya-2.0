@@ -47,6 +47,56 @@ describe("ProductForm validation", () => {
     );
   });
 
+  it("defaults the category select to defaultCategoryId when creating a new product", () => {
+    render(
+      <ProductForm
+        categories={[{ id: "cat-1", name: "Drinks" }]}
+        defaultCategoryId="cat-1"
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect((screen.getByLabelText("Category") as HTMLSelectElement).value).toBe("cat-1");
+  });
+
+  it("ignores defaultCategoryId when editing an existing product", () => {
+    const product = {
+      id: "product-1",
+      business_id: "business-1",
+      category_id: "cat-2",
+      name: "Iced Latte",
+      description: null,
+      base_price_centavos: 12000,
+      status: "active",
+      is_available: true,
+      images: [],
+      availability: {},
+      sort: 0,
+      deleted_at: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      created_by: null,
+      updated_by: null,
+      search_tsv: null as unknown as never,
+    };
+
+    render(
+      <ProductForm
+        categories={[
+          { id: "cat-1", name: "Drinks" },
+          { id: "cat-2", name: "Snacks" },
+        ]}
+        product={product as never}
+        defaultCategoryId="cat-1"
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect((screen.getByLabelText("Category") as HTMLSelectElement).value).toBe("cat-2");
+  });
+
   it("rejects a price with more than two decimal digits", async () => {
     const onSubmit = vi.fn();
     render(<ProductForm categories={[]} onSubmit={onSubmit} onCancel={vi.fn()} />);

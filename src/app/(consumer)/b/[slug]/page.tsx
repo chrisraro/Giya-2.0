@@ -40,7 +40,7 @@ export default async function PublicBusinessPage({
 
   if (!business) notFound();
 
-  const categories = await getPublicMenu(business.id);
+  const menuGroups = await getPublicMenu(business.id);
   const hoursSummary = formatHoursSummary(business.openingHours);
   const caption = [business.businessTypeName, business.cityName].filter(Boolean).join(" · ");
 
@@ -78,7 +78,7 @@ export default async function PublicBusinessPage({
       </div>
 
       <div className="mt-6 px-4">
-        <PublicMenu categories={categories} />
+        <PublicMenu groups={menuGroups} />
       </div>
     </main>
   );

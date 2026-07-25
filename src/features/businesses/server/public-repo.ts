@@ -42,10 +42,20 @@ export type PublicProduct = {
   addons: PublicAddon[];
 };
 
-export type PublicCategory = {
+export type PublicMenuCategory = {
   id: string;
   name: string;
   description: string | null;
+};
+
+/**
+ * One section of a business's public menu: a real category, or `null` for
+ * the trailing "uncategorized" bucket (rendered by PublicMenu as "More").
+ * SMEs very commonly leave products uncategorized, so that bucket has to
+ * be a first-class group rather than silently dropped - see getPublicMenu.
+ */
+export type PublicMenuGroup = {
+  category: PublicMenuCategory | null;
   products: PublicProduct[];
 };
 
@@ -111,8 +121,13 @@ export async function getBusinessBySlug(slug: string): Promise<PublicBusiness | 
  * src/features/menu/server/repo.ts for why the public RLS policies on
  * product_variants/product_addons can't check the parent product's status
  * themselves.
+ *
+ * A product with no category_id (very common for SMEs that haven't set up
+ * categories yet) is never dropped: it's collected into a trailing group
+ * with `category: null`, appended after every real category, only when at
+ * least one such product exists. PublicMenu renders that group as "More".
  */
-export async function getPublicMenu(businessId: string): Promise<PublicCategory[]> {
+export async function getPublicMenu(businessId: string): Promise<PublicMenuGroup[]> {
   const supabase = await createClient();
 
   const { data: categories } = await supabase
@@ -182,12 +197,21 @@ export async function getPublicMenu(businessId: string): Promise<PublicCategory[
     else productsByCategory.set(product.category_id, [publicProduct]);
   }
 
-  return (categories ?? []).map((category) => ({
-    id: category.id,
-    name: category.name,
-    description: category.description,
+  const groups: PublicMenuGroup[] = (categories ?? []).map((category) => ({
+    category: {
+      id: category.id,
+      name: category.name,
+      description: category.description,
+    },
     products: productsByCategory.get(category.id) ?? [],
   }));
+
+  const uncategorized = productsByCategory.get(null) ?? [];
+  if (uncategorized.length > 0) {
+    groups.push({ category: null, products: uncategorized });
+  }
+
+  return groups;
 }
 
 function groupBy<Row, Item>(

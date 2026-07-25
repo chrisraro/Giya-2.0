@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { MenuManager } from "./menu-manager";
 import * as actions from "../actions";
-import type { ProductRow } from "../types";
+import type { MenuCategoryRow, ProductRow } from "../types";
 
 vi.mock("../actions", () => ({
   createProduct: vi.fn(),
@@ -116,5 +116,60 @@ describe("MenuManager create-product retry", () => {
     );
     expect(actions.addVariant).toHaveBeenCalledTimes(2);
     expect(actions.createProduct).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("MenuManager create-product category default", () => {
+  const drinksCategory: MenuCategoryRow = {
+    id: "cat-drinks",
+    business_id: business.id,
+    name: "Drinks",
+    description: null,
+    is_active: true,
+    sort: 0,
+    deleted_at: null,
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    created_by: null,
+    updated_by: null,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("defaults the product form's category to the currently-selected category tab", () => {
+    render(
+      <MenuManager
+        business={business}
+        categories={[drinksCategory]}
+        products={[]}
+        variantsByProduct={{}}
+        addonsByProduct={{}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Drinks" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add product" }));
+
+    const categorySelect = screen.getByLabelText("Category") as HTMLSelectElement;
+    expect(categorySelect.value).toBe("cat-drinks");
+  });
+
+  it("leaves the product form's category blank when 'All items' is selected", () => {
+    render(
+      <MenuManager
+        business={business}
+        categories={[drinksCategory]}
+        products={[]}
+        variantsByProduct={{}}
+        addonsByProduct={{}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Add product" }));
+
+    const categorySelect = screen.getByLabelText("Category") as HTMLSelectElement;
+    expect(categorySelect.value).toBe("");
   });
 });

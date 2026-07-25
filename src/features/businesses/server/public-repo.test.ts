@@ -183,9 +183,7 @@ describe("getPublicMenu", () => {
 
     expect(result).toEqual([
       {
-        id: "cat-1",
-        name: "Drinks",
-        description: null,
+        category: { id: "cat-1", name: "Drinks", description: null },
         products: [
           {
             id: "prod-1",
@@ -214,7 +212,9 @@ describe("getPublicMenu", () => {
 
     const result = await repo.getPublicMenu("biz-1");
 
-    expect(result).toEqual([{ id: "cat-1", name: "Drinks", description: null, products: [] }]);
+    expect(result).toEqual([
+      { category: { id: "cat-1", name: "Drinks", description: null }, products: [] },
+    ]);
     expect(table("product_variants").select).not.toHaveBeenCalled();
     expect(table("product_addons").select).not.toHaveBeenCalled();
   });
@@ -245,6 +245,119 @@ describe("getPublicMenu", () => {
 
     const result = await repo.getPublicMenu("biz-1");
 
-    expect(result.find((c) => c.id === "cat-2")?.products).toEqual([]);
+    expect(result.find((g) => g.category?.id === "cat-2")?.products).toEqual([]);
+  });
+
+  it("groups visible products with no category_id into a trailing group with category: null", async () => {
+    table("menu_categories").__result = {
+      data: [{ id: "cat-1", name: "Drinks", description: null }],
+      error: null,
+    };
+    table("products").__result = {
+      data: [
+        {
+          id: "prod-1",
+          name: "Iced Latte",
+          description: null,
+          base_price_centavos: 12000,
+          status: "active",
+          category_id: "cat-1",
+        },
+        {
+          id: "prod-2",
+          name: "Loose Chips",
+          description: null,
+          base_price_centavos: 5000,
+          status: "active",
+          category_id: null,
+        },
+      ],
+      error: null,
+    };
+    table("product_variants").__result = { data: [], error: null };
+    table("product_addons").__result = { data: [], error: null };
+
+    const result = await repo.getPublicMenu("biz-1");
+
+    expect(result).toHaveLength(2);
+    expect(result[0]?.category?.id).toBe("cat-1");
+    expect(result[1]).toEqual({
+      category: null,
+      products: [
+        {
+          id: "prod-2",
+          name: "Loose Chips",
+          description: null,
+          basePriceCentavos: 5000,
+          status: "active",
+          variants: [],
+          addons: [],
+        },
+      ],
+    });
+  });
+
+  it("omits the uncategorized group entirely when every visible product has a category", async () => {
+    table("menu_categories").__result = {
+      data: [{ id: "cat-1", name: "Drinks", description: null }],
+      error: null,
+    };
+    table("products").__result = {
+      data: [
+        {
+          id: "prod-1",
+          name: "Iced Latte",
+          description: null,
+          base_price_centavos: 12000,
+          status: "active",
+          category_id: "cat-1",
+        },
+      ],
+      error: null,
+    };
+    table("product_variants").__result = { data: [], error: null };
+    table("product_addons").__result = { data: [], error: null };
+
+    const result = await repo.getPublicMenu("biz-1");
+
+    expect(result.some((g) => g.category === null)).toBe(false);
+  });
+
+  it("returns only the uncategorized group when there are no active categories at all", async () => {
+    table("menu_categories").__result = { data: [], error: null };
+    table("products").__result = {
+      data: [
+        {
+          id: "prod-1",
+          name: "Loose Chips",
+          description: null,
+          base_price_centavos: 5000,
+          status: "active",
+          category_id: null,
+        },
+      ],
+      error: null,
+    };
+    table("product_variants").__result = { data: [], error: null };
+    table("product_addons").__result = { data: [], error: null };
+
+    const result = await repo.getPublicMenu("biz-1");
+
+    expect(result).toEqual([
+      {
+        category: null,
+        products: [
+          {
+            id: "prod-1",
+            name: "Loose Chips",
+            description: null,
+            basePriceCentavos: 5000,
+            status: "active",
+            variants: [],
+            addons: [],
+          },
+        ],
+      },
+    ]);
   });
 });

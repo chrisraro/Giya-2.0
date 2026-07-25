@@ -2,10 +2,10 @@ import { EmptyState } from "@/components/consumer/empty-state";
 import { formatPeso } from "@/lib/money";
 import { cn } from "@/lib/utils";
 
-import type { PublicCategory, PublicProduct } from "@/features/businesses/server/public-repo";
+import type { PublicMenuGroup, PublicProduct } from "@/features/businesses/server/public-repo";
 
 export interface PublicMenuProps {
-  categories: PublicCategory[];
+  groups: PublicMenuGroup[];
 }
 
 /** True price-from label: the lowest of the base price and any variant
@@ -58,12 +58,14 @@ function ProductCard({ product }: { product: PublicProduct }) {
 }
 
 /** Renders a public business's live menu: categories in order, each with
- * its available products. Purely presentational - fed the already-shaped
- * tree from getPublicMenu(), no client-side fetching or interaction. */
-export function PublicMenu({ categories }: PublicMenuProps) {
-  const hasAnyProducts = categories.some((category) => category.products.length > 0);
+ * its available products, followed by a trailing "More" group for products
+ * with no category (only when it has any) - purely presentational, fed the
+ * already-shaped tree from getPublicMenu(), no client-side fetching or
+ * interaction. */
+export function PublicMenu({ groups }: PublicMenuProps) {
+  const hasAnyProducts = groups.some((group) => group.products.length > 0);
 
-  if (categories.length === 0 || !hasAnyProducts) {
+  if (groups.length === 0 || !hasAnyProducts) {
     return (
       <EmptyState
         icon="restaurant_menu"
@@ -75,15 +77,17 @@ export function PublicMenu({ categories }: PublicMenuProps) {
 
   return (
     <div className="flex flex-col gap-8">
-      {categories.map((category) =>
-        category.products.length > 0 ? (
-          <section key={category.id}>
-            <h2 className="text-title-l text-on-surface">{category.name}</h2>
-            {category.description ? (
-              <p className="mt-1 text-body-s text-on-surface-variant">{category.description}</p>
+      {groups.map((group) =>
+        group.products.length > 0 ? (
+          <section key={group.category?.id ?? "uncategorized"}>
+            <h2 className="text-title-l text-on-surface">{group.category?.name ?? "More"}</h2>
+            {group.category?.description ? (
+              <p className="mt-1 text-body-s text-on-surface-variant">
+                {group.category.description}
+              </p>
             ) : null}
             <ul className="mt-3 flex flex-col gap-3">
-              {category.products.map((product) => (
+              {group.products.map((product) => (
                 <ProductCard key={product.id} product={product} />
               ))}
             </ul>

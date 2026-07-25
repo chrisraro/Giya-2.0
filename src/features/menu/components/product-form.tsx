@@ -124,6 +124,16 @@ export interface ProductFormProps {
   product?: ProductRow;
   variants?: ProductVariantRow[];
   addons?: ProductAddonRow[];
+  /**
+   * Category to preselect when creating a brand-new product (ignored once
+   * `product` is set - an existing product's own category always wins).
+   * Lets the manager default to whatever category is currently selected in
+   * its own view, so a product added from within a category lands in it
+   * instead of coming out uncategorized. Leave unset to fall back to "No
+   * category" - uncategorized products are valid and now render under
+   * "More" on the public menu.
+   */
+  defaultCategoryId?: string;
   onSubmit: (values: ProductFormOutput) => void;
   onCancel: () => void;
   submitting?: boolean;
@@ -141,6 +151,7 @@ export function ProductForm({
   product,
   variants = [],
   addons = [],
+  defaultCategoryId,
   onSubmit,
   onCancel,
   submitting = false,
@@ -151,7 +162,7 @@ export function ProductForm({
       name: product?.name ?? "",
       description: product?.description ?? "",
       basePrice: product ? formatPeso(product.base_price_centavos, { symbol: false }) : "",
-      categoryId: product?.category_id ?? "",
+      categoryId: product?.category_id ?? defaultCategoryId ?? "",
       status: (product?.status as ProductStatus | undefined) ?? "active",
       images: ((product?.images as string[] | null) ?? []).map((url) => ({ url: String(url) })),
       variants: variants.map((v) => ({
@@ -165,8 +176,8 @@ export function ProductForm({
         priceDelta: formatPeso(a.price_delta_centavos, { symbol: false }),
       })),
     }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-derive when the product being edited changes
-    [product?.id],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-derive when the product being edited (or, for a fresh create, the default category) changes
+    [product?.id, defaultCategoryId],
   );
 
   const {
