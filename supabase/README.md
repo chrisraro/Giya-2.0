@@ -108,3 +108,42 @@ simulate end users. Via MCP, the file body can be run with `execute_sql`
 ## Manual dashboard steps (pending)
 
 - Enable leaked-password protection: Authentication -> Providers -> Email -> enable 'Leaked password protection' (advisor auth_leaked_password_protection; doc 15 requires it for production).
+
+## Migration ledger (files vs live)
+
+The committed files map 1:1 onto the live `supabase_migrations.schema_migrations`
+ledger. Live versions are timestamps; the files use readable ordinal prefixes:
+
+| file | live version | live name |
+|---|---|---|
+| 0000a_drop_legacy_licenses_payments.sql | 20260724180330 | drop_legacy_licenses_payments |
+| 0000b_drop_legacy_profiles_flags_feedback.sql | 20260724180338 | drop_legacy_profiles_flags_feedback |
+| 0001_foundations.sql | 20260724180457 | 0001_foundations |
+| 0002_identity.sql | 20260724180622 | 0002_identity |
+| 0003_auth_plumbing.sql | 20260724180740 | 0003_auth_plumbing |
+| 0004_business_staff_self_select.sql | 20260724190529 | 0004_business_staff_self_select |
+| 0005_businesses_staff_table_select.sql | 20260724191136 | 0005_businesses_staff_table_select |
+| 0006_fix_businesses_staff_table_select.sql | 20260724191228 | 0006_fix_businesses_staff_table_select |
+| 0007_catalog.sql | 20260725012057 | 0007_catalog |
+| 0008_catalog_composite_fks.sql | 20260725014424 | 0008_catalog_composite_fks |
+| 0009_fix_category_fk_set_null_column.sql | 20260725020639 | 0009_fix_category_fk_set_null_column |
+| 0010_catalog_table_staff_policies.sql | 20260725023446 | 0010_catalog_table_staff_policies |
+| 0011_identity_table_staff_policies.sql | 20260725024946 | 0011_identity_table_staff_policies |
+| 0011b_business_food_types_table_staff.sql | 20260725025010 | 0011b_business_food_types_table_staff |
+| 0012_campaigns.sql | 20260725035425 | 0012_campaigns |
+| 0013_reward_claim_rpcs.sql | 20260725055852 | 0013_reward_claim_rpcs |
+| 0014_realtime_reward_claims.sql | 20260725070033 | 0014_realtime_reward_claims |
+| 0015_campaign_budget_lock.sql | 20260725073038 | 0015_campaign_budget_lock |
+| 0016_claim_expiry_sweep.sql | (applied 2026-07-25) | 0016_claim_expiry_sweep |
+
+Notes:
+- `0000a`/`0000b` are historical one-time cleanups of an unrelated app that
+  already occupied this Supabase project. They are `if exists` no-ops on a
+  fresh database.
+- `0011b` is deliberately a no-op file: the policy conversion it applied live
+  is contained in the amended `0011` for fresh replays. It exists only to keep
+  the file set and the ledger aligned.
+- **Before adopting the Supabase CLI** (`supabase db push` / `migration list`),
+  rename these files to the timestamp form `<version>_<name>.sql` using the
+  table above, so the CLI recognises them as already applied. Skipping that
+  rename makes the CLI try to re-apply everything.
