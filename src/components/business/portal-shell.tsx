@@ -7,6 +7,7 @@ import { Topbar } from "@/components/business/topbar";
 
 const PAGE_TITLES: Record<string, string> = {
   "/business/dashboard": "Dashboard",
+  "/business/redeem": "Redeem",
   "/business/campaigns": "Campaigns",
   "/business/menu": "Menu",
   "/business/customers": "Customers",

@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
   { href: "/business/dashboard", label: "Dashboard", icon: "space_dashboard" },
+  { href: "/business/redeem", label: "Redeem", icon: "qr_code_scanner" },
   { href: "/business/campaigns", label: "Campaigns", icon: "campaign" },
   { href: "/business/menu", label: "Menu", icon: "restaurant_menu" },
   { href: "/business/customers", label: "Customers", icon: "group" },
