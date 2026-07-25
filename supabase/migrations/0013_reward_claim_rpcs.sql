@@ -1,11 +1,15 @@
 -- ============================================================================
 -- 0013_reward_claim_rpcs.sql
--- Atomic reward claim + counter validation RPCs. With the insert revoke at the
--- bottom of this file, these SECURITY DEFINER functions become the ONLY client
--- write path into the points_transactions ledger.
+-- Atomic reward claim + counter validation RPCs. With the ledger insert revoke
+-- and the balance-cache column fence at the bottom of this file, these
+-- SECURITY DEFINER functions become the ONLY client write path into the
+-- points_transactions ledger and its derived balance caches.
 -- Source docs:
 --   * docs/30-modules/35-points-engine.md section 6 (claim steps 1-6,
 --     redeem-at-counter guards, worked example 970 -> claim 500 -> 470)
+--   * docs/30-modules/34-campaign-engine.md section 5 (budget enforcement:
+--     campaign-scoped per_customer_limit, max_redemptions) and section 12
+--     (CAMPAIGN_LIMIT_REACHED / CAMPAIGN_BUDGET_EXHAUSTED error registry)
 --   * docs/20-data/23-schema-campaigns.md (integrity table: stock never
 --     oversold, one redemption per claim, balance never negative)
 --   * docs/00-product/01-personas-roles.md permission matrix ("Validate
@@ -31,19 +35,21 @@ security definer
 set search_path = ''
 as $$
 declare
-  v_uid               uuid := auth.uid();
-  v_business_id       uuid;
-  v_campaign_id       uuid;
-  v_points_cost       integer;
-  v_reward_limit      integer;
-  v_campaign_limit    integer;   -- campaigns.budget->>'per_customer_limit', when present
-  v_effective_limit   integer;
-  v_claim_expiry_days integer;
-  v_prev_balance      integer;
-  v_segment           text;
-  v_claim_count       integer;
-  v_claim_id          uuid;
-  v_txn_id            uuid;
+  v_uid                  uuid := auth.uid();
+  v_business_id          uuid;
+  v_campaign_id          uuid;
+  v_points_cost          integer;
+  v_reward_limit         integer;
+  v_campaign_limit       integer;   -- campaigns.budget->>'per_customer_limit', when present
+  v_max_redemptions      integer;   -- campaigns.budget->>'max_redemptions', when present
+  v_claim_expiry_days    integer;
+  v_prev_balance         integer;
+  v_segment              text;
+  v_claim_count          integer;   -- this consumer's claims of THIS reward
+  v_campaign_claim_count integer;   -- this consumer's claims across the campaign
+  v_campaign_redemptions integer;   -- everyone's claims across the campaign
+  v_claim_id             uuid;
+  v_txn_id               uuid;
 begin
   if v_uid is null then
     raise exception using errcode = '42501', message = 'UNAUTHENTICATED';
@@ -54,9 +60,10 @@ begin
   -- any miss is indistinguishable to the consumer, hence one message.
   select r.business_id, r.campaign_id, r.points_cost, r.per_customer_limit,
          r.claim_expiry_days,
-         nullif(c.budget->>'per_customer_limit', '')::integer
+         nullif(c.budget->>'per_customer_limit', '')::integer,
+         nullif(c.budget->>'max_redemptions', '')::integer
     into v_business_id, v_campaign_id, v_points_cost, v_reward_limit,
-         v_claim_expiry_days, v_campaign_limit
+         v_claim_expiry_days, v_campaign_limit, v_max_redemptions
     from public.rewards r
     join public.campaigns c on c.id = r.campaign_id
    where r.id = p_reward_id
@@ -83,24 +90,61 @@ begin
    where bc.business_id = v_business_id
      and bc.consumer_id = v_uid
      for update;
+  -- Defence in depth: the insert above guarantees the row, but a null balance
+  -- must never be able to reach the balance_after arithmetic below.
+  if not found then
+    raise exception using errcode = 'P0001', message = 'CUSTOMER_RECORD_MISSING';
+  end if;
 
   -- s6 step 1 guard: blacklisted consumers cannot claim
   if v_segment = 'blacklisted' then
     raise exception using errcode = 'P0001', message = 'CUSTOMER_BLACKLISTED';
   end if;
 
-  -- s6 step 1 guard: per-customer limits. The reward's own per_customer_limit
-  -- and the campaign's budget.per_customer_limit (when present): stricter wins.
+  -- s6 step 1 guard: the reward's own per_customer_limit is REWARD-scoped:
+  -- it counts this consumer's non-cancelled claims of this one reward.
   -- Cancelled claims released their slot; every other status counts.
-  v_effective_limit := least(v_reward_limit, coalesce(v_campaign_limit, v_reward_limit));
   select count(*)::integer
     into v_claim_count
     from public.reward_claims rc
    where rc.reward_id = p_reward_id
      and rc.consumer_id = v_uid
      and rc.status <> 'cancelled';
-  if v_claim_count >= v_effective_limit then
+  if v_claim_count >= v_reward_limit then
     raise exception using errcode = 'P0001', message = 'REWARD_LIMIT_REACHED';
+  end if;
+
+  -- s6 step 1 guard (doc 34 s5): campaigns.budget->>'per_customer_limit' is
+  -- CAMPAIGN-scoped: it counts this consumer's non-cancelled claims across
+  -- ALL of the campaign's rewards, not just p_reward_id. Doc 34 s12 registers
+  -- CAMPAIGN_LIMIT_REACHED for this cap (422, this consumer only).
+  if v_campaign_limit is not null then
+    select count(*)::integer
+      into v_campaign_claim_count
+      from public.reward_claims rc
+      join public.rewards cr on cr.id = rc.reward_id
+     where cr.campaign_id = v_campaign_id
+       and rc.consumer_id = v_uid
+       and rc.status <> 'cancelled';
+    if v_campaign_claim_count >= v_campaign_limit then
+      raise exception using errcode = 'P0001', message = 'CAMPAIGN_LIMIT_REACHED';
+    end if;
+  end if;
+
+  -- Doc 34 s5 + doc 35 s6 step 1: campaigns.budget->>'max_redemptions' caps
+  -- non-cancelled claims across the WHOLE campaign (all rewards, all
+  -- consumers). Checked here, inside the same transaction as the conditional
+  -- inventory decrement below, so the cap cannot be raced past.
+  if v_max_redemptions is not null then
+    select count(*)::integer
+      into v_campaign_redemptions
+      from public.reward_claims rc
+      join public.rewards cr on cr.id = rc.reward_id
+     where cr.campaign_id = v_campaign_id
+       and rc.status <> 'cancelled';
+    if v_campaign_redemptions >= v_max_redemptions then
+      raise exception using errcode = 'P0001', message = 'CAMPAIGN_BUDGET_EXHAUSTED';
+    end if;
   end if;
 
   -- s6 step 2: conditional inventory decrement (doc 23 integrity: stock never
@@ -108,7 +152,7 @@ begin
   -- clause still matches and null - 1 stays null, so unlimited never blocks
   -- and never starts counting down.
   update public.rewards
-     set remaining = remaining - 1
+     set remaining = remaining - 1, updated_by = v_uid
    where id = p_reward_id
      and (remaining is null or remaining > 0);
   if not found then
@@ -191,6 +235,16 @@ begin
     raise exception using errcode = '42501', message = 'UNAUTHENTICATED';
   end if;
 
+  -- Input guards. A null/blank jti would silently defeat replay protection:
+  -- redemptions.token_jti is a nullable unique column and unique constraints
+  -- permit unlimited nulls, so every null-jti replay would insert cleanly.
+  if nullif(trim(coalesce(p_token_jti, '')), '') is null then
+    raise exception using errcode = 'P0001', message = 'REDEMPTION_TOKEN_INVALID';
+  end if;
+  if p_method not in ('qr', 'manual_code') then
+    raise exception using errcode = 'P0001', message = 'REDEMPTION_METHOD_INVALID';
+  end if;
+
   -- Load claim + reward; lock the claim row so concurrent validations of the
   -- same claim serialize (the unique constraint below is the backstop).
   select rc.business_id, rc.consumer_id, rc.status, rc.expires_at, r.name
@@ -200,9 +254,9 @@ begin
    where rc.id = p_claim_id
      for update of rc;
   if not found then
-    -- unknown claim id: same message as any non-claimable state, so probing
-    -- random ids leaks nothing
-    raise exception using errcode = 'P0001', message = 'CLAIM_INVALID_STATE';
+    -- unknown claim id: same message as the authz failure below, so probing
+    -- random ids is not an existence oracle for other tenants' claims
+    raise exception using errcode = 'P0001', message = 'FORBIDDEN';
   end if;
 
   -- staff authz: matrix "Validate redemption (QR)" = owner, manager, staff
@@ -270,3 +324,18 @@ grant execute on function public.validate_redemption(uuid, text, text) to authen
 -- service-role jobs such as the award pipeline and expiry sweeps) are now the
 -- only write path into the ledger.
 revoke insert on public.points_transactions from anon, authenticated;
+
+-- ---------------------------------------------------------------- balance cache fence
+-- points_balance, lifetime_points, lifetime_spend_centavos and visit_count on
+-- business_customers are ledger-derived caches: only the SECURITY DEFINER RPCs
+-- (running as the definer, unaffected by these grants) and service-role jobs
+-- may write them. Without this fence an owner/manager could UPDATE
+-- points_balance directly through the 0002 staff policy and the default table
+-- grant, minting a balance with no ledger row behind it.
+-- Postgres note: revoking a column privilege is a no-op while a table-level
+-- UPDATE grant remains, so revoke the table-level privilege and grant back
+-- exactly the staff-editable columns: segment and notes per the permission
+-- matrix (doc 01), plus updated_by so those writes can stamp the actor.
+-- RLS (0002) still scopes WHICH rows staff may update.
+revoke update on public.business_customers from anon, authenticated;
+grant update (segment, notes, updated_by) on public.business_customers to authenticated;
