@@ -3,7 +3,33 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-const VISIBLE_STATUSES = new Set(["draft", "pending_verification"]);
+/**
+ * What the banner is allowed to claim, per status.
+ *
+ * `draft` used to render "Your documents are under review", which was false on
+ * both halves. `register_business` (0003_auth_plumbing.sql) creates every
+ * business as `draft`, nothing in this codebase moves it off `draft`, and the
+ * only document affordance that exists is the onboarding wizard's step 3,
+ * which holds the picked files in React state and uploads nothing (see the
+ * `TODO(api): replace mock` in src/app/(business)/business/onboarding/page.tsx).
+ * `business_documents` and `business_verifications` are both empty in
+ * consequence. So a merchant reading that banner was told their submission was
+ * being processed when they had never made one and no reviewer existed.
+ *
+ * The fix is copy, not a KYC pipeline: `draft` now says what is actually true,
+ * which is that verification has not started and nothing has been submitted.
+ *
+ * `pending_verification` keeps the review copy, and it stays honest, because
+ * per docs/30-modules/32-business-portal.md section 2.2 that status is only
+ * reachable from the verification submission that writes the
+ * `business_verifications` row and links the uploaded `business_documents`.
+ * When that flow ships, this branch is already correct and needs no edit.
+ */
+const MESSAGES: Record<string, string> = {
+  draft:
+    "Your business is not verified yet. Document submission is not open in this release, so nothing has been submitted and nothing is under review. Set up your store and draft your campaigns in the meantime.",
+  pending_verification: "Your documents are under review. You can explore while you wait.",
+};
 
 /**
  * Informational banner shown while a business's verification status is
@@ -21,7 +47,8 @@ export function VerificationBanner({
   className?: string;
 }) {
   const [dismissed, setDismissed] = React.useState(false);
-  if (dismissed || !status || !VISIBLE_STATUSES.has(status)) return null;
+  const message = status ? MESSAGES[status] : undefined;
+  if (dismissed || !message) return null;
 
   return (
     <div
@@ -34,9 +61,7 @@ export function VerificationBanner({
       <span aria-hidden className="material-symbols-rounded shrink-0 text-[20px]">
         info
       </span>
-      <p className="flex-1 text-body-m">
-        Your documents are under review. You can explore while you wait.
-      </p>
+      <p className="flex-1 text-body-m">{message}</p>
       <button
         type="button"
         aria-label="Dismiss"
