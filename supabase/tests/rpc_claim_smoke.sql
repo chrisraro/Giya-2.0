@@ -42,22 +42,24 @@ values
   ('a6666666-6666-4666-8666-666666666666', 'authenticated', 'authenticated',
    'giya-claims-staff@example.com', '{"full_name": "Counter Staff"}'::jsonb);
 
--- owner1 registers tenant 1
+-- owner1 registers tenant 1; the returned business id is captured directly
+-- from the RPC call (register_business returns the new business uuid per
+-- 0003_auth_plumbing.sql), so tenant 1 never has to be looked up by name
 select set_config('request.jwt.claims',
   '{"sub": "a1111111-1111-4111-8111-111111111111", "role": "authenticated"}', true);
 set local role authenticated;
-select public.register_business('Claim Cafe', 'cafe', 'cebu', '1 Redemption Road');
+select set_config('test.biz1',
+  (select public.register_business('Claim Cafe', 'cafe', 'cebu', '1 Redemption Road')::text),
+  true);
 reset role;
 
--- owner2 registers tenant 2 (owner2 is the non-staff probe for tenant 1)
+-- owner2 registers tenant 2 (owner2 is the non-staff probe for tenant 1); its
+-- business id is never referenced again so nothing needs to be captured
 select set_config('request.jwt.claims',
   '{"sub": "a2222222-2222-4222-8222-222222222222", "role": "authenticated"}', true);
 set local role authenticated;
 select public.register_business('Claim Rival', 'restaurant', 'manila', '2 Other Ave');
 reset role;
-
-select set_config('test.biz1',
-  (select id::text from public.businesses where name = 'Claim Cafe'), true);
 
 -- role-matrix members of tenant 1 (privileged fixture: staff writes are
 -- service-role only until the staff module ships)
@@ -68,88 +70,99 @@ values
   (current_setting('test.biz1')::uuid,
    'a6666666-6666-4666-8666-666666666666', 'staff', 'active');
 
--- reward campaign + catalog, seeded as the privileged role
-insert into public.campaigns (business_id, type, status, name)
-values (current_setting('test.biz1')::uuid, 'reward', 'active', 'Reward Season');
-select set_config('test.camp1',
-  (select id::text from public.campaigns where name = 'Reward Season'), true);
+-- reward campaign + catalog, seeded as the privileged role. Each campaign id
+-- is captured off its own "returning id" CTE rather than re-selected by name
+-- against the whole campaigns table, so a live campaign that happens to
+-- share the name can never be picked up instead of the fixture's own row.
+with ins as (
+  insert into public.campaigns (business_id, type, status, name)
+  values (current_setting('test.biz1')::uuid, 'reward', 'active', 'Reward Season')
+  returning id
+)
+select set_config('test.camp1', (select id::text from ins), true);
 
 -- second campaign whose budget caps per-customer claims across ALL its rewards
-insert into public.campaigns (business_id, type, status, name, budget)
-values (current_setting('test.biz1')::uuid, 'reward', 'active', 'Budget Capped',
-        '{"per_customer_limit": 1}'::jsonb);
-select set_config('test.camp2',
-  (select id::text from public.campaigns where name = 'Budget Capped'), true);
+with ins as (
+  insert into public.campaigns (business_id, type, status, name, budget)
+  values (current_setting('test.biz1')::uuid, 'reward', 'active', 'Budget Capped',
+          '{"per_customer_limit": 1}'::jsonb)
+  returning id
+)
+select set_config('test.camp2', (select id::text from ins), true);
 
 -- third campaign whose budget allows exactly one redemption campaign-wide
-insert into public.campaigns (business_id, type, status, name, budget)
-values (current_setting('test.biz1')::uuid, 'reward', 'active', 'Budget Spent',
-        '{"max_redemptions": 1}'::jsonb);
-select set_config('test.camp3',
-  (select id::text from public.campaigns where name = 'Budget Spent'), true);
+with ins as (
+  insert into public.campaigns (business_id, type, status, name, budget)
+  values (current_setting('test.biz1')::uuid, 'reward', 'active', 'Budget Spent',
+          '{"max_redemptions": 1}'::jsonb)
+  returning id
+)
+select set_config('test.camp3', (select id::text from ins), true);
 
 -- campaign-liveness probes: a paused campaign and one whose window has ended
-insert into public.campaigns (business_id, type, status, name)
-values (current_setting('test.biz1')::uuid, 'reward', 'paused', 'Paused Promo');
-select set_config('test.camp4',
-  (select id::text from public.campaigns where name = 'Paused Promo'), true);
+with ins as (
+  insert into public.campaigns (business_id, type, status, name)
+  values (current_setting('test.biz1')::uuid, 'reward', 'paused', 'Paused Promo')
+  returning id
+)
+select set_config('test.camp4', (select id::text from ins), true);
 
-insert into public.campaigns (business_id, type, status, name, starts_at, ends_at)
-values (current_setting('test.biz1')::uuid, 'reward', 'active', 'Ended Promo',
-        now() - interval '2 days', now() - interval '1 day');
-select set_config('test.camp5',
-  (select id::text from public.campaigns where name = 'Ended Promo'), true);
+with ins as (
+  insert into public.campaigns (business_id, type, status, name, starts_at, ends_at)
+  values (current_setting('test.biz1')::uuid, 'reward', 'active', 'Ended Promo',
+          now() - interval '2 days', now() - interval '1 day')
+  returning id
+)
+select set_config('test.camp5', (select id::text from ins), true);
 
-insert into public.rewards
-  (business_id, campaign_id, name, points_cost, total_inventory, remaining,
-   per_customer_limit, claim_expiry_days)
-values
-  -- doc 35 s6 worked example: cost 500, remaining 50 -> 49, expiry 30 days
-  (current_setting('test.biz1')::uuid, current_setting('test.camp1')::uuid,
-   'Free Milk Tea', 500, 50, 50, 1, 30),
-  -- unaffordable at balance 470 after the first claim; finite stock so the
-  -- rollback-on-failure assertion has a number to check
-  (current_setting('test.biz1')::uuid, current_setting('test.camp1')::uuid,
-   'Golden Feast', 5000, 10, 10, 5, 30),
-  -- sold out
-  (current_setting('test.biz1')::uuid, current_setting('test.camp1')::uuid,
-   'Sold Out Sticker', 100, 5, 0, 1, 30),
-  -- free claim, unlimited inventory (remaining null)
-  (current_setting('test.biz1')::uuid, current_setting('test.camp1')::uuid,
-   'Free Sticker', 0, null, null, 2, 30),
-  -- camp2 pair: generous per-reward limits, but the campaign budget caps the
-  -- consumer at ONE claim across BOTH rewards
-  (current_setting('test.biz1')::uuid, current_setting('test.camp2')::uuid,
-   'Capped Cookie', 0, null, null, 3, 30),
-  (current_setting('test.biz1')::uuid, current_setting('test.camp2')::uuid,
-   'Capped Brownie', 0, null, null, 3, 30),
-  -- camp3: per-reward limit is loose; budget.max_redemptions = 1 is the cap
-  (current_setting('test.biz1')::uuid, current_setting('test.camp3')::uuid,
-   'Scarce Prize', 0, null, null, 5, 30),
-  -- liveness probes
-  (current_setting('test.biz1')::uuid, current_setting('test.camp4')::uuid,
-   'Paused Perk', 0, null, null, 1, 30),
-  (current_setting('test.biz1')::uuid, current_setting('test.camp5')::uuid,
-   'Late Latte', 0, null, null, 1, 30);
-
-select set_config('test.r_main',
-  (select id::text from public.rewards where name = 'Free Milk Tea'), true);
-select set_config('test.r_pricey',
-  (select id::text from public.rewards where name = 'Golden Feast'), true);
-select set_config('test.r_oos',
-  (select id::text from public.rewards where name = 'Sold Out Sticker'), true);
-select set_config('test.r_free',
-  (select id::text from public.rewards where name = 'Free Sticker'), true);
-select set_config('test.r_capped_a',
-  (select id::text from public.rewards where name = 'Capped Cookie'), true);
-select set_config('test.r_capped_b',
-  (select id::text from public.rewards where name = 'Capped Brownie'), true);
-select set_config('test.r_budget',
-  (select id::text from public.rewards where name = 'Scarce Prize'), true);
-select set_config('test.r_paused',
-  (select id::text from public.rewards where name = 'Paused Perk'), true);
-select set_config('test.r_ended',
-  (select id::text from public.rewards where name = 'Late Latte'), true);
+-- reward catalog: one insert, one returning-scoped CTE. Every set_config
+-- below matches by name against "ins" only, i.e. against the handful of rows
+-- this very statement just inserted, so a live reward that happens to share
+-- a name (e.g. a real "Free Milk Tea") can never collide with the fixture.
+with ins as (
+  insert into public.rewards
+    (business_id, campaign_id, name, points_cost, total_inventory, remaining,
+     per_customer_limit, claim_expiry_days)
+  values
+    -- doc 35 s6 worked example: cost 500, remaining 50 -> 49, expiry 30 days
+    (current_setting('test.biz1')::uuid, current_setting('test.camp1')::uuid,
+     'Free Milk Tea', 500, 50, 50, 1, 30),
+    -- unaffordable at balance 470 after the first claim; finite stock so the
+    -- rollback-on-failure assertion has a number to check
+    (current_setting('test.biz1')::uuid, current_setting('test.camp1')::uuid,
+     'Golden Feast', 5000, 10, 10, 5, 30),
+    -- sold out
+    (current_setting('test.biz1')::uuid, current_setting('test.camp1')::uuid,
+     'Sold Out Sticker', 100, 5, 0, 1, 30),
+    -- free claim, unlimited inventory (remaining null)
+    (current_setting('test.biz1')::uuid, current_setting('test.camp1')::uuid,
+     'Free Sticker', 0, null, null, 2, 30),
+    -- camp2 pair: generous per-reward limits, but the campaign budget caps the
+    -- consumer at ONE claim across BOTH rewards
+    (current_setting('test.biz1')::uuid, current_setting('test.camp2')::uuid,
+     'Capped Cookie', 0, null, null, 3, 30),
+    (current_setting('test.biz1')::uuid, current_setting('test.camp2')::uuid,
+     'Capped Brownie', 0, null, null, 3, 30),
+    -- camp3: per-reward limit is loose; budget.max_redemptions = 1 is the cap
+    (current_setting('test.biz1')::uuid, current_setting('test.camp3')::uuid,
+     'Scarce Prize', 0, null, null, 5, 30),
+    -- liveness probes
+    (current_setting('test.biz1')::uuid, current_setting('test.camp4')::uuid,
+     'Paused Perk', 0, null, null, 1, 30),
+    (current_setting('test.biz1')::uuid, current_setting('test.camp5')::uuid,
+     'Late Latte', 0, null, null, 1, 30)
+  returning id, name
+)
+select
+  set_config('test.r_main', (select id::text from ins where name = 'Free Milk Tea'), true),
+  set_config('test.r_pricey', (select id::text from ins where name = 'Golden Feast'), true),
+  set_config('test.r_oos', (select id::text from ins where name = 'Sold Out Sticker'), true),
+  set_config('test.r_free', (select id::text from ins where name = 'Free Sticker'), true),
+  set_config('test.r_capped_a', (select id::text from ins where name = 'Capped Cookie'), true),
+  set_config('test.r_capped_b', (select id::text from ins where name = 'Capped Brownie'), true),
+  set_config('test.r_budget', (select id::text from ins where name = 'Scarce Prize'), true),
+  set_config('test.r_paused', (select id::text from ins where name = 'Paused Perk'), true),
+  set_config('test.r_ended', (select id::text from ins where name = 'Late Latte'), true);
 
 -- consumer starting balance 970 (privileged fixture: earn row + balance cache)
 insert into public.points_transactions (business_id, consumer_id, type, points, balance_after)
@@ -164,16 +177,17 @@ insert into public.business_customers (business_id, consumer_id, segment, points
 values (current_setting('test.biz1')::uuid,
         'a4444444-4444-4444-8444-444444444444', 'blacklisted', 1000);
 
--- already-expired claim (privileged fixture) for the CLAIM_EXPIRED guard
-insert into public.reward_claims
-  (business_id, reward_id, consumer_id, status, points_spent, expires_at)
-values
-  (current_setting('test.biz1')::uuid, current_setting('test.r_pricey')::uuid,
-   'a3333333-3333-4333-8333-333333333333', 'claimed', 0, now() - interval '1 day');
-select set_config('test.claim_exp',
-  (select id::text from public.reward_claims
-    where reward_id = current_setting('test.r_pricey')::uuid
-      and consumer_id = 'a3333333-3333-4333-8333-333333333333'), true);
+-- already-expired claim (privileged fixture) for the CLAIM_EXPIRED guard; id
+-- captured straight off its own returning CTE
+with ins as (
+  insert into public.reward_claims
+    (business_id, reward_id, consumer_id, status, points_spent, expires_at)
+  values
+    (current_setting('test.biz1')::uuid, current_setting('test.r_pricey')::uuid,
+     'a3333333-3333-4333-8333-333333333333', 'claimed', 0, now() - interval '1 day')
+  returning id
+)
+select set_config('test.claim_exp', (select id::text from ins), true);
 
 -- ---------------------------------------------------------------- happy path claim
 select set_config('request.jwt.claims',
