@@ -90,6 +90,54 @@ simulate end users. Via MCP, the file body can be run with `execute_sql`
 - Deviations from the schema docs are marked with `-- amendment:` comments.
 - Seeds are idempotent (`on conflict do nothing`) keyed on stable natural keys.
 
+## Storage buckets
+
+Buckets are created from migrations, not the dashboard, so the bucket settings
+and their `storage.objects` policies live in the same reviewable file.
+
+### `receipts` (0019_receipts_storage.sql)
+
+| property | value |
+|---|---|
+| `public` | `false` |
+| `file_size_limit` | `10485760` (10MB, the hard cap in `docs/10-architecture/15-security.md`) |
+| `allowed_mime_types` | `image/jpeg`, `image/png`, `image/webp` |
+| path convention | `receipts/{user_id}/{uuid}.jpg` (`docs/30-modules/36-receipt-ocr-pipeline.md` Stage 1) |
+
+The object `name` inside the bucket is `{user_id}/{uuid}.jpg`, so the first path
+segment is the owning consumer's auth uid. Both policies fence on exactly that,
+via `(storage.foldername(name))[1] = (select auth.uid())::text`:
+
+- `receipts_objects_consumer_insert` (INSERT, `authenticated`) - a consumer may
+  only write under their own uid prefix, and only one level deep.
+- `receipts_objects_consumer_select` (SELECT, `authenticated`) - a consumer may
+  only read their own objects.
+
+**Private, not public.** Receipt images carry merchant, date, line items and
+total. Doc 15 lists `receipts` among the private buckets; access is via signed
+URLs with a 5 minute TTL, generated server-side. The OCR pipeline and the
+business/admin review UI read through the service role, which bypasses RLS -
+there is deliberately no staff policy on `storage.objects`, so staff have no
+direct-client path to receipt images at all.
+
+**No UPDATE policy and no DELETE policy, deliberately.** Receipt images are
+evidence. An UPDATE policy would let a consumer swap the bytes out from under a
+receipt row whose `sha256` and pHash were computed from the original, leaving an
+approved and awarded receipt pointing at different pixels than the ones the
+duplicate and fraud checks saw. A DELETE policy would let a consumer destroy the
+image behind an approved award, or behind a fraud rejection whose
+`fraud_signals` rows feed doc 37's cooldown ladder, while the `receipts` row
+itself cannot be deleted (the `receipts_no_delete` trigger in 0017). The one
+legitimate mutation, the sharp canonicalization overwrite that strips EXIF/GPS
+at ingest, runs with the service role and needs no policy. Storage adds a
+`protect_delete` trigger of its own, so a direct SQL `DELETE` against
+`storage.objects` fails for every role regardless.
+
+Note that `file_size_limit` and `allowed_mime_types` are enforced by the Storage
+API, not by Postgres. The submit path re-checks the 10MB cap and magic-byte
+sniffs the content type server-side; the bucket settings are a second fence, not
+the only one.
+
 ## Known limitations (tracked)
 
 - `private.jwt_biz_role()` keeps doc 12's table-lookup fallback for `biz_overflow` users (>20 memberships). Under RLS this recurses (policy -> helper -> same table) and Postgres aborts the query for those users. [SCALE]-only surface; fixing requires a security definer lookup variant and an ADR against the Locked doc 12. Do not ship overflow accounts before that ADR.
@@ -134,6 +182,9 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0014_realtime_reward_claims.sql | 20260725070033 | 0014_realtime_reward_claims |
 | 0015_campaign_budget_lock.sql | 20260725073038 | 0015_campaign_budget_lock |
 | 0016_claim_expiry_sweep.sql | (applied 2026-07-25) | 0016_claim_expiry_sweep |
+| 0017_receipts.sql | 20260725111658 | 0017_receipts |
+| 0018_award_receipt_points.sql | 20260725114121 | 0018_award_receipt_points |
+| 0019_receipts_storage.sql | 20260725113309 | 0019_receipts_storage |
 
 Notes:
 - `0000a`/`0000b` are historical one-time cleanups of an unrelated app that
@@ -142,6 +193,16 @@ Notes:
 - `0011b` is deliberately a no-op file: the policy conversion it applied live
   is contained in the amended `0011` for fresh replays. It exists only to keep
   the file set and the ledger aligned.
+- **0018 and 0019 are inverted in the live ledger.** 0019 was applied at
+  `20260725113309` and 0018 at `20260725114121`, because the two were authored
+  in parallel and the storage migration finished first. They are independent
+  (0019 creates a storage bucket and its policies; 0018 creates an RPC over
+  tables that 0017 already created), so neither ordering changes the result and
+  nothing needs re-applying. It matters only for the rename below: renaming to
+  timestamp form makes 0019 sort BEFORE 0018, which is correct for the CLI and
+  deliberately disagrees with the ordinal prefixes. Do not "fix" the ordinals
+  to match; the ordinals record authoring order and the timestamps record
+  application order.
 - **Before adopting the Supabase CLI** (`supabase db push` / `migration list`),
   rename these files to the timestamp form `<version>_<name>.sql` using the
   table above, so the CLI recognises them as already applied. Skipping that
