@@ -28,6 +28,13 @@ export type PublicBusiness = {
  */
 export type BusinessSummary = {
   id: string;
+  /**
+   * The public slug, so a picker row can link to `/b/[slug]` as well as to the
+   * id-keyed `/scan?business={id}`. Selected here rather than looked up again
+   * by the caller: it is one more column on a read that already runs, and it is
+   * the same publicly readable column `/b/[slug]` resolves against.
+   */
+  slug: string;
   name: string;
   logoUrl: string | null;
   cityName: string | null;
@@ -166,7 +173,7 @@ export async function listActiveBusinesses(
 
   let select = supabase
     .from("businesses")
-    .select("id, name, logo_url, city_id, business_type_id")
+    .select("id, slug, name, logo_url, city_id, business_type_id")
     .eq("status", "active")
     .is("deleted_at", null)
     .order("name", { ascending: true })
@@ -193,6 +200,7 @@ export async function listActiveBusinesses(
 
   return data.map((business) => ({
     id: business.id,
+    slug: business.slug,
     name: business.name,
     logoUrl: business.logo_url,
     cityName: business.city_id ? (cityNames.get(business.city_id) ?? null) : null,

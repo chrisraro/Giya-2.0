@@ -23,6 +23,19 @@ const PROVIDER_LABEL: Record<SocialProvider, string> = {
   facebook: "Facebook",
 };
 
+/**
+ * Copy for each `?error=` code /auth/callback can send this page.
+ *
+ * `confirm` covers a dead PKCE handshake: no `code` on the URL, or an
+ * exchange that Supabase rejected. `oauth` covers a provider that answered
+ * with an error instead, which is overwhelmingly someone tapping Cancel on a
+ * consent screen and should not be described as an expired link.
+ */
+const CALLBACK_NOTICE: Record<string, string> = {
+  confirm: "That link expired or was already used. Sign in or request a new one.",
+  oauth: "That sign-in was cancelled or the provider turned it down. Try again below.",
+};
+
 function LoginPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -35,9 +48,13 @@ function LoginPageInner() {
   const [submitting, setSubmitting] = React.useState(false);
   const [captchaToken, setCaptchaToken] = React.useState("");
   const captchaRef = React.useRef<HCaptcha>(null);
-  const [showExpiredNotice, setShowExpiredNotice] = React.useState(
-    searchParams.get("error") === "confirm",
-  );
+  // /auth/callback redirects here with a fixed error code (never the
+  // provider's own message, which is attacker-controllable text). This page
+  // owns the wording for each code; anything unrecognised shows no notice at
+  // all rather than echoing a query param back at the user.
+  const noticeCode = searchParams.get("error");
+  const notice = noticeCode === null ? null : CALLBACK_NOTICE[noticeCode] ?? null;
+  const [dismissedNotice, setDismissedNotice] = React.useState(false);
 
   const next = getSafeRedirect(searchParams.get("next"), "/home");
 
@@ -138,16 +155,16 @@ function LoginPageInner() {
         </>
       }
     >
-      {showExpiredNotice ? (
+      {notice && !dismissedNotice ? (
         <div
           role="alert"
           className="flex items-start justify-between gap-3 rounded-md3-md border border-outline-variant bg-surface-container p-3 text-body-s text-on-surface-variant"
         >
-          <p>That link expired or was already used. Sign in or request a new one.</p>
+          <p>{notice}</p>
           <button
             type="button"
             aria-label="Dismiss"
-            onClick={() => setShowExpiredNotice(false)}
+            onClick={() => setDismissedNotice(true)}
             className="shrink-0 text-on-surface-variant hover:text-on-surface"
           >
             <span aria-hidden className="material-symbols-rounded text-[18px]">

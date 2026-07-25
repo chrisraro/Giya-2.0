@@ -29,6 +29,23 @@ export function copySessionCookies(source: NextResponse, target: NextResponse): 
   return target;
 }
 
+// NOTE ON /design, WHICH IS DELIBERATELY NOT HANDLED HERE.
+//
+// `/design` is the internal MD3 swatch board, and it was publicly live in
+// production because this file's matcher only ever excluded `_next`,
+// `favicon` and `brand/`. The obvious fix was a branch in this function that
+// rewrote it away outside development, and that was tried and rejected: a
+// middleware rewrite to an unmatched path renders the app's 404 page but
+// answers HTTP 200 for `/design` itself (measured; child paths did answer
+// 404). A soft 404 is worse than the problem, because it is indexable.
+//
+// The gate lives in `src/app/design/page.tsx` instead, where `notFound()` is
+// the framework's own documented way to produce a real 404, and where the
+// build prerenders the answer rather than deciding it per request. A shared
+// `layout.tsx` guard was also tried and also leaked (a layout receives
+// `children` already resolved, so the page's tree still reached the RSC
+// payload inside the 404). See that page and `src/app/design/dev-only.ts`.
+
 // Exact-match-or-child-path check, e.g. isOnboardingRoute("/onboarding/1")
 // is true but isOnboardingRoute("/onboarding-other") is false.
 function isOnboardingRoute(pathname: string): boolean {
@@ -39,9 +56,62 @@ function isBusinessOnboardingRoute(pathname: string): boolean {
   return pathname === "/business/onboarding" || pathname.startsWith("/business/onboarding/");
 }
 
+/**
+ * Consumer routes that are meaningless without a session and must bounce to
+ * /login rather than render an empty or broken screen.
+ *
+ * WHY THESE SIX, AND WHY NOT THE OTHERS:
+ *
+ *   * `/home`     - the worst of the set. It rendered a greeting by name over a
+ *                   points total and a balance strip, so an anonymous visitor
+ *                   was shown something that reads as a personal account. It
+ *                   now reads real per-consumer data, which an anonymous
+ *                   caller has none of, and there is no honest signed-out
+ *                   version of "Magandang umaga, <name>".
+ *   * `/profile`  - by definition somebody's profile: their name, email, city
+ *                   and the sign-out control.
+ *   * `/wallet`   - RLS returns nothing to an anonymous caller, so a signed-out
+ *                   visitor got a fully rendered "Wallet / No balances yet"
+ *                   page that looks like an empty account rather than a
+ *                   signed-out one.
+ *   * `/rewards`  - the public reward catalogue renders, but every Claim button
+ *                   fails with "You need to be signed in to do that" only AFTER
+ *                   the tap. Better to ask up front.
+ *   * `/scan`     - the whole flow ends in a 401 at submit.
+ *   * `/receipts` - answered `notFound()` for a signed-out visitor, which is a
+ *                   correct status but the wrong recovery: "sign in" is the
+ *                   action, not "this page does not exist". Its own
+ *                   `notFound()` stays as belt and braces.
+ *
+ * NOT gated here:
+ *   * `/b/[slug]` - deliberately public. It is a business's shareable page and
+ *                   a link to it must work for someone with no account. It is
+ *                   also where /home's shop cards point, so gating it would
+ *                   break the one public route out of the consumer app.
+ *
+ * Middleware is the gate, but not the only one: /home and /profile also check
+ * for a session themselves and redirect, so the guarantee does not depend on
+ * this matcher staying correct.
+ */
+const AUTHENTICATED_CONSUMER_ROUTES = [
+  "/home",
+  "/profile",
+  "/wallet",
+  "/rewards",
+  "/scan",
+  "/receipts",
+] as const;
+
+export function isAuthenticatedConsumerRoute(pathname: string): boolean {
+  return AUTHENTICATED_CONSUMER_ROUTES.some(
+    (route) => pathname === route || pathname.startsWith(`${route}/`),
+  );
+}
+
 export async function middleware(request: NextRequest) {
-  const { response, user } = await updateSession(request);
   const { pathname } = request.nextUrl;
+
+  const { response, user } = await updateSession(request);
 
   const onOnboardingRoute = isOnboardingRoute(pathname) || isBusinessOnboardingRoute(pathname);
 
@@ -55,7 +125,10 @@ export async function middleware(request: NextRequest) {
   const isBusinessPortalRoute =
     pathname.startsWith("/business/") && !isBusinessOnboardingRoute(pathname);
 
-  if ((onOnboardingRoute || isBusinessPortalRoute) && !user) {
+  const needsSession =
+    onOnboardingRoute || isBusinessPortalRoute || isAuthenticatedConsumerRoute(pathname);
+
+  if (needsSession && !user) {
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("next", pathname);
     return copySessionCookies(response, NextResponse.redirect(loginUrl));

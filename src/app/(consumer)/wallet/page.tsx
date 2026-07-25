@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/consumer/empty-state";
 import {
@@ -6,6 +8,7 @@ import {
 } from "@/features/receipts/components/wallet-receipt-activity";
 import { listMyReceipts } from "@/features/receipts/server/repo";
 import { getMyBalances, listMyLedger } from "@/features/rewards/server/repo";
+import type { BalanceDTO } from "@/features/rewards/types";
 import { createClient } from "@/lib/supabase/server";
 import { cn } from "@/lib/utils";
 
@@ -23,6 +26,59 @@ const TRANSACTION_ICON: Record<string, string> = {
   reversal: "undo",
   referral_bonus: "diversity_3",
 };
+
+/**
+ * One "you have N points at this shop" row.
+ *
+ * These rows have always ended in a `chevron_right`, the universal promise
+ * that tapping goes somewhere, and they went nowhere: they were a plain
+ * `<Card>`. Meanwhile `/b/[slug]`, the public business page, had no consumer
+ * entry point at all. Those are the same bug from two directions, so the
+ * chevron now keeps its promise and points at the shop's page - the one
+ * screen that answers the question a balance raises, which is "what can I
+ * actually get here?".
+ *
+ * A row whose slug did not resolve (getMyBalances answers "" when the
+ * businesses read misses) renders as the non-interactive card it always was,
+ * chevron included. A link to `/b/` is a link to nowhere, and a dead chevron
+ * for one unlucky row is better than a 404 for it.
+ */
+function BalanceRow({ balance }: { balance: BalanceDTO }) {
+  const body = (
+    <>
+      <p className="min-w-0 flex-1 truncate text-title-m text-on-surface">{balance.businessName}</p>
+      <div className="flex shrink-0 items-center gap-2">
+        <p className="font-mono text-title-m text-on-surface">
+          {balance.pointsBalance.toLocaleString()} pts
+        </p>
+        <span aria-hidden className="material-symbols-rounded text-on-surface-variant">
+          chevron_right
+        </span>
+      </div>
+    </>
+  );
+
+  if (!balance.businessSlug) {
+    return (
+      <Card variant="outlined" className="flex items-center justify-between gap-3 p-4">
+        {body}
+      </Card>
+    );
+  }
+
+  return (
+    <Link
+      href={`/b/${balance.businessSlug}`}
+      className={cn(
+        "flex items-center justify-between gap-3 rounded-md3-md border border-outline-variant bg-surface p-4",
+        "transition-colors duration-200 ease-standard hover:bg-surface-container",
+        "outline-none focus-visible:ring-2 focus-visible:ring-primary",
+      )}
+    >
+      {body}
+    </Link>
+  );
+}
 
 function formatTxnDate(iso: string): string {
   return new Intl.DateTimeFormat("en-US", {
@@ -70,25 +126,7 @@ export default async function WalletPage() {
             body="Earn points at a business to see your balance here."
           />
         ) : (
-          balances.map((balance) => (
-            <Card
-              key={balance.businessId}
-              variant="outlined"
-              className="flex items-center justify-between gap-3 p-4"
-            >
-              <p className="min-w-0 flex-1 truncate text-title-m text-on-surface">
-                {balance.businessName}
-              </p>
-              <div className="flex shrink-0 items-center gap-2">
-                <p className="font-mono text-title-m text-on-surface">
-                  {balance.pointsBalance.toLocaleString()} pts
-                </p>
-                <span aria-hidden className="material-symbols-rounded text-on-surface-variant">
-                  chevron_right
-                </span>
-              </div>
-            </Card>
-          ))
+          balances.map((balance) => <BalanceRow key={balance.businessId} balance={balance} />)
         )}
       </section>
 

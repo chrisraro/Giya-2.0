@@ -86,4 +86,23 @@ describe("RewardCard", () => {
 
     expect(screen.queryByText(/left/)).not.toBeInTheDocument();
   });
+
+  // `/b/[slug]` is a real, working public page that nothing in the consumer
+  // app linked to. "300 pts for a free latte" raises the question "where, and
+  // what else do they have?", and this is the answer.
+  it("links the business name to its public page", () => {
+    render(<RewardCard reward={baseReward()} />);
+
+    expect(screen.getByRole("link", { name: "Kape Diaria" })).toHaveAttribute(
+      "href",
+      "/b/kape-diaria",
+    );
+  });
+
+  it("stays plain text when the slug did not resolve, rather than linking to /b/", () => {
+    render(<RewardCard reward={baseReward({ businessSlug: "" })} />);
+
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.getByText("Kape Diaria")).toBeInTheDocument();
+  });
 });

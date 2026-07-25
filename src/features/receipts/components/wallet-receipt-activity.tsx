@@ -3,6 +3,8 @@
 import * as React from "react";
 import Link from "next/link";
 
+import { EmptyState } from "@/components/consumer/empty-state";
+
 import type { ReceiptListItemDTO } from "../types";
 import { fetchMyReceipts, fetchReceiptDetail } from "./receipt-api-client";
 import { isPendingStatus } from "./receipt-copy";
@@ -100,7 +102,18 @@ export function WalletReceiptActivity({ userId, initialReceipts }: WalletReceipt
     onPoll: refreshList,
   });
 
-  if (entries.length === 0) return null;
+  // This section used to `return null` at zero entries, and that made
+  // /receipts unreachable for anyone who had never scanned. The "See all"
+  // link below is the ONLY consumer-facing entry point to receipt history:
+  // it is not in the bottom nav (see the note there on why a fifth
+  // destination is the wrong fix) and nothing else links to it. Hiding the
+  // whole section on an empty wallet therefore hid the route from exactly
+  // the people who most needed to be told it exists - new accounts.
+  //
+  // Rendering the header at zero costs nothing at runtime: `watching` is
+  // false with no pending entries, so the Realtime subscription still does
+  // not open.
+  const isEmpty = entries.length === 0;
 
   return (
     <section className="mt-8">
@@ -114,15 +127,25 @@ export function WalletReceiptActivity({ userId, initialReceipts }: WalletReceipt
         </Link>
       </div>
 
-      {/* Polite, not assertive: a points update is good news, not an alert
-          that should interrupt whatever a screen reader is currently saying. */}
-      <ul aria-live="polite" className="mt-3 space-y-1">
-        {entries.slice(0, WALLET_RECEIPT_LIMIT).map((entry) => (
-          <li key={entry.receiptId}>
-            <ReceiptHistoryRow receipt={entry} />
-          </li>
-        ))}
-      </ul>
+      {isEmpty ? (
+        <EmptyState
+          icon="receipt_long"
+          title="No receipts yet"
+          body="Scan a receipt from a shop on Giya and it will show up here while it is being checked."
+          action={{ label: "Scan a receipt", href: "/scan" }}
+          className="mt-3"
+        />
+      ) : (
+        /* Polite, not assertive: a points update is good news, not an alert
+           that should interrupt whatever a screen reader is currently saying. */
+        <ul aria-live="polite" className="mt-3 space-y-1">
+          {entries.slice(0, WALLET_RECEIPT_LIMIT).map((entry) => (
+            <li key={entry.receiptId}>
+              <ReceiptHistoryRow receipt={entry} />
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

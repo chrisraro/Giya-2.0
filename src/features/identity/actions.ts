@@ -1,5 +1,7 @@
 "use server";
 
+import { redirect } from "next/navigation";
+
 import { createClient } from "@/lib/supabase/server";
 
 export type ActionResult = { ok: true } | { ok: false; message: string };
@@ -62,6 +64,32 @@ export async function completeConsumerOnboarding({
   }
 
   return { ok: true };
+}
+
+/**
+ * Ends the caller's session for real, then sends them to /login.
+ *
+ * This has to be a server action rather than a link: signing out means
+ * deleting the `sb-*` auth cookies, and only a Server Action or Route Handler
+ * may write cookies in Next.js. The server client built by
+ * src/lib/supabase/server.ts hands @supabase/ssr a `setAll` that writes
+ * straight to the request's cookie store, so `auth.signOut()` clearing the
+ * session locally is what physically expires those cookies on the response;
+ * the swallow-on-failure `catch` in that factory only applies to Server
+ * Components, and this is not one.
+ *
+ * Errors are deliberately not surfaced. `signOut()` drops the local session
+ * before it ever calls the Auth server, so a network failure still leaves the
+ * caller signed out on this device, and stranding them on a page that still
+ * looks signed-in would be strictly worse than continuing to /login.
+ *
+ * The redirect is last and outside any try/catch on purpose: `redirect()`
+ * signals by throwing, so catching around it would swallow the navigation.
+ */
+export async function signOut(): Promise<void> {
+  const supabase = await createClient();
+  await supabase.auth.signOut();
+  redirect("/login");
 }
 
 /**
