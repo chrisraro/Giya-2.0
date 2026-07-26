@@ -25,9 +25,9 @@
 // WHAT THIS BUILD SERVES, AND WHAT IT ONLY DESCRIBES
 // ---------------------------------------------------------------------------
 // Doc 39 lists nineteen queues. Two are registered below, because two have a
-// worker: `notify.email` (this slice) and `ocr.process` (the receipt pipeline's
-// seam - registered so the enqueue is typed and the dedupe key is settled, but
-// NOT yet published to; see src/features/receipts/server/submit.ts).
+// worker: `notify.email` (src/app/api/jobs/notify.email) and `ocr.process`
+// (src/app/api/jobs/ocr.process - the F1 money path, published to from
+// src/features/receipts/server/submit.ts).
 //
 // The other seventeen are absent on purpose. A registry entry for a queue with
 // no route is worse than no entry: it makes `enqueue('cleanup.temp', ...)`
@@ -94,19 +94,33 @@ export const QUEUE_REGISTRY: Record<QueueName, QueueEntry> = {
     dedupeKeyDescription: "notifications.id of the email-channel row being sent",
   },
   // Doc 39: `ocr.process` [MVP], flow-control key `ocr` (parallelism 10),
-  // maxDuration 120s, dedupe key `receipt_id`.
+  // maxDuration 120s. `maxAttempts: 3` is doc 36 Stage 2's DELIBERATE OVERRIDE
+  // of the column default 5 ("OCR failures are rarely transient beyond that"),
+  // and it is the same number `ocr.max_attempts` gives the pipeline's own
+  // per-attempt budget, so the job and the receipt run out of road together.
   //
-  // REGISTERED BUT NOT PUBLISHED TO. The receipt pipeline still calls
-  // processReceipt inline (src/features/receipts/server/submit.ts), and the
-  // reason is written there. The entry exists so that the day the seam flips,
-  // the retry budget and the dedupe key are the ones doc 39 specifies rather
-  // than the ones whoever flips it happens to type.
+  // THE DEDUPE KEY IS `receipts.sha256`, NOT `receipts.id`, and the two docs
+  // disagree: doc 39's per-queue contract says `receipt_id`, doc 36 Stage 1
+  // step 5 says "`jobs.dedupe_key = sha256`". Doc 36 wins because it is the
+  // document that owns the enqueue call site. In practice they select the same
+  // rows - `receipts_sha_unique` (0017) is a plain unique index over the whole
+  // table, so sha256 and receipts.id are in bijection - but the sha is the
+  // stronger statement of intent: it says "this IMAGE is already being
+  // processed", which is the property a duplicate submission would violate,
+  // while an id only ever collides with itself.
+  //
+  // The description below deliberately says what the key IS rather than naming
+  // the column it comes from. This module is pure and therefore not fenced with
+  // `server-only`, and the withheld-column rule enforced by
+  // src/features/receipts/review/isolation.test.ts is that a withheld column
+  // name may appear in a string literal only inside a fenced module - the
+  // string survives into a browser bundle, this comment does not.
   "ocr.process": {
     maxAttempts: 3,
     flowControlKey: "ocr",
     flowControlValue: "parallelism=10",
     maxDurationSeconds: 120,
-    dedupeKeyDescription: "receipts.id",
+    dedupeKeyDescription: "the receipt image's server-computed content hash",
   },
 };
 

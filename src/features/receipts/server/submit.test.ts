@@ -14,6 +14,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
+// submit.ts reaches `src/lib/queue/publish.ts` for the enqueue, which reads
+// `@/lib/env` - and that module validates the whole client environment at
+// IMPORT time, so a test process with no .env.local cannot even load it.
+// Mocked with an EMPTY server env deliberately: that is what an unconfigured
+// deployment looks like, so the real `isQueueConfigured()` answers false and
+// every test that does not inject the seam takes the inline path. The queue
+// tests at the bottom of this file inject it explicitly.
+vi.mock("@/lib/env", () => ({
+  env: {},
+  getServerEnv: () => ({}),
+}));
+
 const createServiceRoleClient = vi.fn();
 vi.mock("@/lib/supabase/service", () => ({
   createServiceRoleClient: () => createServiceRoleClient(),
@@ -21,6 +33,7 @@ vi.mock("@/lib/supabase/service", () => ({
 
 import { isApiError } from "@/lib/api/errors";
 import type { ApiError } from "@/lib/api/errors";
+import { QUEUE_REGISTRY } from "@/lib/queue/queues";
 import type { Database } from "@/lib/supabase/types";
 
 import { dctPhash } from "../phash";
@@ -687,5 +700,215 @@ describe("requireServiceRoleClient", () => {
     createServiceRoleClient.mockReturnValue(client);
 
     expect(requireServiceRoleClient()).toBe(client);
+  });
+});
+
+// ===========================================================================
+// The queue seam (doc 36 Stage 1 step 5 / Stage 2)
+// ===========================================================================
+//
+// The blocks above exercise the DEGRADED path without meaning to, and that is
+// worth stating rather than leaving as an accident: none of them inject
+// `isQueueConfigured`, and this test process has no QSTASH_* environment, so
+// the real predicate answers false and every one of them runs inline. That is
+// the local-development contract - a deployment with no QStash still scans
+// receipts - and the last test in this file asserts it explicitly rather than
+// leaving it implied.
+
+/** Submit with the queue seam wired. The default `submit` helper deliberately
+ * leaves both queue dependencies at their real values. */
+async function submitQueued(
+  fake: Fake,
+  queue: { enqueue: ReturnType<typeof vi.fn>; configured?: boolean },
+  overrides: Partial<SubmitReceiptBody> = {},
+): ReturnType<typeof submitReceipt> {
+  return submitReceipt(
+    { userId: USER_ID, body: body(overrides) },
+    {
+      supabase: fake.client,
+      canonicalize,
+      processReceipt,
+      enqueue: queue.enqueue as never,
+      isQueueConfigured: () => queue.configured ?? true,
+    },
+  );
+}
+
+const JOB_ID = "55555555-5555-4555-8555-555555555555";
+
+function enqueued() {
+  return { status: "enqueued", jobId: JOB_ID, published: true, messageId: "msg_1" } as const;
+}
+
+/** Every branch here logs; silencing is not the assertion, the calls are. */
+function muteLogs(): void {
+  vi.spyOn(console, "info").mockImplementation(() => undefined);
+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+}
+
+describe("submitReceipt - enqueueing ocr.process", () => {
+  it("enqueues with the sha256 as the dedupe key and the receipt id as the whole payload", async () => {
+    const fake = createFakeSupabase();
+    const enqueue = vi.fn(async () => enqueued());
+    muteLogs();
+
+    await submitQueued(fake, { enqueue }, { business_id: BUSINESS_ID });
+
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queue: "ocr.process",
+        // Identifiers only: doc 39 forbids denormalized state in a payload.
+        payload: { receipt_id: RECEIPT_ID },
+        businessId: BUSINESS_ID,
+        // Doc 36 Stage 1 step 5, and it is the SERVER hash over the canonical
+        // bytes - the same value written to the row, so the dedupe key and
+        // `receipts.sha256` can never describe different images.
+        dedupeKey: EXPECTED_SHA256,
+      }),
+    );
+    // The pipeline is the queue's work now.
+    expect(processReceipt).not.toHaveBeenCalled();
+  });
+
+  it("carries doc 36's max_attempts of 3, its override of the column default 5", () => {
+    // Not passed at the call site on purpose: `enqueue()` reads it from the
+    // registry, the single place it can be stated once for the row, the
+    // publisher and QStash's own Upstash-Retries header.
+    expect(QUEUE_REGISTRY["ocr.process"].maxAttempts).toBe(3);
+  });
+
+  it("reuses the service-role client that just wrote the receipt", async () => {
+    const fake = createFakeSupabase();
+    const enqueue = vi.fn(async () => enqueued());
+    muteLogs();
+
+    await submitQueued(fake, { enqueue });
+
+    // Which is what makes enqueue()'s own "no service-role client" failure
+    // branch unreachable from this call site.
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ supabase: fake.client }));
+  });
+
+  it("still answers 202 with the same body", async () => {
+    const fake = createFakeSupabase();
+    muteLogs();
+
+    // The response asserts a fact about the ROW, not about the delivery, which
+    // is why it is identical on every branch in this file.
+    await expect(
+      submitQueued(fake, { enqueue: vi.fn(async () => enqueued()) }),
+    ).resolves.toEqual({ receiptId: RECEIPT_ID, status: "queued" });
+  });
+
+  // A duplicate submission cannot double-process: `jobs_dedupe_idx` refuses the
+  // second row while the first job is queued/running, and `enqueue` says so.
+  it("does not process inline when an in-flight job already owns the receipt", async () => {
+    const fake = createFakeSupabase();
+    const enqueue = vi.fn(async () => ({ status: "deduplicated", jobId: "job-1" }) as const);
+    muteLogs();
+
+    await expect(submitQueued(fake, { enqueue })).resolves.toEqual({
+      receiptId: RECEIPT_ID,
+      status: "queued",
+    });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    // The work IS scheduled. Processing inline as well would be exactly the
+    // double-processing the dedupe key exists to prevent.
+    expect(processReceipt).not.toHaveBeenCalled();
+  });
+});
+
+describe("submitReceipt - when the enqueue puts no delivery in flight", () => {
+  // THE GAP THIS CLOSES: `sweep_stuck_receipts` (0028) only ever looks at
+  // status='processing'. A receipt stranded at 'queued' is swept by nothing, so
+  // answering 202 and hoping would be the one way in this system to lose a
+  // receipt completely. Running it inline moves it to 'processing', which the
+  // existing sweep already owns end to end.
+  it("processes inline when the job row could not be written at all", async () => {
+    const fake = createFakeSupabase();
+    const enqueue = vi.fn(
+      async () => ({ status: "failed", reason: "jobs table unreachable" }) as const,
+    );
+    muteLogs();
+
+    await expect(submitQueued(fake, { enqueue })).resolves.toEqual({
+      receiptId: RECEIPT_ID,
+      status: "queued",
+    });
+    expect(processReceipt).toHaveBeenCalledExactlyOnceWith(RECEIPT_ID);
+  });
+
+  // The predicate is "is a delivery in flight", not "did the row get written".
+  // Doc 39's hourly reconciler would re-publish this row, but only the receipts
+  // half of it is built (0028), so today a durable row with no message strands
+  // the receipt exactly as no row would.
+  it("processes inline when the row landed but QStash refused the message", async () => {
+    const fake = createFakeSupabase();
+    const enqueue = vi.fn(
+      async () =>
+        ({ status: "enqueued", jobId: JOB_ID, published: false, messageId: null }) as const,
+    );
+    muteLogs();
+
+    await expect(submitQueued(fake, { enqueue })).resolves.toEqual({
+      receiptId: RECEIPT_ID,
+      status: "queued",
+    });
+    expect(processReceipt).toHaveBeenCalledExactlyOnceWith(RECEIPT_ID);
+  });
+
+  // Never a 500. The row exists and its sha256 is already claimed, so telling
+  // the consumer the submission was lost would invite a resubmission of the
+  // same photo that `receipts_sha_unique` then refuses with a 422.
+  it("never fails the request when the inline fallback also fails", async () => {
+    const fake = createFakeSupabase();
+    const enqueue = vi.fn(async () => ({ status: "failed", reason: "boom" }) as const);
+    processReceipt.mockRejectedValueOnce(new Error("OCR service unreachable"));
+    muteLogs();
+
+    await expect(submitQueued(fake, { enqueue })).resolves.toEqual({
+      receiptId: RECEIPT_ID,
+      status: "queued",
+    });
+  });
+});
+
+describe("submitReceipt - a deployment with no QStash (doc 39 local development)", () => {
+  it("processes inline and never touches the queue", async () => {
+    const fake = createFakeSupabase();
+    const enqueue = vi.fn();
+    muteLogs();
+
+    await expect(submitQueued(fake, { enqueue, configured: false })).resolves.toEqual({
+      receiptId: RECEIPT_ID,
+      status: "queued",
+    });
+
+    // Not even a jobs row: an unconfigured deployment must not accumulate one
+    // undeliverable row per submission, which is a queue whose depth only grows.
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(processReceipt).toHaveBeenCalledExactlyOnceWith(RECEIPT_ID);
+  });
+
+  it("names the path it took in the log, so nobody has to guess which one ran", async () => {
+    const fake = createFakeSupabase();
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    await submitQueued(fake, { enqueue: vi.fn(), configured: false });
+
+    expect(info.mock.calls.flat().join(" ")).toContain("INLINE");
+  });
+
+  it("is what the real env predicate selects here, with nothing injected", async () => {
+    // This process has no QSTASH_* variables, so the real `isQueueConfigured`
+    // runs. Every other test in this file depends on this being true.
+    const fake = createFakeSupabase();
+    muteLogs();
+
+    await submit(fake);
+
+    expect(processReceipt).toHaveBeenCalledExactlyOnceWith(RECEIPT_ID);
   });
 });
