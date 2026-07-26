@@ -2428,6 +2428,15 @@ export type Database = {
         Returns: string
       }
       claim_reward: { Args: { p_reward_id: string }; Returns: string }
+      clawback_receipt_points: {
+        Args: {
+          p_actor_id: string
+          p_reason: string
+          p_receipt_id: string
+          p_request_id?: string
+        }
+        Returns: Json
+      }
       expire_claims: { Args: { p_limit?: number }; Returns: number }
       record_receipt_visit: {
         Args: { p_receipt_id: string }

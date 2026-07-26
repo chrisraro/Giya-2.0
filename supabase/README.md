@@ -66,11 +66,18 @@ their own memberships (0004) and staff read their businesses through a table
 check (0006), and the portal layout enforces membership from the table, not
 claims. The hook remains the fast path and is still REQUIRED for the
 claims-only surfaces: `business_verifications` / `business_documents` staff
-reads, staff updates on `businesses` / `business_customers`, roster reads
-beyond your own row, and admin policies. Enable it before shipping those
-surfaces. The admin fraud/receipt-review queue (doc 31) and the admin read on
-`audit_logs` are both blocked on this: a claim-based admin policy would
-evaluate null for every session today and silently deny.
+reads, staff updates on `businesses` / `business_customers`, and roster reads
+beyond your own row. Enable it before shipping those surfaces.
+
+The admin half is no longer pending: **0031 landed the admin policies** that
+0017 and 0022 deferred (`receipts`, `receipt_line_items`, `ocr_results`,
+`fraud_signals`, `ai_usage_events`, platform-scope `settings`, `audit_logs`),
+seeded the first `platform_admins` row, and added the clawback RPC. Verified by
+`rls_admin_smoke.sql`. Note what that did NOT change: an admin is still the
+`authenticated` role, so the column-level grants on `receipts` and `audit_logs`
+withhold the same columns from an admin as from anyone else, and the admin
+portal reads those through the service role exactly as the business review
+queue does.
 
 After changing hook configuration, existing sessions keep their old claims
 until the next token refresh (up to 1 hour); sign out and back in to see new
@@ -95,7 +102,7 @@ is transaction-wrapped (`begin ... rollback`) and leaves no data behind:
 psql "$DATABASE_URL" -f supabase/tests/rls_identity_smoke.sql
 ```
 
-Thirteen suites, one per domain:
+Fourteen suites, one per domain:
 
 | file | covers |
 |---|---|
@@ -111,6 +118,7 @@ Thirteen suites, one per domain:
 | `rls_template_embedding_smoke.sql` | pgvector template embeddings: the pinned vector(384) width enforced rather than decorative, cosine ordering, and that RLS still applies to a vector query (0024) |
 | `rls_notifications_smoke.sql` | `notifications`: recipient-only reads, the read_at column grant, and the narrow trigger that permits marking read while refusing a body edit (0026) |
 | `ref_data_smoke.sql` | reference data: both tables non-empty, the seed idempotent on replay, every city carrying a non-null province and region in one of the 18 real regions (0027) |
+| `rls_admin_smoke.sql` | the admin surface (0031): every admin SELECT policy 0017 and 0022 deferred, asserted as a PAIR (an admin session reads another tenant's fraud signals, receipts, line items, OCR evidence, AI spend, audit rows and platform settings; a non-admin owner of a real tenant reads none of them and still reads their own), the unmatched receipt (`business_id` null) that 0017 noted no audience could see, the column fences that an admin policy deliberately does NOT widen (`receipts.parse_meta`, `audit_logs.ip`), and `clawback_receipt_points`: the service_role-only grant, the mandatory reason, table-truth actor verification (a `support` admin is refused), `CLAWBACK_INVALID_STATE` for a receipt with no earn row and for a second attempt, the negative ledger row with `reverses_id` and its `balance_after` under the pair lock, the receipt landing on `rejected`/`fraud_suspected` with `reviewed_by`, the in-transaction audit row, and doc 35's clamping with the residual recorded as `after.shortfall_points` |
 | `rpc_sweeps_smoke.sql` | the two scheduled sweeps: `sweep_stuck_receipts` moves a stuck, out-of-budget receipt to the doc 36 dead-letter state (`rejected` / `manual` / `processing_failed`) while leaving both a receipt still inside its attempt budget and a receipt that is merely recent completely untouched, the business-scope `ocr.max_attempts` override widens the budget and withdrawing it narrows it again, a second run is a no-op, no ledger row is written, both `cron.job` rows carry the expected schedule and command, `expire_claims` still runs clean, and every function is service_role only (0028) |
 
 Each suite states the migration range it needs in its header. New suites take
@@ -369,6 +377,9 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0026_notifications.sql | 20260725205211 | 0026_notifications |
 | 0027_reference_data.sql | 20260725215529 | 0027_reference_data |
 | 0028_scheduled_sweeps.sql | 20260725221121 | 0028_scheduled_sweeps |
+| 0029_jobs.sql | 20260726033458 | 0029_jobs |
+| 0030_notification_delivery.sql | 20260726033507 | 0030_notification_delivery |
+| 0031_admin_access.sql | 20260726042144 | 0031_admin_access |
 
 **These versions are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`.**
 Every migration was applied in file order in a single pass, so unlike the
