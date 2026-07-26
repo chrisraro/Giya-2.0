@@ -78,6 +78,27 @@ export interface ReceiptSettings {
   readonly routing: RoutingThresholds;
   /** doc 36 Stage 4 retry budget. `ocr.max_attempts`. */
   readonly ocrMaxAttempts: number;
+  /**
+   * How long a receipt may sit at `status='processing'` before the platform
+   * stops believing anyone is holding it. `receipts.stuck_processing_hours`,
+   * the key migration 0028 registers and seeds at 24.
+   *
+   * TWO READERS, ONE NUMBER, and that is the point. 0028's
+   * `sweep_stuck_receipts` uses it to decide a receipt is dead enough to
+   * dead-letter; `process.ts` uses it to decide a `processing` receipt is
+   * abandoned enough for another worker to reclaim. Both are the same
+   * question - "is anyone still working on this?" - and answering it with two
+   * different intervals would let a receipt be simultaneously live enough to
+   * refuse a retry and dead enough to reject.
+   *
+   * PLATFORM SCOPE ONLY, and enforced here rather than assumed: 0028 states
+   * the reason ("a business-scope override would let one merchant shorten the
+   * window and start rejecting their own customers' genuine receipts faster
+   * than the platform intends"), and a settings row is data an admin surface
+   * will one day be able to write. `readPlatformValue` is what makes that
+   * decision structural instead of a comment.
+   */
+  readonly stuckProcessingHours: number;
   /** doc 36 Stage 8 freshness window, clamped 1-30. `receipts.max_age_days`. */
   readonly maxAgeDays: number;
   /**
@@ -133,6 +154,10 @@ export const RECEIPT_SETTINGS_KEYS = [
   "ocr.max_attempts",
   "receipts.max_age_days",
   "receipts.max_total_centavos",
+  // Registered and seeded by 0028_scheduled_sweeps.sql, not by 0017, because
+  // no doc anticipated a database-side sweeper. Read here so the pipeline's
+  // reclaim rule and the sweep's dead-letter rule resolve the same number.
+  "receipts.stuck_processing_hours",
 ] as const;
 
 // Defaults imported from the pure engines wherever an engine already owns the
@@ -145,6 +170,7 @@ const DEFAULT_COOLDOWN_STRIKES = 3; // matches the 0017 seed (doc 37 ladder step
 const DEFAULT_COOLDOWN_HOURS = 24; // matches the 0017 seed (doc 37 ladder step 2)
 const DEFAULT_OCR_MAX_ATTEMPTS = 3; // matches the 0017 seed (doc 36 Stage 4)
 const DEFAULT_MAX_AGE_DAYS = 3; // matches the 0017 seed (doc 36 Stage 8)
+const DEFAULT_STUCK_PROCESSING_HOURS = 24; // matches the 0028 seed and its plpgsql fallback
 
 /**
  * PHP 20,000.00, matching the 0025_receipt_amount_ceiling.sql seed. Doc 36
@@ -210,6 +236,7 @@ export const DEFAULT_RECEIPT_SETTINGS: ReceiptSettings = {
   ocrMaxAttempts: DEFAULT_OCR_MAX_ATTEMPTS,
   maxAgeDays: DEFAULT_MAX_AGE_DAYS,
   maxTotalCentavos: DEFAULT_MAX_TOTAL_CENTAVOS,
+  stuckProcessingHours: DEFAULT_STUCK_PROCESSING_HOURS,
 };
 
 // ---------------------------------------------------------------------------
@@ -241,6 +268,9 @@ const attemptCount = z.number().int().min(1).max(10);
 // 1-30" for this key specifically, so an out-of-range number is a value to
 // bound rather than a value to reject.
 const ageDays = z.number().int();
+// Same treatment as `ageDays`: any integer parses, and the clamp below decides
+// what is usable, so an operator's 0 is bounded rather than silently ignored.
+const wholeHours = z.number().int();
 
 // The platform amount ceiling, in integer centavos. Rejected rather than
 // clamped, because doc 36 registers no clamp for this key and the two failure
@@ -253,6 +283,16 @@ const totalCeilingCentavos = z.number().int().min(1).max(1_000_000_000);
 
 const MAX_AGE_DAYS_MIN = 1;
 const MAX_AGE_DAYS_MAX = 30;
+
+// Validated as any integer and then clamped, exactly as `receipts.max_age_days`
+// is - and, more to the point, exactly as 0028's own plpgsql does
+// (`greatest(coalesce(v_stuck_hours, 24), 1)`). A zero or negative window would
+// declare every in-flight receipt abandoned the instant it was claimed, so the
+// floor is the same 1 hour the sweep enforces; the ceiling of one year is this
+// side's addition and matches `cooldownHours`, since a number that large is a
+// typo rather than a policy.
+const STUCK_PROCESSING_HOURS_MIN = 1;
+const STUCK_PROCESSING_HOURS_MAX = 8_760;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -331,6 +371,29 @@ function readValue<T>(
   }
 
   return fallback;
+}
+
+const NO_BUSINESS_VALUES: ReadonlyMap<string, unknown> = new Map();
+
+/**
+ * `readValue` with the business scope deliberately not consulted, for the one
+ * key whose whole point is that a tenant may not tune it (see
+ * `stuckProcessingHours`). Written as a scope substitution rather than a flag
+ * so there is exactly one validation-and-logging path: a malformed platform
+ * row still falls through to the hardcoded default and still logs.
+ */
+function readPlatformValue<T>(
+  values: ScopedValues,
+  key: string,
+  schema: z.ZodType<T>,
+  fallback: T,
+): T {
+  return readValue(
+    { business: NO_BUSINESS_VALUES, platform: values.platform },
+    key,
+    schema,
+    fallback,
+  );
 }
 
 /**
@@ -427,6 +490,16 @@ export function resolveReceiptSettings(
       "receipts.max_total_centavos",
       totalCeilingCentavos,
       DEFAULT_MAX_TOTAL_CENTAVOS,
+    ),
+    stuckProcessingHours: clamp(
+      readPlatformValue(
+        values,
+        "receipts.stuck_processing_hours",
+        wholeHours,
+        DEFAULT_STUCK_PROCESSING_HOURS,
+      ),
+      STUCK_PROCESSING_HOURS_MIN,
+      STUCK_PROCESSING_HOURS_MAX,
     ),
   };
 }
