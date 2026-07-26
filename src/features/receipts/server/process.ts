@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { completeJson, screenForInjection } from "@/lib/ai/llm";
 import type { InjectionScreenResult, LlmMeter, LlmUsage } from "@/lib/ai/llm";
-import { expireNx, incr, redisKey } from "@/lib/redis";
+import { expireNx, get as redisGet, incr, redisKey, setNx } from "@/lib/redis";
 import { createServiceRoleClient } from "@/lib/supabase/service";
 import type { Database, Json } from "@/lib/supabase/types";
 
@@ -161,10 +161,29 @@ const UNIQUE_VIOLATION = "23505";
 // Dependencies
 // ---------------------------------------------------------------------------
 
-/** The two Redis commands the velocity windows need (doc 37 S4). */
+/**
+ * The Redis commands the velocity windows need (doc 37 S4).
+ *
+ * `incr` and `expireNx` are the counters themselves. `setNx` and `get` are what
+ * make the counters count SUBMISSIONS rather than processing passes: `setNx`
+ * claims a per-receipt marker so only the first pass over a given receipt is
+ * allowed to increment anything, and `get` reads the windows back on every pass
+ * after that (see `collectVelocityCounts`).
+ *
+ * The last two are OPTIONAL, and a deps object without them behaves exactly as
+ * this pipeline behaved before they existed: every pass increments. That is not
+ * a hedge, it is the same fail-open posture the rest of this port has - the
+ * production wiring always supplies all four, and a caller that supplies only
+ * the counters gets over-counting (a receipt routed to a human) rather than a
+ * blocked scan.
+ */
 export interface VelocityRedis {
   incr(key: string): Promise<number>;
   expireNx(key: string, seconds: number): Promise<boolean>;
+  /** `SET key value NX EX seconds`. True only when this caller set it. */
+  setNx?(key: string, value: string, seconds: number): Promise<boolean>;
+  /** Plain `GET`. Null for a key that has expired or never existed. */
+  get?(key: string): Promise<string | null>;
 }
 
 /**
@@ -295,7 +314,7 @@ export function defaultProcessReceiptDeps(): ProcessReceiptDeps | null {
       supabase,
       ocr: getOcrProvider(),
       loadSettings: getReceiptSettings,
-      redis: { incr, expireNx },
+      redis: { incr, expireNx, setNx, get: redisGet },
       now: () => new Date(),
       ai: defaultReceiptAiDeps(),
     };
@@ -318,6 +337,16 @@ interface ReceiptRow {
   image_hash: string;
   device_id: string | null;
   created_at: string;
+  /**
+   * Maintained by the `touch_receipts` trigger (0017). On a row at
+   * 'processing' it is when the pipeline last made progress on it, which is
+   * exactly what 0028's sweep reads and what `claimReceipt` reads to decide
+   * whether anyone is still holding the receipt.
+   *
+   * Optional only because a client that did not select it is a different thing
+   * from a null column, which the schema does not permit; see `isStale`.
+   */
+  updated_at?: string | null;
 }
 
 export interface TemplateRow {
@@ -1213,24 +1242,120 @@ function velocityWindowSpecs(input: {
 }
 
 /**
+ * TTL of the per-receipt "already counted" marker, in seconds. Deliberately the
+ * LONGEST window TTL above (consumer_day / pair_day / device_day are all 86,400):
+ * once every window a receipt could have moved has expired, there is no counter
+ * left for a later pass to double-count, so holding the marker any longer buys
+ * nothing, and holding it for less would re-open the hole inside a live window.
+ *
+ * It is also, not by coincidence, `receipts.stuck_processing_hours`. A receipt
+ * still unfinished after 24 hours has either been dead-lettered by 0028's sweep
+ * or is being reclaimed as abandoned (see `claimReceipt`), and a reclaim is
+ * genuinely a new counting epoch: the windows the original submission touched
+ * are all gone.
+ */
+const VELOCITY_COUNTED_TTL_SECONDS = 86_400;
+
+/**
+ * The marker key. One per receipt, not per window: a submission is counted once
+ * or not at all, never partly.
+ *
+ * Deliberately OUTSIDE the `receipts:velocity:*` namespace the windows occupy,
+ * so an operator scanning the counters never has to tell a marker apart from a
+ * window that happens to be named after a receipt id.
+ */
+function velocityCountedKey(receiptId: string): string {
+  return redisKey("receipts", "velocity_counted", receiptId);
+}
+
+/**
+ * Read a window without moving it. Null means "no answer", which is exactly
+ * what an absent window is worth to `evaluateVelocity` - including the honest
+ * case of a 10-minute window that has simply elapsed since the submission.
+ */
+async function readVelocityCount(
+  redis: VelocityRedis,
+  key: string,
+): Promise<number | null> {
+  if (redis.get === undefined) return null;
+  const raw = await redis.get(key);
+  if (raw === null) return null;
+  const count = Number(raw);
+  return Number.isFinite(count) ? count : null;
+}
+
+/**
  * Doc 37 S4's five sliding windows. Counts include the receipt being
  * processed, which is what makes the doc's own evidence example
  * (`{"window":"pair_10min","count":3,"cap":2}`) read correctly.
  *
- * FAILS OPEN, per window. Doc 37 is explicit that these counters are a hot
- * path and "losing Redis loses speed, never truth" (D4). A window whose INCR
- * failed is left ABSENT rather than zero: `evaluateVelocity` skips absent
- * windows, so an outage can neither manufacture a fraud signal nor suppress
- * the other four. This is the one detector that fails open; every other one in
- * this file reads Postgres, where an error is a real error.
+ * ONE INCREMENT PER SUBMISSION, NOT PER PASS. Doc 37 calls these BEHAVIOURAL
+ * caps - "a person scanning too much" - and every one of them is defined over
+ * receipts a consumer submitted, never over work this platform performed on
+ * them. Left as a bare INCR they measured the second thing: a retryable OCR
+ * failure redelivered three times would read `pair_10min` = 4 against a cap of
+ * 2 and emit a warn at 0.7, and two more inflated windows push the composite
+ * past 0.5 and route an honest receipt to a human. The consumer would be
+ * punished for our outage, which is precisely backwards.
+ *
+ * So the INCRs are guarded by a per-receipt marker set with SET NX, and every
+ * later pass READS the same keys instead. The counting stays here, in
+ * processing, rather than moving to submit for one decisive reason: the pair
+ * windows are keyed by the MATCHED business (`collectFraudSignals` passes
+ * `matchedBusinessId`), which does not exist until Stage 5 has run. Submit
+ * knows only the pre-bound id, so counting there would silently change which
+ * key a receipt lands in whenever matching disagrees with the scan target.
+ *
+ * FAILS OPEN, per window, and in both directions. Doc 37 is explicit that these
+ * counters are a hot path and "losing Redis loses speed, never truth" (D4):
+ *
+ *   * A window whose INCR or GET failed is left ABSENT rather than zero.
+ *     `evaluateVelocity` skips absent windows, so an outage can neither
+ *     manufacture a fraud signal nor suppress the other four.
+ *   * A marker that could not be set is treated as "not yet counted", so the
+ *     pass counts. Over-counting a re-processed receipt is a review; refusing
+ *     to count would be a blind spot an abuser could open on demand by making
+ *     Redis fail.
+ *   * A pass that sets the marker and then dies before incrementing UNDER-counts
+ *     that submission by one. That is the safe direction (doc 37 D4: these are
+ *     always recomputable from `receipts`), and it is the only direction a
+ *     crash can move the number.
+ *
+ * This is the one detector that fails open; every other one in this file reads
+ * Postgres, where an error is a real error.
  */
 async function collectVelocityCounts(
   redis: VelocityRedis,
   specs: readonly VelocityWindowSpec[],
+  receiptId: string,
 ): Promise<VelocityCounts> {
   const counts: Partial<Record<VelocityWindow, number>> = {};
+
+  // Claimed BEFORE any INCR, so a crash between the two under-counts rather
+  // than double-counts.
+  let firstPass = true;
+  if (redis.setNx !== undefined) {
+    try {
+      firstPass = await redis.setNx(
+        velocityCountedKey(receiptId),
+        "1",
+        VELOCITY_COUNTED_TTL_SECONDS,
+      );
+    } catch (error) {
+      console.warn(
+        `[receipts/process] could not claim the velocity marker for ${receiptId}; counting this pass`,
+        error,
+      );
+    }
+  }
+
   for (const spec of specs) {
     try {
+      if (!firstPass) {
+        const existing = await readVelocityCount(redis, spec.key);
+        if (existing !== null) counts[spec.window] = existing;
+        continue;
+      }
       const count = await redis.incr(spec.key);
       // Self-healing TTL, same argument as src/lib/rate-limit.ts: EXPIRE NX is
       // idempotent, so a key that lost its TTL repairs itself on the next scan
@@ -1248,6 +1373,158 @@ async function collectVelocityCounts(
 }
 
 // ---------------------------------------------------------------------------
+// Stage 2 - the claim
+// ---------------------------------------------------------------------------
+
+/**
+ * PostgREST answers a mutation carrying `.select(...)` with the rows it
+ * actually matched, so the array's length IS the affected-row count - the
+ * campaigns slice's `setCampaignStatus` and `../server/review.ts` both read it
+ * that way, and this is the same read.
+ *
+ * Null means the client handed back no array at all. That is NOT evidence of a
+ * lost race and must not be read as one: treating an unreportable count as
+ * "somebody else has it" would strand receipts behind a driver quirk, whereas
+ * proceeding leaves the blast radius bounded by the database's own guards
+ * (`ocr_results`' UNIQUE (receipt_id, attempt), and `pt_receipt_earn_once`
+ * under the award RPC's receipt lock).
+ */
+function affectedRows(data: unknown): number | null {
+  return Array.isArray(data) ? data.length : null;
+}
+
+/**
+ * Has this `processing` receipt been abandoned?
+ *
+ * An UNKNOWN `updated_at` counts as abandoned. `receipts.updated_at` is NOT
+ * NULL with a trigger maintaining it (0017), so the only way to reach here
+ * without a timestamp is a client that did not report the column - the same
+ * category of unknown `affectedRows` handles, and resolved the same way: toward
+ * processing the receipt. A consumer's scan sitting in the queue forever is a
+ * worse failure than a second worker that the conditional UPDATE below, the
+ * `ocr_results` unique index and `pt_receipt_earn_once` all still stand in
+ * front of.
+ */
+function isStale(updatedAt: string | null | undefined, staleBeforeMs: number): boolean {
+  if (updatedAt === null || updatedAt === undefined) return true;
+  const at = Date.parse(updatedAt);
+  if (!Number.isFinite(at)) return true;
+  return at <= staleBeforeMs;
+}
+
+/**
+ * Take exclusive ownership of one receipt, or refuse to run. True means this
+ * invocation owns the receipt and may write; false means it must exit having
+ * written nothing.
+ *
+ * THE `queued` CASE is an ordinary compare-and-swap: `status='processing'`
+ * WHERE `status='queued'`, and zero affected rows is a lost race. The predicate
+ * was already there; what was missing was reading the answer, without which the
+ * update was a hope rather than a claim.
+ *
+ * THE `processing` CASE is the hole doc 36 Stage 2 leaves open. It names
+ * `queued` and `processing` both retry-eligible - correctly, because
+ * `handleOcrFailure` parks a retryable failure at `processing` on purpose - but
+ * a receipt already at `processing` is claimed by NOTHING, so two workers
+ * proceeded together and were left racing on `ocr_results (receipt_id,
+ * attempt)`. That index only collides when both computed the same attempt
+ * number, and the obvious interleaving defeats it: A inserts attempt 1, B then
+ * reads max(attempt)=1 and runs attempt 2 alongside it. Both complete, both
+ * write `fraud_signals` evidence into an insert-only table, both meter, both
+ * call `persistOutcome`.
+ *
+ * So `processing` is reclaimable only after a staleness interval, and the
+ * interval is `receipts.stuck_processing_hours` - the SAME setting 0028's
+ * `sweep_stuck_receipts` uses, deliberately rather than a second notion of
+ * stuck. The two then compose instead of contradicting: once a receipt crosses
+ * that line, either its attempt budget is spent and the sweep dead-letters it,
+ * or the budget is not spent and a worker may pick it up. Inventing a shorter
+ * lease here would create a window in which this function considers a receipt
+ * abandoned while the sweep still considers it live.
+ *
+ * A LONG LEASE IS THE RIGHT COARSENESS FOR THIS LAYER. Doc 39 puts short-lease
+ * reclamation where it belongs - on the `jobs` row, with a Redis heartbeat and
+ * a `status='running'` + expired-heartbeat predicate - so a QStash redelivery
+ * minutes after a timeout is arbitrated there, by the queue that knows how long
+ * its own invocation should have taken. This claim is the backstop under that,
+ * and a backstop tuned in minutes would fight it.
+ *
+ * The reclaim writes `updated_at`, not `status`: the row is already
+ * `processing`, so there is no status to change, and the `touch_receipts`
+ * trigger (0017) stamps `updated_at` on any update anyway. The point of the
+ * write is the lease - it is what makes the row stop matching the stale
+ * predicate for every other worker, atomically, at the database.
+ */
+async function claimReceipt(
+  deps: ProcessReceiptDeps,
+  receipt: ReceiptRow,
+  settings: ReceiptSettings,
+): Promise<boolean> {
+  const { supabase } = deps;
+
+  if (receipt.status === "queued") {
+    const { data, error } = await supabase
+      .from("receipts")
+      .update({ status: "processing" })
+      .eq("id", receipt.id)
+      .eq("status", "queued")
+      .select("id");
+
+    if (error !== null) {
+      console.error(`[receipts/process] could not claim receipt ${receipt.id}`, error);
+      return false;
+    }
+    if (affectedRows(data) === 0) {
+      console.info(
+        `[receipts/process] receipt ${receipt.id} was claimed by another worker; acking`,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  const staleBeforeMs =
+    deps.now().getTime() - settings.stuckProcessingHours * 60 * 60 * 1000;
+  const staleBefore = new Date(staleBeforeMs).toISOString();
+
+  if (!isStale(receipt.updated_at, staleBeforeMs)) {
+    console.info(
+      `[receipts/process] receipt ${receipt.id} is being processed by another worker; acking`,
+    );
+    return false;
+  }
+
+  const { data, error } = await supabase
+    .from("receipts")
+    .update({ updated_at: deps.now().toISOString() })
+    .eq("id", receipt.id)
+    .eq("status", "processing")
+    // `not(updated_at > staleBefore)` is `<=` over a NOT NULL column, and it
+    // re-asserts in the WHERE clause the comparison `isStale` just made in
+    // memory. The in-memory half decides whether to try; THIS half decides who
+    // wins, because Postgres re-evaluates it against the row version the other
+    // worker just wrote.
+    .not("updated_at", "gt", staleBefore)
+    .select("id");
+
+  if (error !== null) {
+    console.error(`[receipts/process] could not reclaim receipt ${receipt.id}`, error);
+    return false;
+  }
+  if (affectedRows(data) === 0) {
+    console.info(
+      `[receipts/process] receipt ${receipt.id} was reclaimed by another worker; acking`,
+    );
+    return false;
+  }
+
+  console.warn(
+    `[receipts/process] reclaiming receipt ${receipt.id}, abandoned at 'processing' for more than ${settings.stuckProcessingHours}h`,
+  );
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // The orchestration
 // ---------------------------------------------------------------------------
 
@@ -1258,10 +1535,19 @@ async function collectVelocityCounts(
  * Queue-shaped: the id is the entire input, so the jobs slice can call this
  * from a QStash Route Handler with no other change (doc 36 Stage 2).
  *
- * Idempotent by status: a receipt that is not `queued` or `processing` is
- * acked and ignored, exactly as doc 36 Stage 2 requires. Re-running an
- * approved receipt therefore awards nothing a second time, and the
- * `pt_receipt_earn_once` index in the database is the backstop under that.
+ * SAFE TO CALL TWICE, AND SAFE TO CALL TWICE AT ONCE. Three separate things
+ * make that true, and all three are needed:
+ *
+ *   1. Idempotent by status: a receipt that is not `queued` or `processing` is
+ *      acked and ignored, exactly as doc 36 Stage 2 requires. Re-running an
+ *      approved receipt therefore awards nothing a second time, and the
+ *      `pt_receipt_earn_once` index in the database is the backstop under that.
+ *   2. `claimReceipt` is a real compare-and-swap whose affected-row count is
+ *      read, so of two concurrent workers exactly one proceeds and the other
+ *      returns having written nothing at all.
+ *   3. The velocity counters move once per SUBMISSION, not once per pass, so a
+ *      redelivered receipt cannot inflate its own consumer's fraud score (see
+ *      `collectVelocityCounts`).
  */
 export async function processReceipt(
   receiptId: string,
@@ -1291,7 +1577,7 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
   const { data: receipt, error: loadError } = await supabase
     .from("receipts")
     .select(
-      "id, business_id, user_id, status, image_path, image_hash, device_id, created_at",
+      "id, business_id, user_id, status, image_path, image_hash, device_id, created_at, updated_at",
     )
     .eq("id", receiptId)
     .maybeSingle<ReceiptRow>();
@@ -1319,17 +1605,10 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
 
   const settings = await deps.loadSettings(receipt.business_id ?? undefined);
 
-  if (receipt.status === "queued") {
-    const { error } = await supabase
-      .from("receipts")
-      .update({ status: "processing" })
-      .eq("id", receiptId)
-      .eq("status", "queued");
-    if (error !== null) {
-      console.error(`[receipts/process] could not claim receipt ${receiptId}`, error);
-      return;
-    }
-  }
+  // NOTHING ABOVE THIS LINE WRITES, and nothing below it runs unless the claim
+  // was won. A worker that loses the race leaves no `ocr_results` row, no
+  // `ai_usage_events` row and no `fraud_signals` evidence behind.
+  if (!(await claimReceipt(deps, receipt, settings))) return;
 
   // ---- Stages 3 and 4: signed URL, OCR, evidence -------------------------
   const attempt = await nextAttemptNumber(supabase, receiptId);
@@ -2159,6 +2438,7 @@ async function collectFraudSignals(input: FraudInput): Promise<FraudSignal[]> {
       businessId: input.matchedBusinessId,
       deviceId: input.receipt.device_id,
     }),
+    input.receipt.id,
   );
   signals.push(...evaluateVelocity(counts, input.settings.velocityCaps));
 
