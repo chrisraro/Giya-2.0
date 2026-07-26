@@ -109,6 +109,69 @@ const serverEnvSchema = z.object({
   // warning instead of throwing. An unregistered model has no price, so
   // accepting one silently would mean an unmetered call.
   GROQ_MODEL: z.string().min(1).optional(),
+
+  // ---------------------------------------------------------------------
+  // Queue (QStash) and email (Resend). All optional, all for the same
+  // reason every credential above is: docs/30-modules/39-background-jobs.md
+  // makes Postgres the truth and QStash merely the delivery, so an app with
+  // none of these set still writes `jobs` rows, still raises in-app
+  // notifications and still serves every screen. What it loses is delivery
+  // and speed, which is exactly the degradation doc 39 designs for.
+  //
+  // src/lib/queue/publish.ts and src/lib/email/client.ts both fail soft on
+  // absence, so nothing here needs a cross-field refinement - and a
+  // refinement would be actively wrong for the reason the OCR pair states
+  // above: it would make a queue misconfiguration throw for every
+  // getServerEnv() caller, taking down auth and rewards over it.
+  // ---------------------------------------------------------------------
+
+  // The QStash REST base. REGIONAL, not global: `https://qstash.upstash.io`
+  // answers 404 on this account, while `https://qstash-us-east-1.upstash.io`
+  // serves /v2/publish, /v2/schedules and /v2/topics. Verified live
+  // 2026-07-26. There is no default baked into the code precisely because the
+  // obvious default is the one that does not work.
+  QSTASH_URL: z.string().url().optional(),
+  QSTASH_TOKEN: z.string().min(10).optional(),
+
+  // The two signing keys, and they are a PAIR rather than a primary and a
+  // spare. Upstash rotates by promoting `next` to `current`, so a request
+  // signed either side of a rotation must verify, and src/lib/queue/verify.ts
+  // tries both. Configuring only one is legal and halves the rotation window;
+  // configuring neither means no request can be verified, which verify.ts
+  // treats as "reject everything" rather than "accept everything". See its
+  // header: this is the one place in this codebase where absence of a
+  // credential must NOT degrade to permissive.
+  QSTASH_CURRENT_SIGNING_KEY: z.string().min(10).optional(),
+  QSTASH_NEXT_SIGNING_KEY: z.string().min(10).optional(),
+
+  // The public origin the worker callbacks are published to, e.g.
+  // https://giya.example. Absent means enqueue writes the `jobs` row and
+  // skips the publish, because a callback URL that is not reachable from the
+  // internet is not a callback. Localhost during development is exactly that
+  // case, which is why this is optional rather than defaulted.
+  QSTASH_CALLBACK_ORIGIN: z.string().url().optional(),
+
+  // The app's own public origin, used to turn the app-relative hrefs the copy
+  // matrix carries (`/scan/{id}`) into links that work in an email client.
+  //
+  // A separate key from QSTASH_CALLBACK_ORIGIN even though a real deployment
+  // sets both to the same string, because they are two different requirements
+  // that only happen to coincide: the callback origin must be reachable BY
+  // QSTASH, and this one must be reachable by a person reading their mail. They
+  // diverge the moment a tunnel is used for local worker testing. The email
+  // renderer falls back from this to the callback origin, and with neither set
+  // it drops the link rather than rendering a relative href that goes nowhere.
+  APP_ORIGIN: z.string().url().optional(),
+
+  RESEND_API_KEY: z.string().min(10).optional(),
+
+  // The From header. Configurable and defaulted in src/lib/email/client.ts to
+  // Resend's shared `onboarding@resend.dev` sandbox sender, which is a
+  // PLACEHOLDER: no domain is verified on this account yet, and the key in
+  // use is send-scoped so it cannot even read the domains API to find out.
+  // Once a domain is verified this becomes something like
+  // `Giya <no-reply@giya.ph>` and nothing else changes.
+  EMAIL_FROM: z.string().min(3).optional(),
 });
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;
@@ -139,6 +202,14 @@ export function getServerEnv(): ServerEnv {
     HF_EMBED_MODEL: emptyToUndefined(process.env.HF_EMBED_MODEL),
     GROQ_API_KEY: emptyToUndefined(process.env.GROQ_API_KEY),
     GROQ_MODEL: emptyToUndefined(process.env.GROQ_MODEL),
+    QSTASH_URL: emptyToUndefined(process.env.QSTASH_URL),
+    QSTASH_TOKEN: emptyToUndefined(process.env.QSTASH_TOKEN),
+    QSTASH_CURRENT_SIGNING_KEY: emptyToUndefined(process.env.QSTASH_CURRENT_SIGNING_KEY),
+    QSTASH_NEXT_SIGNING_KEY: emptyToUndefined(process.env.QSTASH_NEXT_SIGNING_KEY),
+    QSTASH_CALLBACK_ORIGIN: emptyToUndefined(process.env.QSTASH_CALLBACK_ORIGIN),
+    APP_ORIGIN: emptyToUndefined(process.env.APP_ORIGIN),
+    RESEND_API_KEY: emptyToUndefined(process.env.RESEND_API_KEY),
+    EMAIL_FROM: emptyToUndefined(process.env.EMAIL_FROM),
   });
 
   if (!parsed.success) {

@@ -1450,7 +1450,20 @@ describe("reviewReceipt wiring", () => {
 // already been persisted, audited and paid.
 
 describe("reviewReceipt notification", () => {
+  // 0030 made notifications one row per recipient PER CHANNEL, so a kind that
+  // ../../notifications/kinds.ts lists the email channel on (today only
+  // receipt_rejected) writes two rows for one message. Every assertion here is
+  // about the INBOX row, which is the guaranteed channel; `emailed` below is
+  // the second one, asserted separately.
   function raised(harness: Harness): Record<string, unknown>[] {
+    return allRaised(harness).filter((row) => row.channel === "in_app");
+  }
+
+  function emailed(harness: Harness): Record<string, unknown>[] {
+    return allRaised(harness).filter((row) => row.channel === "email");
+  }
+
+  function allRaised(harness: Harness): Record<string, unknown>[] {
     return harness.supabase
       .opsFor("notifications", "insert")
       .map((op) => op.payload as Record<string, unknown>);
@@ -1512,6 +1525,38 @@ describe("reviewReceipt notification", () => {
     ).toBe("fraud_suspected");
   });
 
+  // The second channel, on the human-decision path as well as the pipeline's:
+  // a reviewer's rejection is exactly as worth an email as an automatic one,
+  // and more so, since it can arrive a day after the consumer stopped looking.
+  it("also queues an email when a reviewer rejects, and never on approval", async () => {
+    const rejected = createHarness();
+    await reviewReceipt({
+      receiptId: RECEIPT_ID,
+      actorId: MANAGER_ID,
+      action: "reject",
+      rejectReason: "duplicate",
+      requestId: REQUEST_ID,
+      deps: rejected.deps,
+    });
+    const emails = emailed(rejected);
+    expect(emails).toHaveLength(1);
+    expect(emails[0]?.status).toBe("pending");
+    expect(emails[0]?.title).toBe(raised(rejected)[0]?.title);
+
+    const approved = createHarness();
+    await reviewReceipt({
+      receiptId: RECEIPT_ID,
+      actorId: MANAGER_ID,
+      action: "approve",
+      fields: APPROVE_FIELDS,
+      requestId: REQUEST_ID,
+      deps: approved.deps,
+    });
+    expect(emailed(approved)).toHaveLength(0);
+  });
+
+  // The reviewer's note is withheld from BOTH channels, and the email matters
+  // more: it persists in an inbox and is indexed by a mail provider.
   it("CRITICAL: the reviewer's free-text note never reaches the consumer", async () => {
     // A reviewer doing their job writes things like this. 0017 makes the column
     // unreadable by the client and receipt-copy.ts has no parameter for it;
@@ -1529,8 +1574,7 @@ describe("reviewReceipt notification", () => {
       deps: harness.deps,
     });
 
-    const row = raised(harness)[0];
-    const serialized = JSON.stringify(row);
+    const serialized = JSON.stringify(allRaised(harness));
     expect(serialized).not.toContain(note);
     expect(serialized).not.toContain("Ana");
     expect(serialized).not.toMatch(/hash/i);

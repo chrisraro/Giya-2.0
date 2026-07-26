@@ -1444,8 +1444,17 @@ describe("consequences ladder step 2", () => {
 // no-fraud-vocabulary sweep; what these tests own is the WIRING.
 
 describe("Stage 10 notification", () => {
+  // 0030 made notifications one row per recipient PER CHANNEL, so a kind that
+  // ../../notifications/kinds.ts lists the email channel on (today only
+  // receipt_rejected) writes two rows for one message. Every assertion here is
+  // about the INBOX row, which is the guaranteed channel; `emailed` below is
+  // the second one, asserted separately.
   function raised(harness: Harness): Record<string, unknown>[] {
-    return harness.insertedRows("notifications");
+    return harness.insertedRows("notifications").filter((row) => row.channel === "in_app");
+  }
+
+  function emailed(harness: Harness): Record<string, unknown>[] {
+    return harness.insertedRows("notifications").filter((row) => row.channel === "email");
   }
 
   it("raises points_awarded on an auto-approved receipt, with the points and the shop", async () => {
@@ -1489,6 +1498,43 @@ describe("Stage 10 notification", () => {
     expect(
       (rows[0]?.data as { params?: Record<string, unknown> }).params?.reject_reason,
     ).toBe("duplicate");
+  });
+
+  // The second channel. A rejection is the ONE kind
+  // ../../notifications/kinds.ts lists email on, because it is the only one
+  // where the consumer expected something, got nothing, has a next step, and
+  // might not open the app precisely BECAUSE nothing arrived. The row is
+  // written `pending` here and sent by src/workers/notify/email.ts.
+  it("also queues an email for a rejection, carrying the same words", async () => {
+    const world = createWorld({
+      phashNeighbours: [
+        { id: OTHER_RECEIPT_ID, user_id: CONSUMER_ID, image_hash: IMAGE_HASH },
+      ],
+    });
+    const harness = createHarness({ world });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const emails = emailed(harness);
+    expect(emails).toHaveLength(1);
+    expect(emails[0]?.kind).toBe("receipt_rejected");
+    expect(emails[0]?.status).toBe("pending");
+    // Same words as the inbox row, because both are the copy matrix's output
+    // and neither channel composes its own.
+    expect(emails[0]?.title).toBe(raised(harness)[0]?.title);
+    expect(emails[0]?.body).toBe(raised(harness)[0]?.body);
+  });
+
+  // An award is good news the consumer is already holding their phone for, and
+  // an email per receipt is the fastest way for a loyalty app to be filed as
+  // promotional - which would bury the one message that must arrive.
+  it("does not email an approval", async () => {
+    const harness = createHarness();
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    expect(raised(harness)[0]?.kind).toBe("points_awarded");
+    expect(emailed(harness)).toHaveLength(0);
   });
 
   it("CRITICAL: tells the consumer nothing about WHY, only what", async () => {

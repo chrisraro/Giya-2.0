@@ -41,7 +41,7 @@ interface FakeSupabase {
  * test.
  */
 function createFake(
-  behaviour: "ok" | "error" | "throw" | "throw-sync" = "ok",
+  behaviour: "ok" | "error" | "throw" | "throw-sync" | "email-row-fails" = "ok",
 ): FakeSupabase {
   const inserts: FakeInsert[] = [];
   const client = {
@@ -54,12 +54,20 @@ function createFake(
         if (behaviour === "throw") {
           return Promise.reject(new Error("socket hang up"));
         }
-        if (behaviour === "error") {
-          return Promise.resolve({
-            error: { message: "new row violates check constraint", code: "23514" },
-          });
-        }
-        return Promise.resolve({ error: null });
+        const failed =
+          behaviour === "error" ||
+          (behaviour === "email-row-fails" && payload.channel === "email");
+        const answer = failed
+          ? { data: null, error: { message: "new row violates check constraint", code: "23514" } }
+          : { data: { id: "notification-1" }, error: null };
+        // The email insert reads its id back so it can be enqueued
+        // (`.select("id").single()`); the inbox insert is awaited directly. One
+        // object serves both, exactly as the real PostgREST builder does.
+        return {
+          select: () => ({ single: () => Promise.resolve(answer) }),
+          then: (resolve: (value: { error: unknown }) => unknown) =>
+            Promise.resolve({ error: answer.error }).then(resolve),
+        };
       },
     }),
   };
@@ -244,5 +252,91 @@ describe("CRITICAL: a failed notification does not undo the thing it was about",
   it("the points award still stands when there is no notification client at all", async () => {
     const ledger = await awardThenNotify(null);
     expect(ledger.pointsAwarded).toBe(120);
+  });
+});
+
+// ===========================================================================
+// The second channel
+// ===========================================================================
+//
+// Doc 30 section 5.2 step 3 has the fan-out write one row PER CHANNEL and then
+// enqueue the sends. Which kinds get an email is ../kinds.ts's decision and is
+// argued there; what is pinned here is that the decision is HONOURED, and that
+// the email half is best effort in the strong sense - it cannot cost the inbox
+// message, which is the guaranteed channel.
+
+describe("the email channel", () => {
+  it("writes the inbox row as already sent, because there is no send to wait for", async () => {
+    const fake = createFake();
+
+    await raiseNotification({ ...input(), deps: fake.deps });
+
+    expect(fake.inserts[0]?.payload).toMatchObject({ channel: "in_app", status: "sent" });
+    expect(fake.inserts[0]?.payload.sent_at).toEqual(expect.any(String));
+  });
+
+  it("writes no email row for a kind the registry does not list email on", async () => {
+    const fake = createFake();
+
+    await raiseNotification({ ...input({ kind: "points_awarded" }), deps: fake.deps });
+
+    expect(fake.inserts).toHaveLength(1);
+  });
+
+  it("writes a pending email row for a rejection, carrying the same words", async () => {
+    const fake = createFake();
+
+    const ok = await raiseNotification({
+      ...input({
+        kind: "receipt_rejected",
+        title: "Already scanned",
+        body: "This receipt is already on your account. Each receipt can earn points once.",
+      }),
+      deps: fake.deps,
+    });
+
+    expect(ok).toBe(true);
+    expect(fake.inserts).toHaveLength(2);
+    expect(fake.inserts[1]?.payload).toMatchObject({
+      channel: "email",
+      // Durable BEFORE any send is attempted, which is what makes the send
+      // idempotent and replayable.
+      status: "pending",
+      kind: "receipt_rejected",
+      title: "Already scanned",
+      user_id: USER_ID,
+      business_id: BUSINESS_ID,
+    });
+    // The email row carries no sent_at: nothing has been sent yet, and a
+    // timestamp here would make the worker's own idempotency gate a lie.
+    expect(fake.inserts[1]?.payload.sent_at).toBeUndefined();
+  });
+
+  // The property the whole ordering exists for. A consumer who gets the inbox
+  // message and no email has been told; one who gets neither has not.
+  it("CRITICAL: still reports success when the email row cannot be written", async () => {
+    const fake = createFake("email-row-fails");
+
+    const ok = await raiseNotification({
+      ...input({ kind: "receipt_rejected", title: "Already scanned", body: "It is on your account." }),
+      deps: fake.deps,
+    });
+
+    expect(ok).toBe(true);
+    expect(fake.inserts[0]?.payload).toMatchObject({ channel: "in_app" });
+  });
+
+  // The enqueue runs with no service-role client in this suite (see the mock at
+  // the top), so it returns a failure rather than publishing - which is the
+  // degraded state a developer machine is actually in, and it must be silent.
+  it("CRITICAL: still reports success when the send cannot be enqueued", async () => {
+    const fake = createFake();
+
+    const ok = await raiseNotification({
+      ...input({ kind: "receipt_rejected", title: "Already scanned", body: "It is on your account." }),
+      deps: fake.deps,
+    });
+
+    expect(ok).toBe(true);
   });
 });

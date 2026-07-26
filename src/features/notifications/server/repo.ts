@@ -26,11 +26,24 @@ import type { NotificationDTO } from "../types";
 // policy is added to this table (an admin support surface, say) a query relying
 // on RLS alone silently widens. Constraining the tenancy key in the query means
 // that day changes nothing here.
+//
+// `.eq("channel", IN_APP_CHANNEL)` is NOT belt and braces. 0030 made
+// notifications one row per recipient PER CHANNEL, so the same message can now
+// exist twice: once for the inbox and once for the email that was sent about
+// it. Without this predicate the inbox would render each emailed message twice
+// and, worse, the badge would count an email row as unread forever - nobody
+// marks an email read. Doc 25 writes the unread index as `where read_at is null
+// and channel = 'in_app'` for exactly this reason, and 0030 restored that
+// conjunct; the predicate here is the query half of the same statement, and the
+// two must be edited together or the index stops covering the count.
 
 /** Doc 33: the inbox pages 25 at a time. One page is all any surface asks for
  * today, so pagination is a limit rather than a cursor until a screen needs
  * the second page. */
 export const NOTIFICATION_PAGE_SIZE = 25;
+
+/** The one channel this module reads. See the header. */
+const IN_APP_CHANNEL = "in_app";
 
 interface NotificationRow {
   id: string;
@@ -93,6 +106,7 @@ export async function listMyNotifications(
     .from("notifications")
     .select(NOTIFICATION_COLUMNS)
     .eq("user_id", userId)
+    .eq("channel", IN_APP_CHANNEL)
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(limit);
@@ -126,6 +140,7 @@ export async function getMyUnreadNotificationCount(): Promise<number> {
     .from("notifications")
     .select("id", { count: "exact", head: true })
     .eq("user_id", userId)
+    .eq("channel", IN_APP_CHANNEL)
     .is("read_at", null);
 
   if (error !== null) {
@@ -160,6 +175,7 @@ export async function markNotificationRead(
     .update({ read_at: new Date().toISOString() })
     .eq("id", notificationId)
     .eq("user_id", userId)
+    .eq("channel", IN_APP_CHANNEL)
     // Only unread rows are written, so re-opening a read notification does not
     // move its timestamp: `read_at` means "when you first saw this", and the
     // 90-day retention sweep (doc 30 section 5.7) counts from it.
@@ -192,6 +208,7 @@ async function readRoute(
     .select("data")
     .eq("id", notificationId)
     .eq("user_id", userId)
+    .eq("channel", IN_APP_CHANNEL)
     .maybeSingle<{ data: unknown }>();
 
   if (error !== null || data === null) return null;
@@ -214,6 +231,7 @@ export async function markAllNotificationsRead(): Promise<number> {
     .from("notifications")
     .update({ read_at: new Date().toISOString() })
     .eq("user_id", userId)
+    .eq("channel", IN_APP_CHANNEL)
     .is("read_at", null)
     .select("id");
 
