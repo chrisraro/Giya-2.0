@@ -763,6 +763,60 @@ export type Database = {
           },
         ]
       }
+      jobs: {
+        Row: {
+          attempts: number
+          business_id: string | null
+          created_at: string
+          dedupe_key: string | null
+          finished_at: string | null
+          heartbeat_at: string | null
+          id: string
+          last_error: string | null
+          max_attempts: number
+          payload: Json
+          qstash_message_id: string | null
+          queue: string
+          scheduled_at: string
+          started_at: string | null
+          status: string
+        }
+        Insert: {
+          attempts?: number
+          business_id?: string | null
+          created_at?: string
+          dedupe_key?: string | null
+          finished_at?: string | null
+          heartbeat_at?: string | null
+          id?: string
+          last_error?: string | null
+          max_attempts?: number
+          payload: Json
+          qstash_message_id?: string | null
+          queue: string
+          scheduled_at?: string
+          started_at?: string | null
+          status?: string
+        }
+        Update: {
+          attempts?: number
+          business_id?: string | null
+          created_at?: string
+          dedupe_key?: string | null
+          finished_at?: string | null
+          heartbeat_at?: string | null
+          id?: string
+          last_error?: string | null
+          max_attempts?: number
+          payload?: Json
+          qstash_message_id?: string | null
+          queue?: string
+          scheduled_at?: string
+          started_at?: string | null
+          status?: string
+        }
+        Relationships: []
+      }
       loyalty_cards: {
         Row: {
           business_id: string
@@ -960,33 +1014,45 @@ export type Database = {
         Row: {
           body: string
           business_id: string | null
+          channel: string
           created_at: string
           data: Json
+          error: string | null
           id: string
           kind: string
           read_at: string | null
+          sent_at: string | null
+          status: string
           title: string
           user_id: string
         }
         Insert: {
           body: string
           business_id?: string | null
+          channel?: string
           created_at?: string
           data?: Json
+          error?: string | null
           id?: string
           kind: string
           read_at?: string | null
+          sent_at?: string | null
+          status?: string
           title: string
           user_id: string
         }
         Update: {
           body?: string
           business_id?: string | null
+          channel?: string
           created_at?: string
           data?: Json
+          error?: string | null
           id?: string
           kind?: string
           read_at?: string | null
+          sent_at?: string | null
+          status?: string
           title?: string
           user_id?: string
         }
@@ -2376,6 +2442,20 @@ export type Database = {
         }
         Returns: string
       }
+      sweep_job_health: {
+        Args: { p_hours?: number }
+        Returns: {
+          active: boolean
+          failures: number
+          jobname: string
+          last_error: string
+          last_finished_at: string
+          last_status: string
+          runs: number
+          schedule: string
+        }[]
+      }
+      sweep_stuck_receipts: { Args: { p_limit?: number }; Returns: number }
       validate_redemption: {
         Args: { p_claim_id: string; p_method?: string; p_token_jti: string }
         Returns: Json

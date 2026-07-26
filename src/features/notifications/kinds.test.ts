@@ -4,6 +4,7 @@ import {
   NOTIFICATION_KINDS,
   NOTIFICATION_KIND_REGISTRY,
   isNotificationKind,
+  kindEmails,
   notificationKindEntry,
   notificationRoute,
 } from "./kinds";
@@ -91,6 +92,56 @@ describe("every kind this slice raises is transactional", () => {
     for (const kind of NOTIFICATION_KINDS) {
       expect(NOTIFICATION_KIND_REGISTRY[kind].transactional).toBe(true);
     }
+  });
+});
+
+// ===========================================================================
+// Channels
+// ===========================================================================
+//
+// The email list is one item long and the registry argues each inclusion and
+// each exclusion at length. These tests pin the OUTCOME of that argument,
+// because the argument lives in a comment and a comment does not fail a build.
+//
+// The bar, restated: an email is the only channel here that persists somewhere
+// the reader did not choose. It sits in an inbox, it is searchable, it is
+// forwarded, and it cannot be recalled. It is far easier to add a kind to this
+// list than to un-send what it sent.
+
+describe("channels", () => {
+  it("delivers every kind to the inbox, which is the guaranteed channel", () => {
+    for (const kind of NOTIFICATION_KINDS) {
+      expect(NOTIFICATION_KIND_REGISTRY[kind].channels).toContain("in_app");
+    }
+  });
+
+  it("emails exactly one kind: the rejection the consumer must act on", () => {
+    const emailing = NOTIFICATION_KINDS.filter((kind) => kindEmails(kind));
+    expect(emailing).toEqual(["receipt_rejected"]);
+  });
+
+  it("does not email the good news, which the consumer opens the app for anyway", () => {
+    expect(kindEmails("points_awarded")).toBe(false);
+    expect(kindEmails("reward_claimed")).toBe(false);
+  });
+
+  it("does not email a receipt routed to a human, which is not actionable", () => {
+    expect(kindEmails("receipt_in_review")).toBe(false);
+  });
+
+  // There are no VAPID keys and no service worker push registration, so a kind
+  // that claimed push would fan out rows nothing sends.
+  it("claims no push channel, because nothing can deliver one", () => {
+    for (const kind of NOTIFICATION_KINDS) {
+      expect(NOTIFICATION_KIND_REGISTRY[kind].channels).not.toContain("push");
+    }
+  });
+
+  // The fallback for "I do not know what this is" must never be "send it to
+  // their inbox anyway".
+  it("never emails a kind this build does not know", () => {
+    expect(kindEmails("campaign_push")).toBe(false);
+    expect(notificationKindEntry("campaign_push").channels).toEqual(["in_app"]);
   });
 });
 

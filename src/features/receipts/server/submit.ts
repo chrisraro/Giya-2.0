@@ -524,12 +524,35 @@ export async function submitReceipt(
 
   const receiptId = inserted.id;
 
-  // TODO(queue): doc 36 Stage 2. Once the jobs slice lands this becomes an
-  // enqueue of `ocr.process` with `payload={receipt_id}` and
-  // `jobs.dedupe_key = sha256` (the unique `jobs_dedupe_idx` on
-  // (queue, dedupe_key) while queued/running is what prevents concurrent double
-  // processing), and the QStash worker calls processReceipt itself. The call
-  // site does not change shape: a receipt id in, nothing out.
+  // TODO(queue): doc 36 Stage 2. THE INFRASTRUCTURE NOW EXISTS and this call
+  // site is deliberately still inline. What is already built:
+  //
+  //   * `jobs` (0029_jobs.sql), with the partial `jobs_dedupe_idx` on
+  //     (queue, dedupe_key) while queued/running that prevents concurrent
+  //     double processing;
+  //   * `enqueue()` in src/lib/queue/publish.ts, which writes the row before it
+  //     publishes and never throws;
+  //   * `ocr.process` in src/lib/queue/queues.ts, already carrying doc 39's
+  //     retry budget (3 attempts), flow-control key (`ocr`, parallelism 10) and
+  //     dedupe key (`receipts.id`);
+  //   * the claim protocol and the worker-route shape, both proven by
+  //     `notify.email` (src/app/api/jobs/notify.email/route.ts).
+  //
+  // WHAT REMAINS is not queue work, it is re-entrancy work in
+  // src/features/receipts/server/process.ts. Enqueuing makes concurrent
+  // execution of `processReceipt` ORDINARY rather than exceptional (a retry
+  // after a timeout overlaps the original; QStash delivers at least once by
+  // design), and the pipeline is not yet safe under that: velocity is counted
+  // per pass, and the status claim does not verify that it changed a row. Doc
+  // 39 is explicit that a worker must be "idempotent by domain key", and today
+  // this one is not. Flipping the seam before that lands would not add
+  // durability, it would convert a rare race into the normal case.
+  //
+  // So the last step is exactly two lines here - swap the call below for
+  // `enqueue({queue: "ocr.process", payload: {receipt_id: receiptId},
+  // businessId: body.business_id ?? null, dedupeKey: receiptId})` - and it is
+  // gated on process.ts being safe to run twice. The call site does not change
+  // shape either way: a receipt id in, nothing out.
   //
   // Until then it runs inline, and a failure must NOT fail the submission. The
   // row exists and is `queued`, which is precisely the state a retry expects;

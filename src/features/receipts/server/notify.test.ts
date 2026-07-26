@@ -43,20 +43,30 @@ interface Raised {
   kind: string;
   title: string;
   body: string;
+  channel?: string;
+  status?: string;
   data: { route?: string; params?: Record<string, unknown> };
 }
 
 interface Harness {
   deps: { supabase: SupabaseClient<Database> };
+  /** The INBOX rows. 0030 made notifications one row per recipient per channel,
+   * so `raise` can now write two for one message; every assertion about "the
+   * notification" means the in_app one, which is the guaranteed channel. */
   raised: Raised[];
+  /** The email-channel rows, which exist only for kinds
+   * ../../notifications/kinds.ts lists the email channel on. */
+  emailed: Raised[];
   businessReads: number;
 }
 
 function createHarness(shopName: string | null = SHOP_NAME): Harness {
   const raised: Raised[] = [];
+  const emailed: Raised[] = [];
   const harness: Harness = {
     deps: { supabase: null as unknown as SupabaseClient<Database> },
     raised,
+    emailed,
     businessReads: 0,
   };
 
@@ -65,8 +75,16 @@ function createHarness(shopName: string | null = SHOP_NAME): Harness {
       if (table === "notifications") {
         return {
           insert: (payload: Raised) => {
-            raised.push(payload);
-            return Promise.resolve({ error: null });
+            (payload.channel === "email" ? emailed : raised).push(payload);
+            // The email insert reads its id back (`.select("id").single()`) so
+            // it can be enqueued; the inbox insert is awaited directly. One
+            // object serves both, which is what the real builder does too.
+            const result = { data: { id: "notification-1" }, error: null };
+            return {
+              select: () => ({ single: () => Promise.resolve(result) }),
+              then: (resolve: (value: { error: null }) => unknown) =>
+                Promise.resolve({ error: null }).then(resolve),
+            };
           },
         };
       }
