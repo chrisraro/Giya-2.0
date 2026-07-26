@@ -5,6 +5,11 @@ import { BUSINESS_SETTINGS_ROLES } from "@/features/businesses/settings/roles";
 import { SettingsForm } from "@/features/businesses/settings/components/settings-form";
 import { loadProfile } from "@/features/businesses/settings/server/service";
 import { resolveStaffContext } from "@/features/businesses/server/resolve-owner-business";
+import { MetaConnectionCard } from "@/features/integrations/meta/components/meta-connection-card";
+import {
+  listSelectable,
+  loadIntegrationView,
+} from "@/features/integrations/meta/server/service";
 
 // /business/settings - the tenant's own details (doc 32 sections 4 and 13).
 //
@@ -23,7 +28,26 @@ import { resolveStaffContext } from "@/features/businesses/server/resolve-owner-
 // the query.
 export const dynamic = "force-dynamic";
 
-export default async function BusinessSettingsPage() {
+// The Meta OAuth callback redirects back here with `?meta=<outcome>` and, on
+// the happy path, `&sid=<selection id>`. Both are read here rather than in the
+// card because a client component cannot read a search parameter without
+// becoming a suspense boundary, and because `sid` has to be exchanged for the
+// Page list SERVER-side: the parked selection holds page access tokens, and
+// only the names and ids cross to the browser (see server/selection.ts).
+interface SettingsPageProps {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
+
+function readParam(
+  params: Record<string, string | string[] | undefined>,
+  key: string,
+): string | null {
+  const value = params[key];
+  if (typeof value === "string" && value.length > 0) return value;
+  return null;
+}
+
+export default async function BusinessSettingsPage({ searchParams }: SettingsPageProps) {
   const context = await resolveStaffContext(BUSINESS_SETTINGS_ROLES);
   if (context === null) {
     // The portal layout already redirected non-members; reaching here means an
@@ -47,5 +71,35 @@ export default async function BusinessSettingsPage() {
     );
   }
 
-  return <SettingsForm profile={profile.data} />;
+  const params = await searchParams;
+  const selectionId = readParam(params, "sid");
+
+  // Both reads are non-throwing by contract (see their headers): an
+  // unconfigured or unreachable integration must never take down the screen
+  // that edits a business's opening hours.
+  const integration = await loadIntegrationView({
+    businessId: context.businessId,
+    canManage: true,
+  });
+
+  const selectablePages =
+    selectionId === null
+      ? []
+      : ((await listSelectable({
+          selectionId,
+          businessId: context.businessId,
+          userId: context.userId,
+        })) ?? []);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <SettingsForm profile={profile.data} />
+      <MetaConnectionCard
+        view={integration}
+        outcome={readParam(params, "meta")}
+        selectionId={selectablePages.length > 0 ? selectionId : null}
+        selectablePages={selectablePages}
+      />
+    </div>
+  );
 }
