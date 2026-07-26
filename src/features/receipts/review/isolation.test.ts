@@ -82,7 +82,33 @@ function isAllowedImporter(path: string): boolean {
     path.startsWith("src/app/(business)/") ||
     // The review service and its own suite.
     path === "src/features/receipts/server/review.ts" ||
-    path === "src/features/receipts/server/review.test.ts"
+    path === "src/features/receipts/server/review.test.ts" ||
+    // ---------------------------------------------------------------------
+    // The PLATFORM ADMIN portal, added deliberately and not as a convenience.
+    //
+    // This fence exists to keep the withheld columns off a CONSUMER surface,
+    // and the admin portal is the furthest thing from one: doc 31 makes it
+    // staff-facing, doc 37 makes its fraud queue the platform-wide sibling of
+    // the business queue, and 0031 gave an admin row-level read on the same
+    // tables. Every module in `features/admin` that touches those columns
+    // carries `import "server-only"`, which the second suite in this file
+    // checks independently of this allowlist.
+    //
+    // What it reuses is the part that MUST NOT be duplicated: doc 37's evidence
+    // display contract. `describeSignal`, `severityMeta`, `queueAge` and the
+    // rest are imported from `review/presenter` and re-exported by
+    // `admin/presenter`, so an admin and a merchant read the same sentence
+    // about the same detector. A second implementation would drift, and the
+    // direction it drifts in is an escalation conversation that starts with
+    // the two of them disagreeing about what the detector said.
+    //
+    // The admin tree carries its own fence in the other direction:
+    // `features/admin/isolation.test.ts` forbids any consumer surface from
+    // importing IT, which is what stops this widening from becoming a path
+    // from `parse_meta` to a consumer screen by way of two hops.
+    // ---------------------------------------------------------------------
+    path.startsWith("src/features/admin/") ||
+    path.startsWith("src/app/(admin)/")
   );
 }
 
