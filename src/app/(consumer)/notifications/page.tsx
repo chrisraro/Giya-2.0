@@ -1,8 +1,7 @@
 import { redirect } from "next/navigation";
 
-import { FormPending } from "@/components/ui/pending-button";
-import { CircularProgress } from "@/components/ui/progress";
 import { markAllNotificationsReadAction } from "@/features/notifications/actions";
+import { MarkAllReadButton } from "@/features/notifications/components/mark-all-read-button";
 import { NotificationList } from "@/features/notifications/components/notification-list";
 import {
   getMyUnreadNotificationCount,
@@ -53,29 +52,18 @@ export default async function NotificationsPage() {
             always-present control that does nothing is noise. */}
         {unread > 0 ? (
           <form action={markAllNotificationsReadAction}>
-            {/* FormPending reads useFormStatus from inside the form, so the
-                form itself stays a server component and only the button ships
-                JS. Marking a full inbox read is a write over a mobile
+            {/* MarkAllReadButton reads useFormStatus from inside the form, so
+                the form itself stays a server component and only the button
+                ships JS. Marking a full inbox read is a write over a mobile
                 connection; without this the control looked idle and invited a
-                second press. */}
-            <FormPending>
-              {(pending) => (
-                <button
-                  type="submit"
-                  disabled={pending}
-                  aria-busy={pending}
-                  className="inline-flex h-9 items-center gap-2 rounded-full px-4 text-label-l text-primary transition-colors duration-200 ease-standard motion-reduce:transition-none hover:bg-surface-container outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:pointer-events-none disabled:opacity-40"
-                >
-                  {/* The spinner's 16px box is always in the layout, empty
-                      when idle. Growing the button by 24px mid-press would
-                      drag it leftward across the header. */}
-                  <span className="inline-flex size-4 items-center justify-center">
-                    {pending ? <CircularProgress size="sm" /> : null}
-                  </span>
-                  Mark all read
-                </button>
-              )}
-            </FormPending>
+                second press.
+
+                It is a COMPONENT rather than a render prop, and that is the
+                whole reason this file changed: a render prop would be a
+                function crossing the server/client boundary, which React's
+                Flight serializer rejects at render time. See the header of
+                mark-all-read-button.tsx. */}
+            <MarkAllReadButton />
           </form>
         ) : null}
       </header>
