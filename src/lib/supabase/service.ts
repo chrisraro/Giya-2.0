@@ -2,7 +2,7 @@ import "server-only";
 
 import { createClient as createSupabaseClient, type SupabaseClient } from "@supabase/supabase-js";
 
-import { env, getServerEnv } from "@/lib/env";
+import { env } from "@/lib/env";
 
 import type { Database } from "./types";
 
@@ -27,8 +27,20 @@ import type { Database } from "./types";
 // loader falls back to its hardcoded defaults and logs). A throw here would
 // turn "no credential yet" into an unhandled pipeline failure, which is exactly
 // what the fallbacks exist to prevent.
+// Read straight from process.env rather than through getServerEnv(), which
+// validates the WHOLE server schema as a unit and throws naming every missing
+// key. Going through it defeated the contract stated directly above: a
+// deployment missing an unrelated required variable (UPSTASH_REDIS_REST_URL,
+// REDEMPTION_TOKEN_SECRET) threw here even though the service-role key itself
+// was present and correct. That is not hypothetical - it took out all eight
+// business portal routes at once, because the portal LAYOUT calls
+// countPendingReview, which calls this, and an exception in a layout has no
+// route-level boundary to land in. The same-shaped validation still applies
+// (the schema declares min(20)), so a truncated or placeholder key is still
+// treated as absent rather than handed to Supabase.
 export function createServiceRoleClient(): SupabaseClient<Database> | null {
-  const serviceRoleKey = getServerEnv().SUPABASE_SERVICE_ROLE_KEY;
+  const raw = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const serviceRoleKey = raw !== undefined && raw.length >= 20 ? raw : undefined;
   if (serviceRoleKey === undefined) return null;
 
   return createSupabaseClient<Database>(env.NEXT_PUBLIC_SUPABASE_URL, serviceRoleKey, {
