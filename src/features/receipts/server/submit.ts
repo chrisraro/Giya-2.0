@@ -7,6 +7,8 @@ import { z } from "zod";
 
 import { ApiError, API_ERROR_CODES } from "@/lib/api/errors";
 import type { ErrorDetail } from "@/lib/api/errors";
+import { enqueue, isQueueConfigured } from "@/lib/queue/publish";
+import type { EnqueueInput, EnqueueResult } from "@/lib/queue/publish";
 import { createServiceRoleClient } from "@/lib/supabase/service";
 import type { Database } from "@/lib/supabase/types";
 
@@ -26,7 +28,8 @@ import type { CanonicalizeReceiptImage } from "./image";
 //   4. canonicalize     - strips EXIF/GPS; after this the bytes are ours
 //   5. sha256 + pHash   - over the CANONICAL bytes, which is what is stored
 //   6. insert           - service role, since receipts has no client insert
-//   7. process          - synchronous today, a queue enqueue tomorrow
+//   7. dispatch         - enqueue `ocr.process` (doc 36 Stage 1 step 5), or
+//                         process inline when there is no queue to enqueue to
 //
 // EVERY write here goes through the service-role client. That is not a
 // convenience: supabase/migrations/0017_receipts.sql gives `receipts` no client
@@ -100,11 +103,13 @@ export interface SubmitReceiptResult {
 }
 
 /**
- * Doc 36 Stage 2's entry point, owned by T11's
+ * Doc 36 Stage 2's entry point, owned by
  * `src/features/receipts/server/process.ts`. It is INJECTED rather than
  * imported so this module never depends on the orchestrator: submit's job is
- * done the moment a queued row exists, and today's synchronous call is a
- * stand-in for tomorrow's QStash enqueue (see TODO(queue) below).
+ * done the moment a queued row exists.
+ *
+ * Still required after the queue flip, and NOT as a leftover: it is the
+ * degraded path. See `dispatchProcessing`.
  */
 export type ProcessReceipt = (receiptId: string) => Promise<void>;
 
@@ -113,6 +118,17 @@ export interface SubmitReceiptDeps {
   readonly supabase: SupabaseClient<Database>;
   readonly canonicalize: CanonicalizeReceiptImage;
   readonly processReceipt: ProcessReceipt;
+  /**
+   * Doc 39's single enqueue path (`src/lib/queue/publish.ts`), injected so the
+   * submission tests never reach QStash. Defaults to the real one.
+   */
+  readonly enqueue?: (input: EnqueueInput) => Promise<EnqueueResult>;
+  /**
+   * Whether this deployment can deliver a job at all. Defaults to the real env
+   * check; see `dispatchProcessing` for why the choice is made here rather than
+   * left to `enqueue()`.
+   */
+  readonly isQueueConfigured?: () => boolean;
   /** Injectable clock, so the cooldown boundary is testable. */
   readonly now?: () => Date;
 }
@@ -431,6 +447,187 @@ function auditClientHash(bytes: Uint8Array, clientSha256: string | undefined): v
 }
 
 // ---------------------------------------------------------------------------
+// Step 7 - dispatch (doc 36 Stage 1 step 5, Stage 2)
+// ---------------------------------------------------------------------------
+//
+// "Enqueue `ocr.process` with `payload={receipt_id}` and
+// `jobs.dedupe_key = sha256`" - doc 36 Stage 1 step 5, verbatim. `max_attempts`
+// is 3 for this queue, doc 36 Stage 2's deliberate override of the column
+// default 5; it is not passed here because `enqueue()` reads it from the
+// registry (src/lib/queue/queues.ts), which is the only place it can be stated
+// once for the publisher, the row and QStash's own `Upstash-Retries` header.
+//
+// =============================================================================
+// TWO DECISIONS LIVE HERE. BOTH ARE ABOUT NOT LOSING A RECEIPT.
+// =============================================================================
+//
+// -----------------------------------------------------------------------------
+// DECISION 1: WHAT HAPPENS WHEN THERE IS NO QUEUE (the local-dev / degraded case)
+// -----------------------------------------------------------------------------
+// A deployment with no `QSTASH_TOKEN` must still scan receipts. So the path is
+// selected on env, once, exactly the way `getOcrProvider()` selects an OCR
+// implementation - a synchronous read of the configuration, a branch, and a log
+// line naming the branch, so nobody debugging a receipt has to guess which one
+// ran.
+//
+// The check is deliberately made BEFORE the enqueue rather than inferred from
+// its result. `enqueue()` would happily write a `jobs` row on an unconfigured
+// deployment and report `published: false` - which is the right behaviour for a
+// fire-and-forget caller, because doc 39's reconciler exists to re-publish
+// exactly those. But here it would accumulate one undeliverable row per
+// submission on every developer machine: a queue whose depth only ever grows,
+// which doc 39's own metrics section describes as the failure of a registry
+// entry with no worker.
+//
+// -----------------------------------------------------------------------------
+// DECISION 2: WHAT HAPPENS WHEN THE ENQUEUE FAILS (fail-soft, and which way)
+// -----------------------------------------------------------------------------
+// The receipt row already exists at `status='queued'` and its sha256 is already
+// claimed by `receipts_sha_unique`. Three options, and two of them lose the
+// receipt:
+//
+//   * FAIL THE REQUEST (500). Rejected outright. It tells the consumer their
+//     submission was lost while it is sitting in the database, and it invites a
+//     resubmission of the same photo that `receipts_sha_unique` then refuses
+//     with a 422 - so the honest-looking answer produces a receipt that can
+//     never be filed at all. Being wrong in this direction costs a real
+//     customer their points.
+//
+//   * 202 AND LET A SWEEPER FIND IT. This is the option the shape of the code
+//     argues for, and it does not work TODAY, which is the whole point.
+//     `sweep_stuck_receipts` (0028) only ever looks at `status='processing'` -
+//     its candidate predicate says so and its comment explains why (a receipt
+//     with zero OCR attempts is left alone deliberately, because there is no
+//     evidence the image was ever the problem). A receipt stranded at `queued`
+//     is therefore swept by NOTHING. It is not retried, not rejected, not
+//     surfaced; it just sits, and the consumer watches a "Processing receipt…"
+//     entry forever. A silent enqueue failure would be the only way in this
+//     system to lose a receipt completely, so answering 202 and hoping is not
+//     fail-soft, it is fail-silent.
+//
+//   * 202 AND PROCESS IT INLINE. Chosen. The 202 is preserved (the row exists,
+//     which is all the response ever asserted), and the work still happens.
+//
+// WHY THE INLINE FALLBACK IS THE HONEST CLOSE, rather than a new sweeper: the
+// gap is that `queued` has no owner, and the cheapest correct fix is to not
+// leave a receipt there. Running the pipeline inline moves the receipt to
+// `processing` within milliseconds, and `processing` is a state the EXISTING
+// 0028 sweep already owns end to end - if the inline pass then dies, times out,
+// or is frozen by the platform mid-flight, the receipt is dead-lettered within
+// the hour as rejected / manual / 'processing_failed', the consumer is
+// notified, and they can resubmit. That converts an invisible permanent loss
+// into a bounded, visible, already-handled failure using machinery that is
+// already deployed and already tested. Extending the sweep instead would mean
+// re-enqueuing from SQL, and pg_cron can only call SQL: 0028's header explains
+// at length that it deliberately does not reimplement any of the pipeline's
+// retry logic in plpgsql, and a publisher living in the database with a QStash
+// token in it would be a worse answer than the one it replaced.
+//
+// THE PREDICATE IS "IS A DELIVERY IN FLIGHT", NOT "DID THE ROW GET WRITTEN".
+// `enqueue()` reports `status:'enqueued', published:false` when the row landed
+// but QStash refused, was unreachable, or timed out. That row is durable and
+// doc 39's hourly reconciler is designed to find it - but that reconciler is
+// not built yet (0028 ships only the receipts half of it), so today
+// `published:false` strands the receipt exactly as `status:'failed'` does.
+// Treating them the same is therefore not conservatism, it is accuracy about
+// what this deployment can currently recover. When the jobs reconciler ships,
+// this branch narrows to `status:'failed'` alone.
+//
+// The cost of being wrong in the chosen direction is a QStash outage turning
+// every submission into a slow request rather than a fast lie. That is the
+// right trade for the money path, and it is bounded by the 6/min per-consumer
+// rate limit; it is also no worse than the behaviour this very function had
+// before the seam flipped.
+
+/** Which path actually ran, for the caller's log and for the tests. */
+export type ReceiptDispatch = "queued" | "inline";
+
+interface DispatchInput {
+  readonly receiptId: string;
+  readonly businessId: string | null;
+  /** doc 36 Stage 1 step 5's `jobs.dedupe_key`. */
+  readonly sha256: string;
+  readonly deps: SubmitReceiptDeps;
+}
+
+/**
+ * Run the pipeline in this request. Never throws, for the reason the enqueue
+ * never does: the receipt is already committed, and a processing fault must not
+ * be able to un-file a submission the consumer has already made.
+ */
+async function processInline(input: DispatchInput, why: string): Promise<ReceiptDispatch> {
+  const { receiptId, deps } = input;
+  console.info(`[receipts] ${receiptId} is being processed INLINE (${why})`);
+  try {
+    await deps.processReceipt(receiptId);
+  } catch (error) {
+    // The row exists and is `queued` or `processing`, which is precisely the
+    // state a retry expects; turning a processing fault into a 500 here would
+    // tell the consumer their submission was lost while it sits in the database
+    // waiting to be picked up.
+    console.error(`[receipts] inline processing failed for ${receiptId}`, error);
+  }
+  return "inline";
+}
+
+async function dispatchProcessing(input: DispatchInput): Promise<ReceiptDispatch> {
+  const { receiptId, businessId, sha256, deps } = input;
+  const queueConfigured = deps.isQueueConfigured ?? isQueueConfigured;
+
+  // Decision 1.
+  if (!queueConfigured()) {
+    return processInline(input, "QStash is not configured on this deployment");
+  }
+
+  const publishJob = deps.enqueue ?? enqueue;
+  const result = await publishJob({
+    queue: "ocr.process",
+    // Identifiers only (doc 39). `job_id` is added by the publisher.
+    payload: { receipt_id: receiptId },
+    businessId,
+    // Doc 36 Stage 1 step 5: the sha256, so a duplicate submission cannot
+    // double-process. `jobs_dedupe_idx` (0029) is what enforces it, and only
+    // while the owning job is `queued`/`running`, so a finished job never holds
+    // the key hostage.
+    dedupeKey: sha256,
+    // The client that just wrote the receipt, reused rather than re-created.
+    // It is service-role by this function's contract, which makes `enqueue()`'s
+    // own "no service-role client" failure branch unreachable from here.
+    supabase: deps.supabase,
+  });
+
+  switch (result.status) {
+    case "enqueued":
+      if (result.published) {
+        console.info(
+          `[receipts] ${receiptId} is QUEUED on ocr.process as job ${result.jobId} (message ${result.messageId})`,
+        );
+        return "queued";
+      }
+      // Decision 2, the `published:false` half.
+      console.error(
+        `[receipts] job ${result.jobId} for ${receiptId} was recorded but QStash did not accept it`,
+      );
+      return processInline(input, "the job row landed but no delivery is in flight");
+
+    case "deduplicated":
+      // An in-flight job already owns this sha256. Given `receipts_sha_unique`
+      // this is close to unreachable, but if it happens the work IS scheduled
+      // and enqueuing again would be the double-processing the key exists to
+      // prevent.
+      console.info(
+        `[receipts] ${receiptId} is already owned by in-flight job ${result.jobId ?? "(unknown)"}; not enqueuing again`,
+      );
+      return "queued";
+
+    case "failed":
+      // Decision 2, the no-row half.
+      console.error(`[receipts] could not enqueue ocr.process for ${receiptId}: ${result.reason}`);
+      return processInline(input, "the job row could not be written");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Submission
 // ---------------------------------------------------------------------------
 
@@ -443,7 +640,9 @@ export async function submitReceipt(
   deps: SubmitReceiptDeps,
 ): Promise<SubmitReceiptResult> {
   const { userId, body } = input;
-  const { supabase, canonicalize, processReceipt } = deps;
+  // `processReceipt` is deliberately NOT destructured: it is reached only
+  // through `dispatchProcessing`, which decides whether it should run at all.
+  const { supabase, canonicalize } = deps;
   const now = deps.now?.() ?? new Date();
 
   assertOwnedImagePath(body.image_path, userId);
@@ -524,46 +723,26 @@ export async function submitReceipt(
 
   const receiptId = inserted.id;
 
-  // TODO(queue): doc 36 Stage 2. THE INFRASTRUCTURE NOW EXISTS and this call
-  // site is deliberately still inline. What is already built:
+  // Doc 36 Stage 1 step 5 / Stage 2. The seam: the pipeline is the queue's
+  // work now, and only this deployment's own configuration (or a failure to
+  // hand the job over) can make it this request's. See `dispatchProcessing` for
+  // both decisions and why they are the way round they are.
   //
-  //   * `jobs` (0029_jobs.sql), with the partial `jobs_dedupe_idx` on
-  //     (queue, dedupe_key) while queued/running that prevents concurrent
-  //     double processing;
-  //   * `enqueue()` in src/lib/queue/publish.ts, which writes the row before it
-  //     publishes and never throws;
-  //   * `ocr.process` in src/lib/queue/queues.ts, already carrying doc 39's
-  //     retry budget (3 attempts), flow-control key (`ocr`, parallelism 10) and
-  //     dedupe key (`receipts.id`);
-  //   * the claim protocol and the worker-route shape, both proven by
-  //     `notify.email` (src/app/api/jobs/notify.email/route.ts).
-  //
-  // WHAT REMAINS is not queue work, it is re-entrancy work in
-  // src/features/receipts/server/process.ts. Enqueuing makes concurrent
-  // execution of `processReceipt` ORDINARY rather than exceptional (a retry
-  // after a timeout overlaps the original; QStash delivers at least once by
-  // design), and the pipeline is not yet safe under that: velocity is counted
-  // per pass, and the status claim does not verify that it changed a row. Doc
-  // 39 is explicit that a worker must be "idempotent by domain key", and today
-  // this one is not. Flipping the seam before that lands would not add
-  // durability, it would convert a rare race into the normal case.
-  //
-  // So the last step is exactly two lines here - swap the call below for
-  // `enqueue({queue: "ocr.process", payload: {receipt_id: receiptId},
-  // businessId: body.business_id ?? null, dedupeKey: receiptId})` - and it is
-  // gated on process.ts being safe to run twice. The call site does not change
-  // shape either way: a receipt id in, nothing out.
-  //
-  // Until then it runs inline, and a failure must NOT fail the submission. The
-  // row exists and is `queued`, which is precisely the state a retry expects;
-  // turning a processing fault into a 500 here would tell the consumer their
-  // submission was lost while it sits in the database waiting to be picked up,
-  // and would invite a resubmission that `receipts_sha_unique` then refuses.
-  try {
-    await processReceipt(receiptId);
-  } catch (error) {
-    console.error(`[receipts] processing failed for ${receiptId}; left queued for retry`, error);
-  }
+  // NOTHING ABOUT THE RESPONSE DEPENDS ON THE ANSWER. Doc 36 Stage 1 step 6 is
+  // `202 { receipt_id, status: "queued" }`, and it was always an assertion
+  // about the ROW rather than about the delivery: the receipt exists, it is
+  // `queued`, and the consumer should subscribe to it. That is true on every
+  // branch below, which is why this call's result is a log line and not part of
+  // the return value.
+  await dispatchProcessing({
+    receiptId,
+    businessId: body.business_id ?? null,
+    // The AUTHORITATIVE server hash, over the canonical bytes - the same value
+    // written to the row above, so the dedupe key and `receipts.sha256` can
+    // never describe different images.
+    sha256,
+    deps,
+  });
 
   return { receiptId, status: "queued" };
 }

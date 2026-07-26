@@ -186,6 +186,32 @@ function readConfig(): QStashConfig | null {
 }
 
 /**
+ * Can this deployment actually DELIVER a job, as opposed to merely record one?
+ *
+ * The distinction matters to exactly one kind of caller: one that has a working
+ * synchronous fallback and needs to choose between the two BEFORE it writes
+ * anything. `enqueue()` deliberately does not expose the choice - it writes the
+ * row either way, because for a fire-and-forget caller a durable row plus doc
+ * 39's reconciler is strictly better than nothing. But for a caller that would
+ * otherwise do the work inline, an unconfigured deployment should not
+ * accumulate `jobs` rows that nothing will ever deliver: that is a queue whose
+ * depth only grows, which is precisely what doc 39's metrics section says a
+ * registry entry without a worker looks like.
+ *
+ * So this is the same env selection `getOcrProvider()` makes, exported for the
+ * same reason: the caller picks a path, once, and says in the log which one it
+ * picked. See src/features/receipts/server/submit.ts.
+ *
+ * Reads the SAME `readConfig()` the publish uses, so the two can never disagree
+ * about what "configured" means - a predicate that tested only `QSTASH_TOKEN`
+ * would answer true for a deployment with no callback origin, whose every
+ * publish then fails.
+ */
+export function isQueueConfigured(): boolean {
+  return readConfig() !== null;
+}
+
+/**
  * Schedule one unit of work.
  *
  * NEVER THROWS. See the module header. The caller may ignore the result
