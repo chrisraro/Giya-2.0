@@ -172,6 +172,64 @@ const serverEnvSchema = z.object({
 
   RESEND_API_KEY: z.string().min(10).optional(),
 
+  // ---------------------------------------------------------------------
+  // Meta Business (docs/30-modules/42-integrations.md, "Meta Business
+  // OAuth"). Both optional, and they are the reason the whole integration is
+  // built DORMANT: the Meta app does not exist yet, and Meta requires app
+  // review before most Page permissions work against a real account.
+  //
+  // With these unset every Meta surface degrades honestly and nothing throws:
+  // src/lib/integrations/meta.ts reports itself unconfigured, the connect
+  // action refuses with a message that names the missing variables, the
+  // callback route answers 503 DEPENDENCY_UNAVAILABLE, the webhook rejects
+  // (it cannot verify a signature without the secret, and rule 1 of the
+  // webhook is fail-closed), and the portal renders a "not configured" card
+  // instead of a Connect button that would open a broken consent dialog.
+  //
+  // Setting both activates the whole flow with NO code change. That is the
+  // src/features/receipts/server/ocr/provider.ts contract, applied to an
+  // OAuth integration.
+  //
+  // Deliberately NOT cross-validated here, for the reason every optional pair
+  // above states: a refinement on this schema would make a Meta
+  // misconfiguration throw for every getServerEnv() caller, taking down auth
+  // and rewards over an integration nobody has connected yet. The pairing rule
+  // ("an app id without its secret is a misconfiguration") is enforced in
+  // src/lib/integrations/meta.ts, where the blast radius is the integration
+  // that needs it.
+  META_APP_ID: z.string().min(1).optional(),
+  META_APP_SECRET: z.string().min(1).optional(),
+
+  // The shared token Meta echoes during the webhook registration handshake
+  // (`hub.verify_token`). An addition to doc 42's env registry table, which
+  // lists only the app id and secret; the registry has been updated alongside
+  // this line, per that doc's own "Adding a new integration" checklist item 3.
+  //
+  // A SEPARATE VARIABLE, not META_APP_SECRET reused. The verify token is typed
+  // into Meta's app dashboard, so it is disclosed to everyone who can see that
+  // console; the app secret signs every webhook and mints every token
+  // exchange. One value for both means a screenshot of the console compromises
+  // the signature scheme. Different blast radii, different secrets.
+  //
+  // Unset means the GET handshake is refused. That is the correct dormant
+  // behaviour: nobody can complete a webhook registration for an app that does
+  // not exist, and an endpoint that echoes any challenge presented to it is an
+  // open redirect for whoever wants to register our URL against their app.
+  META_WEBHOOK_VERIFY_TOKEN: z.string().min(1).optional(),
+
+  // The AES-256-GCM key (or key list) for the `integration_connections` token
+  // columns. Optional here for one specific reason: it is read straight from
+  // process.env by src/lib/crypto/token-cipher.ts, which validates it far more
+  // thoroughly than a length check can (32 bytes after decoding, the key-id
+  // grammar, no duplicate ids), and which must be able to answer "is a key
+  // configured" without throwing. It is declared anyway so this schema stays
+  // the single inventory of server variables that doc 42's env registry can be
+  // checked against.
+  //
+  // Format, per that file's header: `<material>` or `<id>:<material>` or a
+  // comma-separated list whose FIRST entry is the active key.
+  INTEGRATION_TOKEN_AES_KEY: z.string().min(32).optional(),
+
   // The From header. Configurable and defaulted in src/lib/email/client.ts to
   // Resend's shared `onboarding@resend.dev` sandbox sender, which is a
   // PLACEHOLDER: no domain is verified on this account yet, and the key in
@@ -216,6 +274,10 @@ export function getServerEnv(): ServerEnv {
     QSTASH_CALLBACK_ORIGIN: emptyToUndefined(process.env.QSTASH_CALLBACK_ORIGIN),
     APP_ORIGIN: emptyToUndefined(process.env.APP_ORIGIN),
     RESEND_API_KEY: emptyToUndefined(process.env.RESEND_API_KEY),
+    META_APP_ID: emptyToUndefined(process.env.META_APP_ID),
+    META_APP_SECRET: emptyToUndefined(process.env.META_APP_SECRET),
+    META_WEBHOOK_VERIFY_TOKEN: emptyToUndefined(process.env.META_WEBHOOK_VERIFY_TOKEN),
+    INTEGRATION_TOKEN_AES_KEY: emptyToUndefined(process.env.INTEGRATION_TOKEN_AES_KEY),
     EMAIL_FROM: emptyToUndefined(process.env.EMAIL_FROM),
   });
 

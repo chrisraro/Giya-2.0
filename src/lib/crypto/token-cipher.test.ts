@@ -1,0 +1,386 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { vi } from "vitest";
+
+// "server-only" throws on import outside Next.js's react-server condition
+// (which vitest does not set), so it must be mocked to a no-op for tests.
+vi.mock("server-only", () => ({}));
+
+import {
+  TOKEN_ENVELOPE_VERSION,
+  TokenCipherError,
+  activeKeyId,
+  decryptToken,
+  encryptToken,
+  isTokenCipherConfigured,
+  secretEquals,
+} from "./token-cipher";
+
+// =============================================================================
+// The token cipher is the single point where a real OAuth credential becomes
+// bytes we are willing to store. These tests are written against the three
+// things that would make it worthless:
+//
+//   1. it round trips (the boring one, and the only one people usually write)
+//   2. it REFUSES anything it did not produce - a flipped ciphertext byte, a
+//      flipped tag byte, a rewritten key id, the wrong key. GCM gives us that
+//      for free only if `final()` is actually called and its throw is actually
+//      propagated, and a refactor that "simplifies" either would pass test 1
+//      unchanged.
+//   3. THE FORMAT CANNOT DRIFT. Test group "the wire format" decrypts a
+//      hard-coded envelope that was produced OUTSIDE this module (see the
+//      comment there). Once a production row exists the layout is permanent,
+//      so a change to it has to fail here rather than in six months when a
+//      merchant's connection stops working.
+// =============================================================================
+
+// Two 32-byte test keys. Fixed rather than random so a failure is reproducible,
+// and obviously fake so nobody mistakes one for a real credential.
+const KEY_A = Buffer.alloc(32, 7).toString("base64");
+const KEY_B = Buffer.alloc(32, 9).toString("base64");
+
+const SAMPLE_TOKEN = "EAAGm0PX4ZCpsBAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxlong-lived";
+
+function setKey(value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env.INTEGRATION_TOKEN_AES_KEY;
+  } else {
+    process.env.INTEGRATION_TOKEN_AES_KEY = value;
+  }
+}
+
+const originalKey = process.env.INTEGRATION_TOKEN_AES_KEY;
+
+beforeEach(() => {
+  setKey(KEY_A);
+});
+
+afterEach(() => {
+  setKey(originalKey);
+});
+
+describe("round trip", () => {
+  it("decrypts what it encrypted", () => {
+    expect(decryptToken(encryptToken(SAMPLE_TOKEN))).toBe(SAMPLE_TOKEN);
+  });
+
+  it("survives non-ASCII, embedded NULs and long values", () => {
+    // The NUL below is written as an ESCAPE, not as a literal control
+    // character in the source: a literal one makes git classify this whole
+    // file as binary, which silently costs every future reviewer the diff. It
+    // is worth testing at all because GCM operates on bytes, so a caller that
+    // ever round-tripped a token through a C-style string would truncate here
+    // rather than at the cipher.
+    const awkward = `${"x".repeat(4000)}-ñ-日本語-\u0000-end`;
+    expect(decryptToken(encryptToken(awkward))).toBe(awkward);
+  });
+
+  it("refuses to encrypt an empty token", () => {
+    // A stored empty token produces a row that reads as connected and fails on
+    // first use, which is worse than refusing at the door.
+    expect(() => encryptToken("")).toThrow(TokenCipherError);
+    expect(() => encryptToken("")).toThrow(/empty token/i);
+  });
+});
+
+describe("the envelope layout", () => {
+  it("writes version, key-id length, key id, IV and tag in that order", () => {
+    const envelope = encryptToken(SAMPLE_TOKEN);
+
+    expect(envelope[0]).toBe(TOKEN_ENVELOPE_VERSION);
+    expect(envelope[1]).toBe(2); // "k1"
+    expect(envelope.subarray(2, 4).toString("ascii")).toBe("k1");
+    // header(4) + iv(12) + tag(16) = 32 bytes of overhead, then the ciphertext
+    // which is exactly as long as the plaintext (GCM is a stream mode).
+    expect(envelope.length).toBe(4 + 12 + 16 + Buffer.byteLength(SAMPLE_TOKEN, "utf8"));
+  });
+
+  it("never contains the plaintext", () => {
+    // The assertion behind the whole slice's "tokens are never readable" claim
+    // at the storage layer: what lands in bytea must not be the token.
+    const envelope = encryptToken(SAMPLE_TOKEN);
+    expect(envelope.toString("utf8")).not.toContain(SAMPLE_TOKEN);
+    expect(envelope.toString("latin1")).not.toContain(SAMPLE_TOKEN);
+  });
+
+  it("stamps the active key id, and reports it", () => {
+    setKey(`krot:${KEY_B}`);
+    expect(activeKeyId()).toBe("krot");
+    const envelope = encryptToken(SAMPLE_TOKEN);
+    expect(envelope[1]).toBe(4);
+    expect(envelope.subarray(2, 6).toString("ascii")).toBe("krot");
+  });
+});
+
+describe("the wire format", () => {
+  // THIS ENVELOPE WAS NOT PRODUCED BY THE MODULE UNDER TEST. It was built with
+  // bare node:crypto against the documented layout - version 0x01, keyIdLen
+  // 0x02, "k1", a fixed 12-byte IV, the 16-byte tag, then the ciphertext, with
+  // the 4-byte header as AAD - and pasted here as a constant.
+  //
+  // That independence is the point. A test that encrypts and then decrypts
+  // proves the module agrees with itself, which it would continue to do after
+  // someone reordered the fields. This constant is the format's only
+  // immovable witness, and it is exactly what a production row looks like.
+  const GOLDEN_HEX =
+    "01026b31000102030405060708090a0b" +
+    "faee81b7866d5ae8069e60036396fc9a" +
+    "5dc0a8377a66b52d12dcc8f1872c0dd7" +
+    "8d53d8e9350e1e4773aa4ecee1bc086b";
+  const GOLDEN_PLAINTEXT = "EAAGgolden-meta-long-lived-token";
+
+  it("decrypts a fixed envelope built outside this module", () => {
+    setKey(KEY_A);
+    expect(decryptToken(Buffer.from(GOLDEN_HEX, "hex"))).toBe(GOLDEN_PLAINTEXT);
+  });
+
+  it("still decrypts it when the active key has rotated past it", () => {
+    // The rotation contract: a NEW key leads, the old one stays available, and
+    // rows written under the old id keep working with no re-encryption.
+    setKey(`k2:${KEY_B},k1:${KEY_A}`);
+    expect(activeKeyId()).toBe("k2");
+    expect(decryptToken(Buffer.from(GOLDEN_HEX, "hex"))).toBe(GOLDEN_PLAINTEXT);
+    // and a fresh write goes under the new key
+    expect(encryptToken(SAMPLE_TOKEN).subarray(2, 4).toString("ascii")).toBe("k2");
+  });
+
+  it("refuses the fixed envelope once its key is retired from the registry", () => {
+    setKey(`k2:${KEY_B}`);
+    expect(() => decryptToken(Buffer.from(GOLDEN_HEX, "hex"))).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_KEY_UNKNOWN" }),
+    );
+  });
+});
+
+describe("IV uniqueness", () => {
+  it("uses a fresh IV on every call", () => {
+    // IV reuse under GCM does not merely weaken the ciphertext, it leaks the
+    // authentication subkey and lets an attacker forge tags from then on. This
+    // asserts the one line where that could go wrong.
+    const seen = new Set<string>();
+    for (let i = 0; i < 256; i += 1) {
+      seen.add(encryptToken(SAMPLE_TOKEN).subarray(4, 16).toString("hex"));
+    }
+    expect(seen.size).toBe(256);
+  });
+
+  it("produces a different ciphertext for the same plaintext each time", () => {
+    const a = encryptToken(SAMPLE_TOKEN).toString("hex");
+    const b = encryptToken(SAMPLE_TOKEN).toString("hex");
+    expect(a).not.toBe(b);
+    // ... and both still decrypt, so the difference is the IV and not damage
+    expect(decryptToken(Buffer.from(a, "hex"))).toBe(SAMPLE_TOKEN);
+    expect(decryptToken(Buffer.from(b, "hex"))).toBe(SAMPLE_TOKEN);
+  });
+});
+
+describe("tamper rejection", () => {
+  function flipLastByte(buffer: Buffer): Buffer {
+    const copy = Buffer.from(buffer);
+    const index = copy.length - 1;
+    copy[index] = (copy[index] ?? 0) ^ 0xff;
+    return copy;
+  }
+
+  it("rejects a tampered ciphertext", () => {
+    const tampered = flipLastByte(encryptToken(SAMPLE_TOKEN));
+    expect(() => decryptToken(tampered)).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_AUTH_FAILED" }),
+    );
+  });
+
+  it("rejects a tampered auth tag", () => {
+    const envelope = encryptToken(SAMPLE_TOKEN);
+    const tampered = Buffer.from(envelope);
+    // tag occupies bytes 16..32 for a 2-byte key id
+    tampered[20] = (tampered[20] ?? 0) ^ 0x01;
+    expect(() => decryptToken(tampered)).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_AUTH_FAILED" }),
+    );
+  });
+
+  it("rejects a tampered IV", () => {
+    const envelope = encryptToken(SAMPLE_TOKEN);
+    const tampered = Buffer.from(envelope);
+    tampered[5] = (tampered[5] ?? 0) ^ 0x01;
+    expect(() => decryptToken(tampered)).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_AUTH_FAILED" }),
+    );
+  });
+
+  it("rejects a rewritten key id, because the header is authenticated", () => {
+    // Both ids exist in the registry, so this is NOT caught by the key lookup:
+    // it is caught by the tag, which is what putting the header in the AAD
+    // buys. Without the AAD this would be a silent downgrade primitive the day
+    // two keys coexist.
+    setKey(`k1:${KEY_A},k2:${KEY_A}`);
+    const envelope = encryptToken(SAMPLE_TOKEN);
+    expect(envelope.subarray(2, 4).toString("ascii")).toBe("k1");
+
+    const tampered = Buffer.from(envelope);
+    tampered.write("k2", 2, "ascii");
+    expect(() => decryptToken(tampered)).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_AUTH_FAILED" }),
+    );
+  });
+
+  it("rejects an envelope encrypted under a different key", () => {
+    const envelope = encryptToken(SAMPLE_TOKEN);
+    // Same key id, different material: the id is what the registry looks up,
+    // so the failure has to come from the tag.
+    setKey(KEY_B);
+    expect(() => decryptToken(envelope)).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_AUTH_FAILED" }),
+    );
+  });
+
+  it("rejects an unsupported version byte rather than guessing", () => {
+    const tampered = Buffer.from(encryptToken(SAMPLE_TOKEN));
+    tampered[0] = 2;
+    expect(() => decryptToken(tampered)).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_VERSION_UNSUPPORTED" }),
+    );
+  });
+
+  it("rejects a truncated envelope", () => {
+    const envelope = encryptToken(SAMPLE_TOKEN);
+    for (const length of [0, 1, 2, 4, 16, 31, 32]) {
+      expect(() => decryptToken(envelope.subarray(0, length))).toThrow(
+        expect.objectContaining({ code: "TOKEN_CIPHER_MALFORMED" }),
+      );
+    }
+  });
+
+  it("rejects a zero-length key id", () => {
+    const tampered = Buffer.from(encryptToken(SAMPLE_TOKEN));
+    tampered[1] = 0;
+    expect(() => decryptToken(tampered)).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_MALFORMED" }),
+    );
+  });
+
+  it("rejects a plaintext token handed back as an envelope", () => {
+    // The mistake migration 0032's check constraint also guards against, in
+    // the other direction: bytes that were never encrypted must not decrypt.
+    expect(() => decryptToken(Buffer.from(SAMPLE_TOKEN, "utf8"))).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_VERSION_UNSUPPORTED" }),
+    );
+  });
+});
+
+describe("secrecy of failures", () => {
+  it("never names the token, the key or the ciphertext in an error", () => {
+    // An exception message travels to the error reporter, the log aggregator
+    // and occasionally a response body. Nothing in this module's failure path
+    // may carry a credential fragment.
+    const envelope = encryptToken(SAMPLE_TOKEN);
+    const tampered = Buffer.from(envelope);
+    tampered[tampered.length - 1] = (tampered[tampered.length - 1] ?? 0) ^ 0xff;
+
+    let thrown: unknown;
+    try {
+      decryptToken(tampered);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(TokenCipherError);
+    const serialized = `${String((thrown as Error).message)} ${String((thrown as Error).stack ?? "")}`;
+    expect(serialized).not.toContain(SAMPLE_TOKEN);
+    expect(serialized).not.toContain(KEY_A);
+    expect(serialized).not.toContain(envelope.toString("hex"));
+    expect(serialized).not.toContain(envelope.toString("base64"));
+    // and no `cause` chain that could carry one
+    expect((thrown as { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  it("does not leak the key through the not-configured path either", () => {
+    setKey(undefined);
+    let thrown: unknown;
+    try {
+      encryptToken(SAMPLE_TOKEN);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(TokenCipherError);
+    expect((thrown as TokenCipherError).code).toBe("TOKEN_CIPHER_NOT_CONFIGURED");
+    expect((thrown as Error).message).not.toContain(KEY_A);
+  });
+});
+
+describe("key registry", () => {
+  it("accepts base64, base64url and hex material of exactly 32 bytes", () => {
+    const raw = Buffer.alloc(32, 3);
+    for (const encoded of [raw.toString("base64"), raw.toString("base64url"), raw.toString("hex")]) {
+      setKey(encoded);
+      expect(decryptToken(encryptToken(SAMPLE_TOKEN))).toBe(SAMPLE_TOKEN);
+    }
+  });
+
+  it("rejects material that is not 32 bytes", () => {
+    setKey(Buffer.alloc(16, 3).toString("base64"));
+    expect(() => encryptToken(SAMPLE_TOKEN)).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_KEY_INVALID" }),
+    );
+  });
+
+  it("rejects an unlabelled key inside a list", () => {
+    // Two unlabelled keys would both claim "k1" and one set of rows would
+    // become permanently unreadable. Refuse rather than collide.
+    setKey(`${KEY_A},${KEY_B}`);
+    expect(() => encryptToken(SAMPLE_TOKEN)).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_KEY_INVALID" }),
+    );
+  });
+
+  it("rejects a duplicated key id", () => {
+    setKey(`k1:${KEY_A},k1:${KEY_B}`);
+    expect(() => encryptToken(SAMPLE_TOKEN)).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_KEY_INVALID" }),
+    );
+  });
+
+  it("rejects a key id outside the permitted alphabet", () => {
+    setKey(`Key One:${KEY_A}`);
+    expect(() => encryptToken(SAMPLE_TOKEN)).toThrow(
+      expect.objectContaining({ code: "TOKEN_CIPHER_KEY_INVALID" }),
+    );
+  });
+
+  it("reports configuration state without throwing", () => {
+    expect(isTokenCipherConfigured()).toBe(true);
+    setKey(undefined);
+    expect(isTokenCipherConfigured()).toBe(false);
+    setKey("   ");
+    expect(isTokenCipherConfigured()).toBe(false);
+    setKey("not-a-key");
+    expect(isTokenCipherConfigured()).toBe(false);
+  });
+
+  it("re-reads the registry when the variable changes", () => {
+    // The memoization is keyed on the raw string, so a rotation applied by a
+    // redeploy is picked up without a process-level reset hook.
+    const first = encryptToken(SAMPLE_TOKEN);
+    expect(first.subarray(2, 4).toString("ascii")).toBe("k1");
+    setKey(`k9:${KEY_B}`);
+    expect(encryptToken(SAMPLE_TOKEN).subarray(2, 4).toString("ascii")).toBe("k9");
+  });
+});
+
+describe("secretEquals", () => {
+  it("is true only for identical non-empty values", () => {
+    expect(secretEquals("abcdef", "abcdef")).toBe(true);
+    expect(secretEquals("abcdef", "abcdeg")).toBe(false);
+  });
+
+  it("is false for different lengths instead of throwing", () => {
+    // timingSafeEqual throws on a length mismatch; the guard in front of it is
+    // the part that is easy to forget and noisy to discover in production.
+    expect(secretEquals("abc", "abcdef")).toBe(false);
+    expect(secretEquals("abcdef", "abc")).toBe(false);
+  });
+
+  it("is false for empty input on either side", () => {
+    expect(secretEquals("", "")).toBe(false);
+    expect(secretEquals("", "abc")).toBe(false);
+  });
+});

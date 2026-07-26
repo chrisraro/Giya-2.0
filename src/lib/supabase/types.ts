@@ -763,6 +763,74 @@ export type Database = {
           },
         ]
       }
+      integration_connections: {
+        Row: {
+          access_token_encrypted: string
+          business_id: string
+          created_at: string
+          created_by: string | null
+          deleted_at: string | null
+          error: string | null
+          external_account_id: string
+          external_account_name: string | null
+          id: string
+          last_synced_at: string | null
+          provider: string
+          refresh_token_encrypted: string | null
+          scopes: string[]
+          status: string
+          token_expires_at: string | null
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          access_token_encrypted: string
+          business_id: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          error?: string | null
+          external_account_id: string
+          external_account_name?: string | null
+          id?: string
+          last_synced_at?: string | null
+          provider: string
+          refresh_token_encrypted?: string | null
+          scopes?: string[]
+          status?: string
+          token_expires_at?: string | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          access_token_encrypted?: string
+          business_id?: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          error?: string | null
+          external_account_id?: string
+          external_account_name?: string | null
+          id?: string
+          last_synced_at?: string | null
+          provider?: string
+          refresh_token_encrypted?: string | null
+          scopes?: string[]
+          status?: string
+          token_expires_at?: string | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "integration_connections_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       jobs: {
         Row: {
           attempts: number

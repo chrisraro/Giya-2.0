@@ -102,7 +102,7 @@ is transaction-wrapped (`begin ... rollback`) and leaves no data behind:
 psql "$DATABASE_URL" -f supabase/tests/rls_identity_smoke.sql
 ```
 
-Fourteen suites, one per domain:
+Fifteen suites, one per domain:
 
 | file | covers |
 |---|---|
@@ -120,6 +120,7 @@ Fourteen suites, one per domain:
 | `ref_data_smoke.sql` | reference data: both tables non-empty, the seed idempotent on replay, every city carrying a non-null province and region in one of the 18 real regions (0027) |
 | `rls_admin_smoke.sql` | the admin surface (0031): every admin SELECT policy 0017 and 0022 deferred, asserted as a PAIR (an admin session reads another tenant's fraud signals, receipts, line items, OCR evidence, AI spend, audit rows and platform settings; a non-admin owner of a real tenant reads none of them and still reads their own), the unmatched receipt (`business_id` null) that 0017 noted no audience could see, the column fences that an admin policy deliberately does NOT widen (`receipts.parse_meta`, `audit_logs.ip`), and `clawback_receipt_points`: the service_role-only grant, the mandatory reason, table-truth actor verification (a `support` admin is refused), `CLAWBACK_INVALID_STATE` for a receipt with no earn row and for a second attempt, the negative ledger row with `reverses_id` and its `balance_after` under the pair lock, the receipt landing on `rejected`/`fraud_suspected` with `reviewed_by`, the in-transaction audit row, and doc 35's clamping with the residual recorded as `after.shortfall_points` |
 | `rpc_sweeps_smoke.sql` | the two scheduled sweeps: `sweep_stuck_receipts` moves a stuck, out-of-budget receipt to the doc 36 dead-letter state (`rejected` / `manual` / `processing_failed`) while leaving both a receipt still inside its attempt budget and a receipt that is merely recent completely untouched, the business-scope `ocr.max_attempts` override widens the budget and withdrawing it narrows it again, a second run is a no-op, no ledger row is written, both `cron.job` rows carry the expected schedule and command, `expire_claims` still runs clean, and every function is service_role only (0028) |
+| `rls_integration_connections_smoke.sql` | `integration_connections` (0032): THE TOKEN COLUMN FENCE, asserted as the pair that matters (an owner reading their OWN tenant row gets 42501 on `access_token_encrypted` and `refresh_token_encrypted`, and on `select *`, while every allowlisted column reads cleanly), the owner/manager role list and the marketing narrowing, cross-tenant denial, the consumer and anon matrix rows, no client write path of any kind, the service_role split (insert/update/delete stay, TRUNCATE goes), the no-truncate statement trigger, and the four check constraints: the plaintext envelope fence (a raw `EAAG...` token is refused because its first byte is not the envelope version), the error/status pairing in both directions, and the provider and status vocabularies, plus the account uniqueness rule that reconnect upserts onto |
 
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
@@ -380,11 +381,15 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0029_jobs.sql | 20260726033458 | 0029_jobs |
 | 0030_notification_delivery.sql | 20260726033507 | 0030_notification_delivery |
 | 0031_admin_access.sql | 20260726042144 | 0031_admin_access |
+| 0032_integration_connections.sql | 20260726080854 | integration_connections |
 
 **These versions are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`.**
 Every migration was applied in file order in a single pass, so unlike the
 first run there is no ordering inversion and no ledger-name drift: live names
-match the file base names 1:1. See "Project history" below for why the replay
+match the file base names 1:1, with one exception noted in the table: 0032 was
+applied through the MCP tool, which takes a snake_case migration NAME rather
+than the file name, so it is recorded as `integration_connections`. The file
+is still the source of truth and the ordering is unaffected. See "Project history" below for why the replay
 happened.
 
 Notes:
