@@ -145,18 +145,21 @@ export function SubmitButton({
   );
 }
 
-/**
- * Pending state for a form control that is NOT a `Button` (a bare styled
- * `<button>`, a label-wrapped file input). Gives the caller the same
- * `useFormStatus` reading without forcing the Button component on them.
- *
- * Render inside the form. The children function receives the pending flag.
- */
-export function FormPending({
-  children,
-}: {
-  readonly children: (pending: boolean) => React.ReactNode;
-}) {
-  const { pending } = useFormStatus();
-  return <>{children(pending)}</>;
-}
+// THERE IS DELIBERATELY NO `FormPending` RENDER PROP HERE.
+//
+// This file used to export one: `<FormPending>{(pending) => ...}</FormPending>`,
+// meant for form controls that are not a `Button` (a bare styled `<button>`, a
+// label-wrapped file input). It read well and it could not work, because this
+// module is `"use client"` and every caller that wanted it was a server
+// component: the callback is a FUNCTION crossing the server/client boundary,
+// which React's Flight serializer refuses to encode. It shipped, it took
+// /notifications down in production, and the build never noticed because the
+// failure is at render.
+//
+// The replacement for "a form control that is not a Button needs the pending
+// flag" is a small `"use client"` component that calls `useFormStatus` itself
+// and renders that one control - see
+// src/features/notifications/components/mark-all-read-button.tsx. It costs a
+// file and it cannot be held wrong.
+//
+// src/app/rsc-boundary.test.ts enforces this across the app.
