@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/consumer/empty-state";
+import { StaggerItem } from "@/components/motion/stagger";
 import { formatPeso } from "@/lib/money";
 import { cn } from "@/lib/utils";
 
@@ -115,10 +116,17 @@ export function ReceiptHistoryList({ receipts, activeStatus }: ReceiptHistoryLis
           {...(activeStatus ? {} : { action: { label: "Scan your first receipt", href: "/scan" } })}
         />
       ) : (
+        // Rows enter on the MD3 emphasized-decelerate curve, staggered by
+        // position. Pure CSS (see globals.css): no client JavaScript, plays on
+        // first paint, and the keyframes exist only inside a
+        // `prefers-reduced-motion: no-preference` block, so a consumer who
+        // asked for less motion gets the settled list with no animation.
         <ul className="mt-4 space-y-1">
-          {receipts.map((receipt) => (
+          {receipts.map((receipt, index) => (
             <li key={receipt.receiptId}>
-              <ReceiptHistoryRow receipt={receipt} />
+              <StaggerItem index={index}>
+                <ReceiptHistoryRow receipt={receipt} />
+              </StaggerItem>
             </li>
           ))}
         </ul>

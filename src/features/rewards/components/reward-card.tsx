@@ -4,8 +4,8 @@ import * as React from "react";
 import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { PendingButton } from "@/components/ui/pending-button";
 
 import { claimReward } from "../actions";
 import type { ClaimableRewardDTO } from "../types";
@@ -73,16 +73,23 @@ export function RewardCard({ reward }: RewardCardProps) {
           {outOfStock ? "None left" : `${reward.remaining} left`}
         </p>
       ) : null}
-      <Button
+      {/* Spending points is a money path: the button must show it was tapped,
+          refuse a second tap, and not resize while it does either. PendingButton
+          handles all three -- it renders "Claim" and "Claiming" in the same grid
+          cell, so the button is already as wide as the longer word at first
+          paint and the card below it never moves. */}
+      <PendingButton
         type="button"
         variant="tonal"
         size="touch"
-        disabled={pending || claimed || outOfStock}
+        pending={pending}
+        pendingLabel="Claiming"
+        disabled={claimed || outOfStock}
         onClick={handleClaim}
         className="mt-1 w-full"
       >
-        {claimed ? "Claimed" : pending ? "Claiming..." : "Claim"}
-      </Button>
+        {claimed ? "Claimed" : "Claim"}
+      </PendingButton>
       {error ? (
         <p role="alert" className="text-label-s text-error">
           {error}
