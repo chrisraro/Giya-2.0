@@ -60,8 +60,8 @@ These are set in a dashboard rather than a file, and are easy to forget.
 - **hCaptcha secret** - Supabase dashboard, Auth settings. Already configured.
 - **Google OAuth** - Supabase dashboard, Auth providers. Client id and secret.
 - **Facebook OAuth** - Supabase dashboard, Auth providers, using the Meta app above.
-- **Custom access token hook** - Supabase dashboard, Auth hooks. Currently disabled. Every policy in the database uses the table-truth helper `private.is_active_staff` instead of JWT claims, so the app works without it, but the claims-only admin surfaces need it before they ship. See `supabase/README.md`.
-- **Leaked password protection** - Supabase dashboard, Auth. Blocked on having an email provider; raises a standing advisor warning until enabled.
+- **Custom access token hook** - ENABLED 2026-07-26 via the Management API, verified by a real sign-in that returned `app_metadata.biz`. Was: Every policy in the database uses the table-truth helper `private.is_active_staff` instead of JWT claims, so the app works without it, but the claims-only admin surfaces need it before they ship. See `supabase/README.md`.
+- **Leaked password protection** - requires the **Pro plan**, not an email provider as previously recorded. The Management API rejects it outright on the free plan. Raises a standing advisor warning until the project is upgraded.
 - **Email confirmation** - Supabase dashboard. Currently off for dev convenience. Must be ON in production.
 
 ## Before production

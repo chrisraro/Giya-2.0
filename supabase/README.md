@@ -33,7 +33,24 @@ history (including the pre-0001 legacy-cleanup entries).
   pending migrations on merge to `main`. File naming stays compatible: the CLI
   accepts the `NNNN_name.sql` prefix ordering used here.
 
-## Manual dashboard step: enable the token hook (recommended fast path)
+## Token hook: ENABLED as of 2026-07-26
+
+**The custom access token hook is now live** on `zlfxfzlnklqhajacngxf`, set via the
+Management API rather than the dashboard:
+`hook_custom_access_token_enabled = true`,
+`hook_custom_access_token_uri = pg-functions://postgres/private/custom_access_token_hook`.
+
+Verified by a real auth round trip: sign-in succeeds and the issued token carries
+`app_metadata.biz` with the caller's business memberships. Nothing regressed,
+because every policy already used the table-truth helper and the hook is purely
+additive: it is a fast path and now also unblocks the claim-only admin surfaces
+(doc 31's fraud queue, the `audit_logs` admin read).
+
+Note `password_hibp_enabled` could NOT be enabled: leaked-password protection is
+a **Pro plan** feature. That is the real reason, not the missing email provider
+recorded earlier.
+
+### Historical: the original manual instructions
 
 Migration 0003 creates `private.custom_access_token_hook`, but Supabase only
 runs it after it is enabled in the dashboard:
