@@ -1,3 +1,4 @@
+import { isInsidePhilippines, isValidCoordinates, type Coordinates } from "@/lib/maps/coordinates";
 import type { Json } from "@/lib/supabase/types";
 
 import { parseOpeningHours, parseSocials } from "../hours";
@@ -22,6 +23,16 @@ export {
 // write. The allowlist fence lives in repo.ts; this layer's job is to build a
 // patch that only ever names allowed columns.
 
+/**
+ * A stored `(lat, lng)` pair, or null unless BOTH are present and valid. Used
+ * on the read side; the write side's equivalent guarantee is in ../schemas.ts.
+ */
+export function toCoordinates(lat: number | null, lng: number | null): Coordinates | null {
+  if (lat === null || lng === null) return null;
+  const candidate = { lat, lng };
+  return isValidCoordinates(candidate) ? candidate : null;
+}
+
 function toView(row: BusinessRow): BusinessProfileView {
   return {
     name: row.name,
@@ -33,6 +44,11 @@ function toView(row: BusinessRow): BusinessProfileView {
     addressLine: row.address_line,
     barangay: row.barangay,
     postalCode: row.postal_code,
+    // A stored half-pair is treated as no pin at all. The write path cannot
+    // produce one (../schemas.ts refuses it), but this row may predate that
+    // rule or have been written by an admin tool, and a map centred on
+    // (lat, undefined) is a map in the Gulf of Guinea.
+    coordinates: toCoordinates(row.lat, row.lng),
     openingHours: parseOpeningHours(row.opening_hours),
     readOnly: {
       slug: row.slug,
@@ -77,8 +93,30 @@ export function buildProfilePatch(input: BusinessProfileInput) {
     address_line: input.addressLine,
     barangay: input.barangay,
     postal_code: input.postalCode,
+    lat: input.lat,
+    lng: input.lng,
     opening_hours: input.openingHours as unknown as Json,
   };
+}
+
+/**
+ * Logs a pin that landed outside the Philippines. It does NOT refuse the save -
+ * the argument for warning rather than rejecting on a market boundary is at
+ * `isInsidePhilippines` in src/lib/maps/coordinates.ts, and the merchant has
+ * already seen the same warning next to the Save button.
+ *
+ * This exists so the case is visible in server logs too. A merchant who
+ * genuinely has a shop in Sabah is one line in a log; a hundred of these in a
+ * week is a bug in the picker, and without this we would never find out.
+ */
+export function warnIfOutsideMarket(businessId: string, input: BusinessProfileInput): void {
+  if (input.lat === null || input.lng === null) return;
+  if (isInsidePhilippines({ lat: input.lat, lng: input.lng })) return;
+
+  console.warn(
+    `[businesses] business ${businessId} saved a map pin outside the Philippines ` +
+      `(${input.lat}, ${input.lng})`,
+  );
 }
 
 /**
@@ -96,6 +134,8 @@ export async function saveProfile(
   businessId: string,
   input: BusinessProfileInput,
 ): Promise<ActionResult<BusinessProfileView>> {
+  warnIfOutsideMarket(businessId, input);
+
   const { data, error } = await repo.updateBusinessProfile(businessId, buildProfilePatch(input));
 
   if (error || !data) {

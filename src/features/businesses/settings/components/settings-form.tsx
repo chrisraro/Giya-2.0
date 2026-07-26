@@ -8,9 +8,11 @@ import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { TextField } from "@/components/ui/text-field";
+import { LATITUDE_MAX, LATITUDE_MIN, LONGITUDE_MAX, LONGITUDE_MIN } from "@/lib/maps/coordinates";
 import { cn } from "@/lib/utils";
 
 import { saveBusinessProfile } from "../actions";
+import { LocationPicker } from "./location-picker";
 import {
   ADDRESS_FIELD_MAX_LENGTH,
   BUSINESS_DESCRIPTION_MAX_LENGTH,
@@ -58,6 +60,15 @@ const settingsFormSchema = z.object({
   addressLine: z.string().trim().max(ADDRESS_FIELD_MAX_LENGTH),
   barangay: z.string().trim().max(ADDRESS_FIELD_MAX_LENGTH),
   postalCode: z.string().trim().max(POSTAL_CODE_MAX_LENGTH),
+  // The map pin as a PAIR, so the form cannot hold half a location. The same
+  // range checks run again server-side in ../schemas.ts - this copy exists to
+  // catch a mistake before a round trip, never instead of the server's.
+  coordinates: z
+    .object({
+      lat: z.number().refine(Number.isFinite).min(LATITUDE_MIN).max(LATITUDE_MAX),
+      lng: z.number().refine(Number.isFinite).min(LONGITUDE_MIN).max(LONGITUDE_MAX),
+    })
+    .nullable(),
   hours: z.array(
     z.object({
       day: z.number().int().min(1).max(7),
@@ -117,11 +128,19 @@ export function SettingsForm({ profile }: SettingsFormProps) {
       addressLine: profile.addressLine ?? "",
       barangay: profile.barangay ?? "",
       postalCode: profile.postalCode ?? "",
+      coordinates: profile.coordinates,
       hours: profile.openingHours,
     },
   });
 
   const hours = useWatch({ control, name: "hours" });
+  const coordinates = useWatch({ control, name: "coordinates" });
+  const addressLine = useWatch({ control, name: "addressLine" });
+  const barangay = useWatch({ control, name: "barangay" });
+
+  /** Prefills the picker's search box, so the merchant does not retype what
+   *  they just typed two fields up. */
+  const addressHint = [addressLine, barangay].filter(Boolean).join(", ");
 
   const submit: SubmitHandler<SettingsFormValues> = async (values) => {
     setSubmitting(true);
@@ -142,6 +161,12 @@ export function SettingsForm({ profile }: SettingsFormProps) {
       addressLine: values.addressLine,
       barangay: values.barangay,
       postalCode: values.postalCode,
+      // Split into two named keys here rather than sent as an object, because
+      // that is the shape of the two columns and ../schemas.ts is a strict
+      // object: a `coordinates` key would be rejected, correctly. Both or
+      // neither, which the nullable pair above is what guarantees.
+      lat: values.coordinates?.lat ?? null,
+      lng: values.coordinates?.lng ?? null,
       openingHours: values.hours,
     });
 
@@ -281,9 +306,16 @@ export function SettingsForm({ profile }: SettingsFormProps) {
           />
         </div>
         <p className="text-body-s text-on-surface-variant">
-          Your city and your exact map pin are set from the map picker, which is coming with the
-          store profile screen.
+          Your city is set by Giya from your registration, so it is not editable here.
         </p>
+      </SectionCard>
+
+      <SectionCard title="Your pin on the map">
+        <LocationPicker
+          value={coordinates ?? null}
+          onChange={(next) => setValue("coordinates", next, { shouldDirty: true })}
+          addressHint={addressHint}
+        />
       </SectionCard>
 
       <SectionCard title="Opening hours">

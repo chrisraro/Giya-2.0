@@ -1,3 +1,4 @@
+import { isValidCoordinates, type Coordinates } from "@/lib/maps/coordinates";
 import { createClient } from "@/lib/supabase/server";
 
 // Reads for the public, unauthenticated /b/[slug] business page. RLS
@@ -18,6 +19,23 @@ export type PublicBusiness = {
   openingHours: unknown;
   cityName: string | null;
   businessTypeName: string | null;
+  /**
+   * The street address, already assembled from `address_line`, `barangay`, the
+   * city name and `postal_code` into one display string, or null when the
+   * merchant has filled in none of them.
+   *
+   * Assembled HERE rather than on the page because it is the fallback the map
+   * degrades to, and a fallback that two callers each build slightly
+   * differently is a fallback that will eventually differ from the thing it
+   * falls back from.
+   */
+  addressText: string | null;
+  /**
+   * The map pin, or null when unset - which is the normal state, since the
+   * picker only landed with this slice. Both columns or neither: a half pair is
+   * read as no pin (see `toCoordinates`).
+   */
+  coordinates: Coordinates | null;
 };
 
 /**
@@ -100,8 +118,11 @@ export async function getBusinessBySlug(slug: string): Promise<PublicBusiness | 
 
   const { data: business } = await supabase
     .from("businesses")
+    // One literal string, deliberately not a concatenation: supabase-js infers
+    // the row type from the select as a string LITERAL, and splitting it over
+    // two quoted parts collapses that inference to an error type.
     .select(
-      "id, slug, name, description, logo_url, cover_url, opening_hours, city_id, business_type_id",
+      "id, slug, name, description, logo_url, cover_url, opening_hours, city_id, business_type_id, address_line, barangay, postal_code, lat, lng",
     )
     .eq("slug", slug)
     .eq("status", "active")
@@ -136,7 +157,45 @@ export async function getBusinessBySlug(slug: string): Promise<PublicBusiness | 
     openingHours: business.opening_hours,
     cityName,
     businessTypeName: businessType?.name ?? null,
+    addressText: formatAddress({
+      addressLine: business.address_line,
+      barangay: business.barangay,
+      cityName,
+      postalCode: business.postal_code,
+    }),
+    coordinates: toPublicCoordinates(business.lat, business.lng),
   };
+}
+
+/**
+ * The address as one line, in Philippine reading order (street, barangay, city,
+ * postcode). Blank parts are dropped rather than leaving a run of commas, and
+ * an entirely empty address is null so the caller can omit the block instead of
+ * rendering an empty heading.
+ */
+export function formatAddress(parts: {
+  addressLine: string | null;
+  barangay: string | null;
+  cityName: string | null;
+  postalCode: string | null;
+}): string | null {
+  const ordered = [parts.addressLine, parts.barangay, parts.cityName, parts.postalCode]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part));
+
+  return ordered.length > 0 ? ordered.join(", ") : null;
+}
+
+/**
+ * A stored pair, or null unless both columns are present and in range. The
+ * write path cannot produce a half pair, but a row predating the picker or
+ * touched by an admin tool can, and a map centred on a partial pair points at
+ * the Atlantic with total confidence.
+ */
+function toPublicCoordinates(lat: number | null, lng: number | null): Coordinates | null {
+  if (lat === null || lng === null) return null;
+  const candidate = { lat, lng };
+  return isValidCoordinates(candidate) ? candidate : null;
 }
 
 export interface ListActiveBusinessesArgs {

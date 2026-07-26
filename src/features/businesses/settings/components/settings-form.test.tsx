@@ -20,6 +20,7 @@ function profile(overrides: Partial<BusinessProfileView> = {}): BusinessProfileV
     addressLine: "12 Real Street",
     barangay: "San Jose",
     postalCode: "5000",
+    coordinates: null,
     openingHours: [1, 2, 3, 4, 5, 6, 7].map((day) => ({
       day,
       open: "09:00",
@@ -75,12 +76,29 @@ describe("SettingsForm: what it renders", () => {
     }
   });
 
-  it("says the map pin is not editable here rather than offering raw coordinates", () => {
+  it("offers the map picker, and still no raw coordinate inputs", () => {
     render(<SettingsForm profile={profile()} />);
 
+    // The picker replaced the "coming with the store profile screen" note that
+    // used to stand in for it. What has NOT changed is that a merchant cannot
+    // type coordinates: the numbers come from a map click, a search result or a
+    // GPS fix, never from a text field.
     expect(screen.queryByLabelText("Latitude")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Longitude")).not.toBeInTheDocument();
-    expect(screen.getByText(/map picker/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Search for your address")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /use my current location/i })).toBeInTheDocument();
+  });
+
+  it("says a business with no pin has no pin, rather than showing an empty map", () => {
+    render(<SettingsForm profile={profile()} />);
+
+    expect(screen.getByText(/No pin yet/i)).toBeInTheDocument();
+  });
+
+  it("reads back a stored pin's coordinates so the merchant can confirm them", () => {
+    render(<SettingsForm profile={profile({ coordinates: { lat: 10.3156, lng: 123.8854 } })} />);
+
+    expect(screen.getByText("10.315600, 123.885400")).toBeInTheDocument();
   });
 });
 
@@ -103,6 +121,8 @@ describe("SettingsForm: saving", () => {
       "email",
       "facebook",
       "instagram",
+      "lat",
+      "lng",
       "name",
       "openingHours",
       "phone",
@@ -110,9 +130,60 @@ describe("SettingsForm: saving", () => {
       "tiktok",
       "website",
     ]);
-    for (const forbidden of ["status", "verified_at", "plan", "plan_limits", "slug", "businessId"]) {
+    for (const forbidden of [
+      "status",
+      "verified_at",
+      "plan",
+      "plan_limits",
+      "slug",
+      "businessId",
+      // The picker sends two named columns, never its own `coordinates` shape:
+      // ../schemas.ts is strict, so a `coordinates` key would be refused.
+      "coordinates",
+      // No picker in this codebase mints a Google Places id, so this column
+      // stayed forbidden when lat/lng moved to the allowlist.
+      "google_place_id",
+    ]) {
       expect(payload).not.toHaveProperty(forbidden);
     }
+  });
+
+  it("sends the pin as two null columns when the business has none", async () => {
+    vi.mocked(actions.saveBusinessProfile).mockResolvedValue({ ok: true });
+    render(<SettingsForm profile={profile()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(actions.saveBusinessProfile).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(actions.saveBusinessProfile).mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.lat).toBeNull();
+    expect(payload.lng).toBeNull();
+  });
+
+  it("sends a stored pin back unchanged when the merchant edits something else", async () => {
+    vi.mocked(actions.saveBusinessProfile).mockResolvedValue({ ok: true });
+    render(<SettingsForm profile={profile({ coordinates: { lat: 10.3156, lng: 123.8854 } })} />);
+
+    fireEvent.change(screen.getByLabelText("Phone"), { target: { value: "+63 900 111 2222" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(actions.saveBusinessProfile).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(actions.saveBusinessProfile).mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.lat).toBe(10.3156);
+    expect(payload.lng).toBe(123.8854);
+  });
+
+  it("clears both columns when the merchant removes the pin", async () => {
+    vi.mocked(actions.saveBusinessProfile).mockResolvedValue({ ok: true });
+    render(<SettingsForm profile={profile({ coordinates: { lat: 10.3156, lng: 123.8854 } })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove pin" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(actions.saveBusinessProfile).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(actions.saveBusinessProfile).mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.lat).toBeNull();
+    expect(payload.lng).toBeNull();
   });
 
   it("sends all seven weekday rows so the stored value is always a full week", async () => {

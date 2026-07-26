@@ -147,15 +147,21 @@ describe("the settings form cannot submit status, verified_at or plan", () => {
     },
   );
 
-  it.each(["plan_limits", "suspended_reason", "slug", "lat", "lng", "city_id", "logo_url", "gallery", "deleted_at"])(
-    "also refuses a payload that carries %s",
-    async (column) => {
-      const result = await actions.saveBusinessProfile({ ...VALID_INPUT, [column]: "x" });
+  it.each([
+    "plan_limits",
+    "suspended_reason",
+    "slug",
+    "google_place_id",
+    "city_id",
+    "logo_url",
+    "gallery",
+    "deleted_at",
+  ])("also refuses a payload that carries %s", async (column) => {
+    const result = await actions.saveBusinessProfile({ ...VALID_INPUT, [column]: "x" });
 
-      expect(result.ok).toBe(false);
-      expect(table("businesses").update).not.toHaveBeenCalled();
-    },
-  );
+    expect(result.ok).toBe(false);
+    expect(table("businesses").update).not.toHaveBeenCalled();
+  });
 
   it("the strict schema itself rejects the three, so no caller can bypass the action", () => {
     for (const column of ["status", "verified_at", "plan"]) {
@@ -181,8 +187,15 @@ describe("the settings form cannot submit status, verified_at or plan", () => {
       "address_line",
       "barangay",
       "postal_code",
+      "lat",
+      "lng",
       "opening_hours",
     ]);
+  });
+
+  it("still cannot write google_place_id, the one location column with no picker behind it", () => {
+    expect([...repo.EDITABLE_BUSINESS_COLUMNS]).not.toContain("google_place_id");
+    expect([...repo.FORBIDDEN_BUSINESS_COLUMNS]).toContain("google_place_id");
   });
 
   it("the built patch never names a column outside the allowlist", () => {
@@ -323,6 +336,166 @@ describe("saving", () => {
     const result = await actions.saveBusinessProfile({ ...VALID_INPUT, openingHours: hours });
 
     expect(result.ok).toBe(false);
+  });
+});
+
+// ===========================================================================
+// THE MAP PIN
+//
+// `lat`/`lng` are the first columns to move from the forbidden list to the
+// allowlist since this screen was built. These tests are the proof that the
+// move widened the fence by exactly two columns and did not open a hole: the
+// picker's numbers are re-validated from scratch server-side, and everything
+// that was refused before is still refused.
+// ===========================================================================
+
+describe("the map pin", () => {
+  const CEBU = { lat: 10.3156, lng: 123.8854 };
+
+  it("writes both coordinates when the picker supplies them", async () => {
+    const result = await actions.saveBusinessProfile({ ...VALID_INPUT, ...CEBU });
+
+    expect(result.ok).toBe(true);
+    const patch = firstCallArg(table("businesses"), "update");
+    expect(patch.lat).toBe(10.3156);
+    expect(patch.lng).toBe(123.8854);
+  });
+
+  it("stores null for a business that has never set a pin", async () => {
+    // VALID_INPUT predates the picker and names neither key, which is exactly
+    // what an older client sends. Absent must mean "no pin", not a parse error.
+    const result = await actions.saveBusinessProfile(VALID_INPUT);
+
+    expect(result.ok).toBe(true);
+    const patch = firstCallArg(table("businesses"), "update");
+    expect(patch.lat).toBeNull();
+    expect(patch.lng).toBeNull();
+  });
+
+  it("clears the pin when the merchant removes it", async () => {
+    const result = await actions.saveBusinessProfile({ ...VALID_INPUT, lat: null, lng: null });
+
+    expect(result.ok).toBe(true);
+    const patch = firstCallArg(table("businesses"), "update");
+    expect(patch.lat).toBeNull();
+    expect(patch.lng).toBeNull();
+  });
+
+  it("rounds to six decimals rather than storing the float noise a map click produces", async () => {
+    await actions.saveBusinessProfile({
+      ...VALID_INPUT,
+      lat: 10.315612345678901,
+      lng: 123.885498765432,
+    });
+
+    const patch = firstCallArg(table("businesses"), "update");
+    expect(patch.lat).toBe(10.315612);
+    expect(patch.lng).toBe(123.885499);
+  });
+
+  it.each([
+    ["latitude above 90", { lat: 90.1, lng: 120 }],
+    ["latitude below -90", { lat: -90.1, lng: 120 }],
+    ["longitude above 180", { lat: 10, lng: 180.1 }],
+    ["longitude below -180", { lat: 10, lng: -180.1 }],
+  ])("refuses %s", async (_label, coordinates) => {
+    const result = await actions.saveBusinessProfile({ ...VALID_INPUT, ...coordinates });
+
+    expect(result.ok).toBe(false);
+    expect(table("businesses").update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["not-a-number", "10.3156"],
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["negative Infinity", Number.NEGATIVE_INFINITY],
+  ])("refuses a latitude that is %s", async (_label, lat) => {
+    const result = await actions.saveBusinessProfile({ ...VALID_INPUT, lat, lng: 123.8854 });
+
+    expect(result.ok).toBe(false);
+    expect(table("businesses").update).not.toHaveBeenCalled();
+  });
+
+  it("refuses a transposed pair, which is the mistake a range check actually catches", async () => {
+    // Cebu with lat and lng the wrong way round. Every Philippine longitude
+    // exceeds 116, so the swap always presents a latitude outside [-90, 90] -
+    // which is why no country bounding box is needed to catch this one.
+    const result = await actions.saveBusinessProfile({
+      ...VALID_INPUT,
+      lat: CEBU.lng,
+      lng: CEBU.lat,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(table("businesses").update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a latitude with no longitude", { lat: 10.3156 }],
+    ["a longitude with no latitude", { lng: 123.8854 }],
+    ["a latitude and an explicitly null longitude", { lat: 10.3156, lng: null }],
+  ])("refuses %s, because half a pin is a corrupt row and not a partial one", async (_l, half) => {
+    const result = await actions.saveBusinessProfile({ ...VALID_INPUT, ...half });
+
+    expect(result.ok).toBe(false);
+    expect(table("businesses").update).not.toHaveBeenCalled();
+  });
+
+  it("saves a pin outside the Philippines, and says so in the log rather than refusing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Singapore. Valid coordinates, surprising for this market. A bounding box
+    // is a market assumption, not a data-integrity rule, and a merchant who
+    // cannot save their own address has no workaround at all.
+    const result = await actions.saveBusinessProfile({ ...VALID_INPUT, lat: 1.3521, lng: 103.8198 });
+
+    expect(result.ok).toBe(true);
+    expect(firstCallArg(table("businesses"), "update").lat).toBe(1.3521);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("outside the Philippines"));
+
+    warn.mockRestore();
+  });
+
+  it("says nothing about the market when the pin is inside it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await actions.saveBusinessProfile({ ...VALID_INPUT, ...CEBU });
+
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("outside the Philippines"));
+    warn.mockRestore();
+  });
+
+  it("a patch carrying a pin still names nothing outside the allowlist", () => {
+    const parsed = businessProfileSchema.parse({ ...VALID_INPUT, ...CEBU });
+    const patch = service.buildProfilePatch(parsed);
+
+    const allowed: readonly string[] = repo.EDITABLE_BUSINESS_COLUMNS;
+    expect(Object.keys(patch).every((key) => allowed.includes(key))).toBe(true);
+    for (const forbidden of repo.FORBIDDEN_BUSINESS_COLUMNS) {
+      expect(patch).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it("a payload that pairs a pin with status is still refused outright", async () => {
+    const result = await actions.saveBusinessProfile({
+      ...VALID_INPUT,
+      ...CEBU,
+      status: "active",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(table("businesses").update).not.toHaveBeenCalled();
+  });
+
+  it("reads a stored pin back as a pair, and a half pair as no pin", async () => {
+    table("businesses").__result = { data: businessRow({ lat: 10.3156, lng: 123.8854 }), error: null };
+    const withPin = await service.loadProfile(OWN_BUSINESS);
+    expect(withPin.ok && withPin.data?.coordinates).toEqual({ lat: 10.3156, lng: 123.8854 });
+
+    table("businesses").__result = { data: businessRow({ lat: 10.3156, lng: null }), error: null };
+    const halfPin = await service.loadProfile(OWN_BUSINESS);
+    expect(halfPin.ok && halfPin.data?.coordinates).toBeNull();
   });
 });
 

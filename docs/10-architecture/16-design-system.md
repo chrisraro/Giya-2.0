@@ -109,6 +109,17 @@ Rules that follow from this:
 
 Skeletons render INSIDE their layout, so the consumer bottom nav and the portal sidebar/topbar persist across the navigation. That persistence is most of why a route transition feels fast; do not redraw them in a skeleton.
 
+## Maps
+
+A basemap tile is a photograph and will not answer to a token. The rule, so no future map surface has to re-decide it:
+
+1. **Ask the provider for dark pixels.** Two tile styles, light and dark (`src/lib/maps/tile-source.ts`). Never `filter: invert()` — it turns parks purple, water orange and label text into a grey ghost.
+2. **Let the browser pick, do not render both.** `<picture>` with `media="(prefers-color-scheme: dark)"`. A `dark:` class toggle does not stop the hidden image being fetched, so it would double the tile quota to show one map. The consequence is accepted and named: the map follows the OS scheme while chrome follows next-themes, and those disagree only for a visitor who has explicitly overridden the theme in-app. The map therefore always sits in a token-styled frame (`outline-variant` border, `surface-container` background), so it reads as a framed picture rather than as a theme failure.
+3. **Attribution renders, always.** ODbL 4.3 plus the tile host's terms. Solid `surface-container` chip, never a translucent overlay: the backdrop is arbitrary imagery.
+4. **The pin is CSS, not an image** (`src/components/maps/map-chrome.tsx`), so it takes `primary`/`on-primary` in both themes. Its point is the bottom-centre of its box after the rotation; anchor accordingly.
+5. **A map never hijacks the page scroll.** Gesture handlers are opt-in behind a deliberate tap; wheel zoom is off everywhere. Zoom controls are 48px, so Leaflet's own 26px control is switched off.
+6. **Every map has a non-visual equal.** The address and the coordinates are text and the directions link is an anchor, so the task can be completed without touching the map at all.
+
 ## Surface profiles
 
 - **Consumer PWA** (expressive): coral leads; bottom nav + center Scan FAB (compact), rail (medium+); bottom sheets for flows; springy reward moments; generous spacing; `size="touch"` buttons.

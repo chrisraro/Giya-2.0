@@ -157,6 +157,37 @@ type HoursState = {
   weekendClose: string;
 };
 
+// ===========================================================================
+// WHY THE MAP PICKER IS NOT ON THIS STEP.
+//
+// The picker (src/features/businesses/settings/components/location-picker.tsx)
+// would fit here on paper: this is the step that already asks "where are you".
+// It is deliberately not here, for three reasons that compound:
+//
+//   1. This wizard's whole design premise is that it is SHORT. Doc 32 section 2
+//      puts the rest of setup on a post-registration checklist precisely so
+//      that registration is three screens and ends at a dashboard. The map pin
+//      is already a line item on that checklist ("Store profile - name, type,
+//      address, city, lat/lng pin set"), which is the seam that was designed
+//      for exactly this.
+//   2. The cost is not one field. The picker pulls Leaflet, a stylesheet and a
+//      tile fetch onto a route that today ships none of them, and it invites a
+//      merchant to pan and zoom - a minute of engagement, on the screen before
+//      "Go to dashboard", for a value they cannot see yet because they have no
+//      public profile until they are verified.
+//   3. There is nowhere to put the answer. `registerBusiness` writes an address
+//      STRING; nothing in this flow writes `businesses.lat/lng`, so adding the
+//      picker means adding a second write path and a second set of validation,
+//      duplicating the fence that ../../../features/businesses/settings already
+//      holds.
+//
+// So: onboarding keeps collecting the address, and the merchant sets the pin in
+// settings, where the picker already lives and where a mistake is one edit away
+// from being corrected. The copy below points them there rather than leaving
+// them to find it. Revisit only if the checklist shows merchants are stalling
+// on the pin specifically.
+// ===========================================================================
+
 function LocationHoursStep({
   address,
   onAddressChange,
@@ -183,6 +214,10 @@ function LocationHoursStep({
         value={address}
         onChange={(event) => onAddressChange(event.target.value)}
       />
+      <p className="text-body-s text-on-surface-variant">
+        You will drop a pin on the map in Settings once you are set up, so customers get directions
+        instead of guessing.
+      </p>
       <HoursGroup
         legend="Weekdays"
         openId="weekday-open"

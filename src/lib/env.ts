@@ -10,6 +10,13 @@ const envSchema = z.object({
   // Optional: when unset, the captcha widget does not render and auth calls
   // omit captchaToken. Build and dev must both work without it.
   NEXT_PUBLIC_HCAPTCHA_SITE_KEY: z.string().optional(),
+  // NEXT_PUBLIC_MAPTILER_KEY is deliberately NOT declared here. It is read
+  // directly in src/lib/maps/tile-source.ts, and that file explains why: the
+  // whole contract of the map surfaces is that an absent key degrades to the
+  // address text, so the function that answers "is a basemap available" must
+  // never be able to throw - and every read through this module can, because
+  // this schema fails as a unit. A missing Supabase URL must not present itself
+  // as a broken map.
 });
 
 function loadEnv() {
