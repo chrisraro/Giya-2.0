@@ -5,7 +5,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TextField } from "@/components/ui/text-field";
 import { Chip } from "@/components/ui/chip";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Skeleton, SkeletonCircle, SkeletonText } from "@/components/ui/skeleton";
+import { PendingButton } from "@/components/ui/pending-button";
+import { CircularProgress, LinearProgress } from "@/components/ui/progress";
 import { Logo } from "@/components/brand/logo";
 import { ThemeToggle } from "@/components/design/theme-toggle";
 
@@ -127,6 +129,59 @@ export default function DesignPage() {
           <Badge>+120 pts</Badge>
           <Skeleton className="h-8 w-24" />
           <Logo variant="stamp" className="text-tertiary" />
+        </div>
+      </section>
+
+      {/* The loading vocabulary, side by side, so the four situations can be
+          compared rather than described. Doc 16 "Loading vocabulary" is the
+          rule this section illustrates. */}
+      <section className="space-y-4">
+        <h2 className="text-headline-s">Loading vocabulary</h2>
+
+        <div className="space-y-2">
+          <h3 className="text-title-s text-on-surface-variant">
+            Route transition: skeleton matching the real layout
+          </h3>
+          <Card variant="outlined" className="max-w-sm space-y-2 p-4">
+            <SkeletonText size="title-m" className="w-40" />
+            <SkeletonText size="body-s" className="w-24" />
+            <div className="flex items-center gap-3 pt-2">
+              <SkeletonCircle className="size-10" />
+              <div className="min-w-0 flex-1">
+                <SkeletonText size="body-l" className="w-32" />
+                <SkeletonText size="body-s" className="w-20" />
+              </div>
+            </div>
+          </Card>
+        </div>
+
+        <div className="space-y-2">
+          <h3 className="text-title-s text-on-surface-variant">
+            In-place refresh and long operations: linear progress
+          </h3>
+          <div className="max-w-sm space-y-3">
+            <LinearProgress label="Refreshing, indeterminate" />
+            <LinearProgress label="Uploading, 60 percent" value={0.6} />
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <h3 className="text-title-s text-on-surface-variant">
+            Form submission: pending control, fixed width
+          </h3>
+          <div className="flex flex-wrap items-center gap-3">
+            <PendingButton pending={false} pendingLabel="Claiming" variant="tonal">
+              Claim
+            </PendingButton>
+            <PendingButton pending pendingLabel="Claiming" variant="tonal">
+              Claim
+            </PendingButton>
+            <CircularProgress size="md" label="Working" />
+          </div>
+          <p className="text-body-s text-on-surface-variant">
+            Both buttons are the same width: the idle and pending labels share
+            one grid cell, so pressing it moves nothing.
+          </p>
         </div>
       </section>
     </main>

@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { motion, useReducedMotion } from "motion/react";
 
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -160,6 +161,12 @@ export function ReceiptStatus({ receipt }: ReceiptStatusProps) {
   const copy = statusCopy(state);
   const celebrating = outcome === "approved";
 
+  // Reduced motion collapses every spring below to no animation at all: the
+  // badge and the points figure simply appear, already settled. The colour
+  // change, the copy and the aria-live announcement carry the news on their
+  // own, so nothing about the outcome is communicated by movement alone.
+  const reduce = useReducedMotion();
+
   return (
     <main className="mx-auto flex max-w-md flex-col items-center gap-6 px-4 pt-8 pb-8 text-center">
       {/* The card itself is the live region. A separate visually-hidden copy
@@ -186,8 +193,32 @@ export function ReceiptStatus({ receipt }: ReceiptStatusProps) {
               className="absolute inline-flex size-16 rounded-full bg-on-tertiary-container opacity-20 motion-safe:animate-ping"
             />
           ) : null}
-          <span
+          {/* The badge itself springs in when the outcome becomes `approved`.
+              `key={outcome}` is doing the work: the element REMOUNTS on the
+              transition into approved, so the mount animation plays exactly
+              once, at the moment that matters, and never again on a re-render
+              caused by the points figure arriving a beat later.
+
+              Entrance only, and no AnimatePresence. A previous slice deadlocked
+              consumer onboarding with `AnimatePresence mode="wait"` -- the
+              outgoing step never finished exiting, so the incoming one never
+              mounted and the flow froze on step 1. The lesson generalises: an
+              exit animation on a state machine that can change state again
+              mid-exit is a trap. Nothing here waits for anything to leave. */}
+          <motion.span
+            key={outcome}
             aria-hidden
+            {...(reduce
+              ? {}
+              : {
+                  initial: { scale: 0.5, opacity: 0 },
+                  animate: { scale: 1, opacity: 1 },
+                  transition: celebrating
+                    ? // Overshoot, then settle. This is the one moment in the
+                      // app that is allowed to feel pleased with itself.
+                      { type: "spring" as const, stiffness: 520, damping: 18, mass: 0.7 }
+                    : { duration: 0.2 },
+                })}
             className={cn(
               "material-symbols-rounded relative text-[48px]",
               celebrating
@@ -198,7 +229,7 @@ export function ReceiptStatus({ receipt }: ReceiptStatusProps) {
             )}
           >
             {copy.icon}
-          </span>
+          </motion.span>
         </span>
 
         <div className="space-y-2">
@@ -220,10 +251,25 @@ export function ReceiptStatus({ receipt }: ReceiptStatusProps) {
           </p>
         </div>
 
+        {/* The number is the payoff, and it usually lands a moment AFTER the
+            status flips, because the points figure comes from a second fetch
+            (see handleRow). Animating it separately is therefore not a
+            flourish for its own sake: it draws the eye back at the exact
+            moment the figure appears, instead of letting it pop in silently
+            while the consumer is still looking at the check mark. */}
         {celebrating && state.pointsAwarded !== null ? (
-          <p className="font-mono text-headline-m text-on-tertiary-container">
+          <motion.p
+            {...(reduce
+              ? {}
+              : {
+                  initial: { y: 8, opacity: 0, scale: 0.9 },
+                  animate: { y: 0, opacity: 1, scale: 1 },
+                  transition: { type: "spring" as const, stiffness: 420, damping: 22 },
+                })}
+            className="font-mono text-headline-m text-on-tertiary-container"
+          >
             +{state.pointsAwarded.toLocaleString()} pts
-          </p>
+          </motion.p>
         ) : null}
       </Card>
 

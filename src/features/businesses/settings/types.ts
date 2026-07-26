@@ -1,3 +1,5 @@
+import type { Coordinates } from "@/lib/maps/coordinates";
+
 import type { OpeningHoursEntry } from "./schemas";
 
 export type ActionResult<T = undefined> =
@@ -26,6 +28,12 @@ export interface BusinessProfileView {
   addressLine: string | null;
   barangay: string | null;
   postalCode: string | null;
+  /**
+   * The map pin, or null when it has never been set. A PAIR rather than two
+   * nullable numbers, so "half a location" is not representable in the type
+   * that the picker and the public page both read.
+   */
+  coordinates: Coordinates | null;
   openingHours: OpeningHoursEntry[];
 
   /**

@@ -1,7 +1,9 @@
 import { EmptyState } from "@/components/consumer/empty-state";
+import { StaggerItem } from "@/components/motion/stagger";
 import { cn } from "@/lib/utils";
 
 import { openNotification } from "../actions";
+import { NotificationRowButton } from "./notification-row-button";
 import { notificationKindEntry } from "../kinds";
 import type { NotificationTone } from "../kinds";
 import type { NotificationDTO } from "../types";
@@ -109,10 +111,15 @@ export function NotificationList({ notifications, now = new Date() }: Notificati
       {groupByDay(notifications, now).map((group) => (
         <section key={group.heading}>
           <h2 className="px-2 text-label-l text-on-surface-variant">{group.heading}</h2>
+          {/* Staggered entrance, CSS-only and reduced-motion-safe. The index is
+              per group rather than global so the first row under each day
+              heading leads its own group. */}
           <ul className="mt-1 space-y-1">
-            {group.items.map((item) => (
+            {group.items.map((item, index) => (
               <li key={item.id}>
-                <NotificationRow notification={item} />
+                <StaggerItem index={index}>
+                  <NotificationRow notification={item} />
+                </StaggerItem>
               </li>
             ))}
           </ul>
@@ -132,15 +139,14 @@ export function NotificationRow({ notification }: { notification: NotificationDT
       {/* No `route` field. The destination is read back off the row inside the
           action, under RLS, so a hand-crafted POST cannot turn this into an
           open redirect. */}
-      <button
-        type="submit"
-        className={cn(
-          "flex w-full items-start gap-3 rounded-md3-md px-2 py-3 text-left",
-          "transition-colors duration-200 ease-standard hover:bg-surface-container",
-          "outline-none focus-visible:ring-2 focus-visible:ring-primary",
-          unread && "bg-surface-container-low",
-        )}
-      >
+      {/* The <button> is a client component so it can read useFormStatus and
+          show the row as read the instant it is tapped (see
+          notification-row-button.tsx for why that optimism is honest). The
+          contents below stay server-rendered: they cross the boundary as
+          children, which does not add them to the client bundle. The row's
+          unread dot moved INTO that component, because it is the one piece of
+          the row that has to react to the pending state. */}
+      <NotificationRowButton unread={unread}>
         <span
           className={cn(
             "flex size-10 shrink-0 items-center justify-center rounded-full",
@@ -176,13 +182,7 @@ export function NotificationRow({ notification }: { notification: NotificationDT
             {timeLabel(notification.createdAt)}
           </p>
         </div>
-
-        {unread ? (
-          <span className="mt-2 size-2 shrink-0 rounded-full bg-primary">
-            <span className="sr-only">Unread</span>
-          </span>
-        ) : null}
-      </button>
+      </NotificationRowButton>
     </form>
   );
 }

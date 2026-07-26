@@ -22,7 +22,15 @@ export type Result<T> = { data: T | null; error: { message: string; code?: strin
 // containing them. This assertion is that promise, written down and tested.
 // ===========================================================================
 
-/** The presentation columns this screen may write. Nothing else, ever. */
+/**
+ * The presentation columns this screen may write. Nothing else, ever.
+ *
+ * `lat` and `lng` were added here when the map picker landed, and the way they
+ * were added is the point: they moved from FORBIDDEN_BUSINESS_COLUMNS to this
+ * list as a pair, in one edit, with the schema's own reasoning updated in the
+ * same change. Nothing about the assertion below was relaxed to let them
+ * through. A future column follows the same route or it does not get written.
+ */
 export const EDITABLE_BUSINESS_COLUMNS = [
   "name",
   "description",
@@ -33,6 +41,8 @@ export const EDITABLE_BUSINESS_COLUMNS = [
   "address_line",
   "barangay",
   "postal_code",
+  "lat",
+  "lng",
   "opening_hours",
 ] as const;
 
@@ -53,6 +63,9 @@ export interface BusinessProfilePatch {
   address_line: string | null;
   barangay: string | null;
   postal_code: string | null;
+  /** Both or neither. The pairing is enforced by ../schemas.ts. */
+  lat: number | null;
+  lng: number | null;
   opening_hours: Json;
 }
 
@@ -68,8 +81,10 @@ export const FORBIDDEN_BUSINESS_COLUMNS = [
   "plan_limits",
   "suspended_reason",
   "slug",
-  "lat",
-  "lng",
+  // `lat`/`lng` are absent from this list on purpose: the map picker writes
+  // them and they moved to EDITABLE_BUSINESS_COLUMNS above. `google_place_id`
+  // did NOT move - the picker is not Google's, so nothing in this codebase can
+  // mint a value for that column (see ../schemas.ts).
   "google_place_id",
   "city_id",
   "business_type_id",

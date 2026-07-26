@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
+import { PendingButton } from "@/components/ui/pending-button";
 import { Dialog } from "@/components/ui/dialog";
 import { formatPeso, pesoToCentavos } from "@/lib/money";
 import { cn } from "@/lib/utils";
@@ -757,15 +758,22 @@ export function ReviewDecisionScreen({
           <Button type="button" variant="text" size="md" onClick={() => setApproveOpen(false)}>
             Go back
           </Button>
-          <Button
+          {/* The award path. The old markup swapped the label between "Yes,
+              approve" and "Approving", which resized the button and slid the
+              "Go back" button sideways at the exact moment someone is deciding
+              whether to spend a customer's money. PendingButton keeps both
+              labels in one grid cell so the width is fixed from first paint,
+              and adds the spinner plus aria-busy the plain Button never had. */}
+          <PendingButton
             type="button"
             variant="filled"
             size="md"
-            disabled={pending}
+            pending={pending}
+            pendingLabel="Approving"
             onClick={() => void submitApprove()}
           >
-            {pending ? "Approving" : "Yes, approve"}
-          </Button>
+            Yes, approve
+          </PendingButton>
         </div>
       </Dialog>
 
@@ -816,15 +824,16 @@ export function ReviewDecisionScreen({
           <Button type="button" variant="text" size="md" onClick={() => setRejectOpen(false)}>
             Cancel
           </Button>
-          <Button
+          <PendingButton
             type="button"
             variant="filled"
             size="md"
-            disabled={pending}
+            pending={pending}
+            pendingLabel="Rejecting"
             onClick={() => void submitReject()}
           >
-            {pending ? "Rejecting" : "Reject receipt"}
-          </Button>
+            Reject receipt
+          </PendingButton>
         </div>
       </Dialog>
     </div>

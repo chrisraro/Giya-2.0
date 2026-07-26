@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { Button, buttonVariants } from "@/components/ui/button";
+import { LinearProgress } from "@/components/ui/progress";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
@@ -345,10 +346,19 @@ export function ReceiptCapture({ businessId, showOcrStubNote }: ReceiptCapturePr
             </div>
           ) : null}
 
+          {/* Upload is the longest wait a consumer meets in this app: a photo
+              over a mobile connection. A bare line of text gave no sense that
+              anything was happening. Indeterminate, not determinate, because
+              the upload reports no real fraction and a fabricated percentage
+              would be a lie. The text stays -- the bar says "working", the
+              sentence says what is working. */}
           {phase === "uploading" ? (
-            <p className="text-center text-body-m text-on-surface-variant">
-              Sending your receipt...
-            </p>
+            <div className="flex flex-col gap-2">
+              <LinearProgress label="Sending your receipt" />
+              <p className="text-center text-body-m text-on-surface-variant">
+                Sending your receipt...
+              </p>
+            </div>
           ) : null}
         </div>
       ) : null}

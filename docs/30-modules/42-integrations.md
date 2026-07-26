@@ -37,7 +37,31 @@ Same model as Google (Supabase Auth provider). Note: this is **login only** — 
 - **Failure handling:** expired/revoked token → connection `status='expired'|'revoked'`, insights tiles show "reconnect" state; never blocks core loops. All Meta calls behind circuit breaker.
 - **Cost:** free API; app-review lead time is the real cost — start review early in V1.
 
-## Google Maps Platform [MVP]
+## Maps — SUPERSEDED by OpenStreetMap [MVP, shipped]
+
+**The Google Maps Platform section below is no longer what is built.** The map slice shipped on an open-source stack instead, on an explicit owner instruction ("open source reliable maps ... no paid key"). This subsection is the contract that is actually in the code; the Google section is kept underneath because the `businesses.google_place_id` column, the Static-Maps-in-email idea and the discover-map surface still reference it.
+
+| Concern | Choice | Why, and where the reasoning lives |
+|---|---|---|
+| Map library | **Leaflet 1.9** (BSD-2), raster tiles | ~42KB gzip against MapLibre GL's ~230KB plus a worker. Doc 33's per-route budget is 90KB gzip. Raster tiles are also what makes the zero-JS static map possible. Full argument: `src/features/businesses/settings/components/leaflet-map.tsx`. |
+| Basemap tiles | **MapTiler free tier**, OSM-derived raster | `tile.openstreetmap.org` explicitly forbids third-party app use in the OSMF Tile Usage Policy. Limits, quota maths and the growth path: `src/lib/maps/tile-source.ts`. |
+| Geocoding | **Nominatim**, proxied through `GET /api/v1/geocode` | Its policy requires a descriptive `User-Agent`, which is a forbidden header name in the Fetch standard — browser code cannot comply, so the call is server-side. Policy compliance in full: `src/lib/maps/geocode.ts`. |
+| Directions | `https://www.google.com/maps/dir/?api=1&destination={lat},{lng}` | One universal https link, no user-agent sniffing. Intercepted natively by the installed app on Android and iOS; a working web page everywhere else. `geo:` and `maps://` are each dead on two of the three platforms. `src/lib/maps/coordinates.ts`. |
+| Attribution | Rendered visibly on every map surface | ODbL 4.3 and the tile host's terms. Not a nicety; a licence condition. |
+
+- **Auth model:** one optional browser key, `NEXT_PUBLIC_MAPTILER_KEY`, referrer-restricted per origin in the MapTiler console. No server key: geocoding needs none. Read directly in `src/lib/maps/tile-source.ts` rather than through `src/lib/env.ts`, because the whole contract is that an absent key degrades gracefully and a schema that throws cannot.
+- **Failure handling:** no key → no basemap renders anywhere, every surface falls back to address text, and the consumer "Get directions" link keeps working because it is two numbers in a URL. Geocoder down → 503 with copy that names the fallback ("you can still drag the pin"). Geocoder throttled → 429 with `Retry-After: 1`.
+- **Cost control:**
+
+| Surface | Control |
+|---|---|
+| Merchant picker (`/business/settings`) | Leaflet + its stylesheet in a `next/dynamic({ ssr: false })` chunk, fetched only when the settings screen renders |
+| Public business page (`/b/[slug]`) | **No map library at all.** Server-computed tile mosaic, 6 tiles typical / 8 worst case, plain `<img>`, `loading="lazy"` |
+| Tile quota | ~100k tiles/month free ≈ 16k business-page views before the tier binds; tiles are immutable, CDN-cached and shared between neighbouring shops |
+| Geocoding | Explicit submit only (no autocomplete — the policy forbids it), 1s client throttle, 30/min per user, global 1 req/s ceiling, 24h Redis cache of every lookup |
+| Growth path | CDN the tile URLs → MapTiler paid tier → self-host Protomaps/PMTiles (no per-request quota). All three are a URL-template change in one file. |
+
+## Google Maps Platform [superseded above; retained for `google_place_id`, discover map and email static maps]
 
 - **Purpose & surfaces:** Maps JS (discover map, business page map), **Places Autocomplete** (business address entry, with session tokens), **Geocoding** (address → `businesses.lat`/`lng` on save), **Static Maps** for emails [V1].
 - **Auth model:** API keys — a browser key (HTTP-referrer-restricted, exposed client-side by design) and a server key (IP/API-restricted, server-only via `src/lib/env.ts`).

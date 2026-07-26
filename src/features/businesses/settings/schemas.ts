@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+import {
+  LATITUDE_MAX,
+  LATITUDE_MIN,
+  LONGITUDE_MAX,
+  LONGITUDE_MIN,
+  roundCoordinate,
+} from "@/lib/maps/coordinates";
+
 // ===========================================================================
 // The business profile form's input contract.
 //
@@ -13,12 +21,12 @@ import { z } from "zod";
 //
 // Until that migration exists, THIS SCHEMA IS THE FENCE. It is a strict object,
 // so a request carrying `status`, `verified_at`, `plan`, `plan_limits`, `slug`,
-// `suspended_reason`, `lat`, `lng`, `city_id`, `business_type_id`, `logo_url`,
-// `cover_url` or `gallery` does not have those keys quietly dropped - it fails
-// to parse, and the action answers with a validation message. server/repo.ts
-// then asserts the same allowlist a second time on the way to Postgres, so a
-// future caller that builds a patch by hand rather than through this schema
-// still cannot reach a column this form has no business writing.
+// `suspended_reason`, `google_place_id`, `city_id`, `business_type_id`,
+// `logo_url`, `cover_url` or `gallery` does not have those keys quietly dropped
+// - it fails to parse, and the action answers with a validation message.
+// server/repo.ts then asserts the same allowlist a second time on the way to
+// Postgres, so a future caller that builds a patch by hand rather than through
+// this schema still cannot reach a column this form has no business writing.
 //
 // The exclusions and why, in one place:
 //
@@ -31,13 +39,47 @@ import { z } from "zod";
 //                         real rules to it (unique, once per 30 days after
 //                         activation, a printed-QR warning). A text input with
 //                         none of that is worse than no input.
-//   lat, lng,             Doc 32 section 4 sets these from a Google Maps
-//   google_place_id       picker. Free-text coordinates are a data-quality
-//                         trap, so the field waits for the picker.
+//   google_place_id       A Google Places identifier, and the map picker this
+//                         form now carries is not Google's (see
+//                         src/lib/maps/tile-source.ts for why). Writing a
+//                         column named for one vendor with an id minted by
+//                         another is how a schema starts lying. It stays
+//                         unwritten until something actually mints Place ids.
 //   city_id,              Reference-table pickers this slice does not build.
 //   business_type_id
 //   logo_url, cover_url,  Need the public-bucket upload + image queue.
 //   gallery
+//
+// WHAT CHANGED, AND WHY IT IS A WIDENING AND NOT A HOLE.
+//
+// `lat` and `lng` used to be on that list, excluded with the note "doc 32
+// section 4 sets these from a Maps picker. Free-text coordinates are a
+// data-quality trap, so the field waits for the picker." The picker now exists
+// (../components/location-picker.tsx), so the stated condition is met and the
+// two columns move across - deliberately, one pair at a time, with the fence
+// re-drawn around them rather than opened.
+//
+// The reasoning that kept them out is preserved in what replaced it: there is
+// still no free-text coordinate input anywhere. The picker writes numbers it
+// derived from a map click, a search result or a GPS fix, and this schema then
+// re-derives every guarantee from scratch, because a client-side picker is a
+// convenience and never a validator:
+//
+//   finite and in range   Rejected outright otherwise. This is also what
+//                         catches the one genuinely dangerous typo, a
+//                         transposed pair: every Philippine longitude exceeds
+//                         116, so a swap always presents a latitude outside
+//                         [-90, 90].
+//   both or neither       A lat without an lng is not half a location, it is a
+//                         corrupt one, and `businesses_latlng_idx` indexes the
+//                         pair. Enforced below at the object level, because no
+//                         per-field rule can see its partner.
+//   rounded               To six decimals, about 11cm. See
+//                         src/lib/maps/coordinates.ts.
+//
+// Being outside the Philippines is NOT rejected here. That decision, and why a
+// market boundary and a validity boundary must not be the same check, is
+// argued at `isInsidePhilippines` in src/lib/maps/coordinates.ts.
 // ===========================================================================
 
 export const BUSINESS_NAME_MIN_LENGTH = 2;
@@ -110,6 +152,24 @@ export const openingHoursSchema = z
     }
   });
 
+/**
+ * One coordinate: a finite number inside its range, rounded, or null.
+ *
+ * Optional as well as nullable so that a caller which predates the picker (the
+ * onboarding wizard, an older client) simply does not mention the pin, and a
+ * caller which wants to CLEAR it sends an explicit null. Absent and null both
+ * arrive at the patch as null, which is what an unset pin is in the column.
+ */
+const optionalCoordinate = (min: number, max: number, label: string) =>
+  z
+    .number()
+    .refine(Number.isFinite, `${label} must be a real number`)
+    .min(min, `${label} must be between ${min} and ${max}`)
+    .max(max, `${label} must be between ${min} and ${max}`)
+    .nullable()
+    .optional()
+    .transform((value) => (value === undefined || value === null ? null : roundCoordinate(value)));
+
 export const businessProfileSchema = z.strictObject({
   name: z
     .string()
@@ -126,6 +186,19 @@ export const businessProfileSchema = z.strictObject({
   addressLine: optionalTrimmed(ADDRESS_FIELD_MAX_LENGTH),
   barangay: optionalTrimmed(ADDRESS_FIELD_MAX_LENGTH),
   postalCode: optionalTrimmed(POSTAL_CODE_MAX_LENGTH),
+  lat: optionalCoordinate(LATITUDE_MIN, LATITUDE_MAX, "Latitude"),
+  lng: optionalCoordinate(LONGITUDE_MIN, LONGITUDE_MAX, "Longitude"),
   openingHours: openingHoursSchema,
+}).superRefine((value, ctx) => {
+  // Half a pin is worse than no pin: `businesses_latlng_idx` is on the pair,
+  // the nearby search reads both, and a row with one of the two set would be
+  // silently invisible to it while looking populated in the admin portal.
+  if ((value.lat === null) !== (value.lng === null)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["lat"],
+      message: "A map pin needs both a latitude and a longitude.",
+    });
+  }
 });
 export type BusinessProfileInput = z.infer<typeof businessProfileSchema>;

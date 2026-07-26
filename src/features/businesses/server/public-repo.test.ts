@@ -63,6 +63,11 @@ describe("getBusinessBySlug", () => {
     opening_hours: [{ day: 1, open: "08:00", close: "20:00" }],
     city_id: "city-1",
     business_type_id: "type-1",
+    address_line: "12 Real Street",
+    barangay: "San Jose",
+    postal_code: "5000",
+    lat: 10.3156,
+    lng: 123.8854,
   };
 
   it("returns null when no active, non-deleted business matches the slug", async () => {
@@ -103,9 +108,61 @@ describe("getBusinessBySlug", () => {
       openingHours: [{ day: 1, open: "08:00", close: "20:00" }],
       cityName: "Cebu City",
       businessTypeName: "Cafe",
+      addressText: "12 Real Street, San Jose, Cebu City, 5000",
+      coordinates: { lat: 10.3156, lng: 123.8854 },
     });
     expect(table("ref_cities").eq).toHaveBeenCalledWith("id", "city-1");
     expect(table("ref_business_types").eq).toHaveBeenCalledWith("id", "type-1");
+  });
+
+  // ------------------------------------------------------------- the map pin
+
+  it("reads no pin at all when only one of lat/lng is stored", async () => {
+    table("businesses").__result = { data: { ...BUSINESS_ROW, lng: null }, error: null };
+    table("ref_cities").__result = { data: { name: "Cebu City" }, error: null };
+    table("ref_business_types").__result = { data: { name: "Cafe" }, error: null };
+
+    const result = await repo.getBusinessBySlug("kape-diaria");
+
+    // Half a pair would centre a map on the Atlantic with total confidence.
+    expect(result?.coordinates).toBeNull();
+  });
+
+  it("reads no pin when a stored coordinate is out of range", async () => {
+    table("businesses").__result = { data: { ...BUSINESS_ROW, lat: 910 }, error: null };
+    table("ref_cities").__result = { data: { name: "Cebu City" }, error: null };
+    table("ref_business_types").__result = { data: { name: "Cafe" }, error: null };
+
+    const result = await repo.getBusinessBySlug("kape-diaria");
+
+    expect(result?.coordinates).toBeNull();
+  });
+
+  it("assembles the address without leaving gaps for the parts that are blank", async () => {
+    table("businesses").__result = {
+      data: { ...BUSINESS_ROW, barangay: null, postal_code: "  " },
+      error: null,
+    };
+    table("ref_cities").__result = { data: { name: "Cebu City" }, error: null };
+    table("ref_business_types").__result = { data: { name: "Cafe" }, error: null };
+
+    const result = await repo.getBusinessBySlug("kape-diaria");
+
+    expect(result?.addressText).toBe("12 Real Street, Cebu City");
+  });
+
+  it("reports no address at all rather than an empty string when every part is blank", async () => {
+    table("businesses").__result = {
+      data: { ...BUSINESS_ROW, address_line: null, barangay: null, postal_code: null, city_id: null },
+      error: null,
+    };
+    table("ref_business_types").__result = { data: { name: "Cafe" }, error: null };
+
+    const result = await repo.getBusinessBySlug("kape-diaria");
+
+    // The page omits the whole "Where to find us" block on null; an empty
+    // string would give it a heading with nothing under it.
+    expect(result?.addressText).toBeNull();
   });
 
   it("resolves cityName to null when the business has no city_id", async () => {

@@ -5,6 +5,7 @@ import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { BusinessLocation } from "@/features/businesses/components/business-location";
 import { getBusinessBySlug, getPublicMenu, getPublicRewards } from "@/features/businesses/server/public-repo";
 import { PublicMenu } from "@/features/menu/components/public-menu";
 import { formatHoursSummary } from "@/lib/hours";
@@ -65,7 +66,11 @@ export default async function PublicBusinessPage({
       </div>
 
       <div className="px-4">
-        <div className="-mt-10 flex items-end gap-3">
+        {/* relative + z-10 is load-bearing: the cover above is `relative`, and a
+            positioned element paints above a non-positioned in-flow sibling
+            regardless of DOM order. Without this the avatar's overlapping top
+            half renders behind the cover and the logo appears sliced in half. */}
+        <div className="relative z-10 -mt-10 flex items-end gap-3">
           <div className="size-20 shrink-0 overflow-hidden rounded-full bg-surface-container-highest ring-4 ring-surface">
             {business.logoUrl ? (
               // eslint-disable-next-line @next/next/no-img-element -- external merchant-hosted image, next/image domain allowlisting not set up for this slice
@@ -107,6 +112,17 @@ export default async function PublicBusinessPage({
           </ul>
         </div>
       ) : null}
+
+      {/* Between the rewards and the menu on purpose. Rewards are why a
+          consumer opened the page, location is what they act on next, and the
+          menu is the long scroll that everything else would sit below. The
+          block renders nothing at all when the merchant has neither an address
+          nor a pin, so a bare profile does not grow an empty heading. */}
+      <BusinessLocation
+        name={business.name}
+        addressText={business.addressText}
+        coordinates={business.coordinates}
+      />
 
       <div className="mt-6 px-4">
         <PublicMenu groups={menuGroups} />
