@@ -200,3 +200,53 @@ export interface PlatformOverview {
   /** The most recent blocking signals, for the "what just happened" strip. */
   recentBlocks: AdminQueueItem[];
 }
+
+// ---------------------------------------------------------------------------
+// The merchant verification queue (doc 31 section 3, doc 32 section 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * One business awaiting a go-live decision, with enough context to make it.
+ *
+ * WHAT "ENOUGH" MEANS HERE, because the temptation is to send the whole row.
+ * An admin approving a merchant is answering two questions: "is this a real
+ * shop in a real place" and "will their customers actually earn anything". The
+ * fields below are exactly those two questions plus the applicant's own note.
+ * Nothing else from `businesses` is carried, on the same data-minimisation
+ * argument `loadDisplayNames` makes in queue.ts: a queue row that carries a
+ * merchant's full address history has published it to every screenshot of that
+ * queue.
+ *
+ * `earningRule` is the one field that is not identity. It is here because it is
+ * the PRECONDITION `activate_business` (0033) enforces, and an admin who
+ * presses approve and is refused by the database learns nothing about why; the
+ * summary lets the screen say so before they press it. It can be null even in
+ * this queue, because the rule can be deleted between submission and decision,
+ * which is exactly the race the RPC re-checks under the row lock.
+ */
+export interface AdminBusinessReviewItem {
+  businessId: string;
+  name: string;
+  slug: string;
+  /** `ref_cities.name`, or null when the business set no city. */
+  cityName: string | null;
+  /** `ref_business_types.name`: cafe, restaurant, and so on. */
+  businessTypeName: string | null;
+  contactEmail: string | null;
+  contactPhone: string | null;
+  /** The owner's `profiles.display_name`, or null when it could not be read. */
+  ownerName: string | null;
+  /** When the tenant registered, which is not when they applied. */
+  createdAt: string;
+  /** When the open round was opened, or null when there is no open round. */
+  submittedAt: string | null;
+  /** The applicant's own note on the round. */
+  applicantNote: string | null;
+  /**
+   * A sentence describing the active base earning rule, or null when there is
+   * none. Null means `activate_business` WILL refuse this business.
+   */
+  earningRule: string | null;
+  /** Whether the merchant has put anything on their menu. Context, not a gate. */
+  hasMenu: boolean;
+}

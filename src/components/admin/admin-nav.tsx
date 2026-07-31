@@ -27,6 +27,11 @@ import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
   { href: "/admin", label: "Overview", icon: "space_dashboard", exact: true },
+  // Businesses sits directly under Overview, above the two receipt queues, and
+  // the order is the point: a merchant on that list cannot trade at all, while
+  // a receipt on the other two is one transaction for a merchant who can. The
+  // more expensive queue to leave sitting goes first.
+  { href: "/admin/businesses", label: "Businesses", icon: "storefront", exact: false },
   { href: "/admin/fraud", label: "Fraud", icon: "gpp_maybe", exact: false },
   { href: "/admin/receipts", label: "Receipts", icon: "receipt_long", exact: false },
 ] as const;

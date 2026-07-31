@@ -6,7 +6,16 @@ import { BarChart } from "@/components/business/bar-chart";
 import { VerificationBanner } from "@/components/business/verification-banner";
 import { EmptyState } from "@/components/consumer/empty-state";
 import { loadBusinessDashboard } from "@/features/analytics/server/dashboard";
+import {
+  activationBannerCopy,
+  buildActivationChecklist,
+  formatSubmittedOn,
+  sentBackReason,
+} from "@/features/businesses/activation/presenter";
+import { loadActivationFacts } from "@/features/businesses/activation/server/state";
+import { GoLiveCard } from "@/features/businesses/activation/components/go-live-card";
 import { resolvePortalContext } from "@/features/businesses/server/portal-context";
+import { getBaseRule } from "@/features/campaigns/server/repo";
 import { resolveReviewerContext } from "@/features/receipts/review/access";
 import { countPendingReview, PENDING_COUNT_CAP } from "@/features/receipts/review/queue";
 import { cn } from "@/lib/utils";
@@ -80,9 +89,40 @@ export default async function BusinessDashboardPage() {
   // rendered at all.
   const dashboard = portal === null ? null : await loadBusinessDashboard(portal.business.id);
 
+  // ---------------------------------------------------------------------
+  // ACTIVATION. This is the top of the acquisition funnel and it used to be a
+  // silent dead end: `businesses.status` defaults to 'draft', every consumer
+  // read filters `status='active'`, and nothing in the product moved a business
+  // between the two. The card below is how a merchant learns that and what to
+  // do about it; the banner is the one-sentence version of the same facts.
+  //
+  // Both are suppressed for an active business, and both are suppressed when
+  // the facts could not be READ - a checklist assembled from a failed query
+  // would either tell a merchant to redo work they have done or tell them they
+  // are ready when they are not.
+  // ---------------------------------------------------------------------
+  const activation = portal === null ? null : await loadActivationFacts(portal.business.id);
+  const checklist = activation === null ? null : buildActivationChecklist(activation);
+  // Only fetched when the embedded editor will actually render, so a live
+  // merchant's dashboard costs nothing extra.
+  const baseRule =
+    activation !== null && activation.status === "draft" && !activation.hasEarningRule
+      ? await getBaseRule(activation.businessId)
+      : null;
+
   return (
     <div className="flex flex-col gap-6">
-      <VerificationBanner status={portal?.business.status ?? null} />
+      <VerificationBanner copy={activation === null ? null : activationBannerCopy(activation)} />
+
+      {activation !== null && checklist !== null && activation.status !== "active" && (
+        <GoLiveCard
+          status={activation.status}
+          checklist={checklist}
+          sentBackReason={sentBackReason(activation.latestRound)}
+          baseRule={baseRule}
+          submittedLabel={formatSubmittedOn(activation.latestRound?.createdAt ?? null)}
+        />
+      )}
 
       {pendingReviewCount !== null && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

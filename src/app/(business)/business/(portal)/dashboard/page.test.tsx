@@ -20,6 +20,8 @@ const mocks = vi.hoisted(() => ({
   loadBusinessDashboard: vi.fn(),
   resolveReviewerContext: vi.fn(),
   countPendingReview: vi.fn(),
+  loadActivationFacts: vi.fn(),
+  getBaseRule: vi.fn(),
 }));
 
 vi.mock("@/features/businesses/server/portal-context", () => ({
@@ -38,6 +40,28 @@ vi.mock("@/features/receipts/review/access", () => ({
 vi.mock("@/features/receipts/review/queue", () => ({
   countPendingReview: mocks.countPendingReview,
   PENDING_COUNT_CAP: 99,
+}));
+
+// The activation slice. The FACTS are mocked; the presenter, the checklist and
+// the go-live card are the real ones, because the point of these tests is that
+// the dashboard says true things and a stubbed card would say whatever the stub
+// said. The two server-action modules the card imports are stubbed instead:
+// they exist to be called on a click, and importing them for real drags the
+// whole server env into a render test.
+vi.mock("@/features/businesses/activation/server/state", () => ({
+  loadActivationFacts: mocks.loadActivationFacts,
+}));
+
+vi.mock("@/features/campaigns/server/repo", () => ({
+  getBaseRule: mocks.getBaseRule,
+}));
+
+vi.mock("@/features/businesses/activation/actions", () => ({
+  submitForReviewAction: vi.fn(),
+}));
+
+vi.mock("@/features/campaigns/actions", () => ({
+  upsertBaseRule: vi.fn(),
 }));
 
 const DashboardPage = (await import("./page")).default;
@@ -143,6 +167,18 @@ beforeEach(() => {
   });
   mocks.countPendingReview.mockResolvedValue(0);
   mocks.loadBusinessDashboard.mockResolvedValue(EMPTY_DASHBOARD);
+  // The default tenant on this page is LIVE, so activation renders nothing and
+  // every assertion below is about the numbers, exactly as it was before the
+  // activation slice existed. The draft cases have their own describe block.
+  mocks.loadActivationFacts.mockResolvedValue({
+    businessId: BUSINESS_ID,
+    status: "active",
+    hasEarningRule: true,
+    hasMenuItem: true,
+    hasStorefrontDetails: true,
+    latestRound: null,
+  });
+  mocks.getBaseRule.mockResolvedValue(null);
 });
 
 // ---------------------------------------------------------------- tenancy
@@ -284,5 +320,132 @@ describe("the review queue tile is untouched", () => {
     await renderDashboard();
     expect(screen.queryByText("Receipts to review")).not.toBeInTheDocument();
     expect(mocks.countPendingReview).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------- activation
+//
+// THE SILENT DEAD END, AND THE FENCE AGAINST IT COMING BACK.
+//
+// Before migration 0033 and the go-live card, a merchant who finished
+// onboarding sat at `businesses.status='draft'` forever. Every consumer read
+// filters `status='active'`, so their customers could not scan for them, they
+// could not be found on /home, and their public page did not resolve. Nothing
+// errored. Nothing on this dashboard said a word about it.
+//
+// Every test below is one of the ways that must never come back.
+
+const DRAFT_FACTS = {
+  businessId: BUSINESS_ID,
+  status: "draft" as const,
+  hasEarningRule: false,
+  hasMenuItem: false,
+  hasStorefrontDetails: false,
+  latestRound: null,
+};
+
+describe("a draft business is told it is not live", () => {
+  beforeEach(() => {
+    mocks.loadActivationFacts.mockResolvedValue(DRAFT_FACTS);
+  });
+
+  it("CRITICAL: says the business is not shown to customers", async () => {
+    const container = await renderDashboard();
+    expect(container.textContent ?? "").toContain("not shown to customers");
+  });
+
+  it("CRITICAL: names the earning rule as the thing that is blocking, and marks it required", async () => {
+    await renderDashboard();
+    expect(screen.getByText("Set how customers earn points")).toBeInTheDocument();
+    expect(screen.getByText("Required")).toBeInTheDocument();
+  });
+
+  it("puts the earning-rule editor on this page, not behind a link to another one", async () => {
+    await renderDashboard();
+    expect(screen.getByLabelText("Rule type")).toBeInTheDocument();
+  });
+
+  it("does not offer to send for review while a required item is undone", async () => {
+    await renderDashboard();
+    expect(screen.queryByRole("button", { name: "Send for review" })).not.toBeInTheDocument();
+  });
+
+  it("offers to send for review once the required item is done", async () => {
+    mocks.loadActivationFacts.mockResolvedValue({ ...DRAFT_FACTS, hasEarningRule: true });
+    await renderDashboard();
+    expect(screen.getByRole("button", { name: "Send for review" })).toBeInTheDocument();
+  });
+
+  it("marks the menu and storefront items as recommended, never as required", async () => {
+    await renderDashboard();
+    expect(screen.getByText("Add what you sell")).toBeInTheDocument();
+    expect(screen.getAllByText("Recommended").length).toBe(2);
+    expect(screen.getAllByText("Required").length).toBe(1);
+  });
+});
+
+describe("a business that was sent back", () => {
+  it("CRITICAL: shows the admin's reason verbatim", async () => {
+    mocks.loadActivationFacts.mockResolvedValue({
+      ...DRAFT_FACTS,
+      hasEarningRule: true,
+      latestRound: {
+        id: "round-1",
+        status: "rejected" as const,
+        decisionReason: "The address on the permit does not match the listing.",
+        decidedAt: "2026-07-30T02:00:00.000Z",
+        createdAt: "2026-07-29T02:00:00.000Z",
+      },
+    });
+
+    await renderDashboard();
+    expect(
+      screen.getByText("The address on the permit does not match the listing."),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("a business under review", () => {
+  beforeEach(() => {
+    mocks.loadActivationFacts.mockResolvedValue({
+      ...DRAFT_FACTS,
+      status: "pending_verification" as const,
+      hasEarningRule: true,
+      latestRound: {
+        id: "round-1",
+        status: "pending" as const,
+        decisionReason: null,
+        decidedAt: null,
+        createdAt: "2026-07-29T02:00:00.000Z",
+      },
+    });
+  });
+
+  it("says the submission is with the Giya team and offers no button", async () => {
+    await renderDashboard();
+    expect(screen.getByText("With the Giya team")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send for review" })).not.toBeInTheDocument();
+  });
+
+  it("does not claim documents are under review, because none were ever uploaded", async () => {
+    const container = await renderDashboard();
+    expect(container.textContent ?? "").not.toContain("documents are under review");
+  });
+});
+
+describe("an active business", () => {
+  it("gets no banner and no checklist at all", async () => {
+    await renderDashboard();
+    expect(screen.queryByText("Before customers can find you")).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+});
+
+describe("when the activation state could not be read", () => {
+  it("CRITICAL: renders no checklist rather than one assembled from a failed query", async () => {
+    mocks.loadActivationFacts.mockResolvedValue(null);
+    await renderDashboard();
+    expect(screen.queryByText("Before customers can find you")).not.toBeInTheDocument();
+    expect(screen.queryByText("Set how customers earn points")).not.toBeInTheDocument();
   });
 });

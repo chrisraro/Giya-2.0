@@ -17,6 +17,15 @@ import * as service from "./server/service";
 import type { ActionResult, CampaignRow, PointsRuleRow } from "./server/types";
 
 const CAMPAIGNS_PATH = "/business/campaigns";
+/**
+ * The base earning rule is now read on TWO screens, not one: the campaigns page
+ * that has always owned the editor, and the dashboard's go-live checklist,
+ * which embeds the same editor because that rule is the single precondition of
+ * activation (migration 0033). Revalidating only the campaigns path would leave
+ * a merchant who just set their rule from the dashboard looking at a checklist
+ * that still says they have not.
+ */
+const DASHBOARD_PATH = "/business/dashboard";
 
 const NOT_SIGNED_IN: ActionResult<never> = {
   ok: false,
@@ -185,6 +194,9 @@ export async function upsertBaseRule(input: unknown): Promise<ActionResult<Point
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
   const result = await service.upsertBaseRule(auth.businessId, parsed.data);
-  if (result.ok) revalidatePath(CAMPAIGNS_PATH);
+  if (result.ok) {
+    revalidatePath(CAMPAIGNS_PATH);
+    revalidatePath(DASHBOARD_PATH);
+  }
   return result;
 }
