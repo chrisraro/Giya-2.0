@@ -539,6 +539,99 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
 }
 
 // ---------------------------------------------------------------------------
+// The merchant-name check (doc 36 Stage 5's foreign-receipt defence)
+// ---------------------------------------------------------------------------
+//
+// TWO FINDINGS, RENDERED AS TWO DIFFERENT THINGS, ON PURPOSE.
+//
+// The pipeline routes a receipt here when the name printed at the top either
+// does not look like this shop's name, or could not be read at all. Those are
+// not degrees of the same problem and a reviewer does not answer them the same
+// way:
+//
+//   * "We could not read the shop name" is a PHOTO problem. The top of a
+//     receipt is the part that creases, fades and gets cropped, so this is the
+//     common case. The reviewer looks at the image, sees their own logo, and
+//     approves. There is nothing to learn from it - there is no header text to
+//     learn - so this variant offers no alias affordance at all, which is the
+//     most legible way for the two to differ.
+//   * "The header reads JOLLIBEE" is a FOREIGN RECEIPT, and possibly a
+//     deliberate one. The reviewer reads a name that is not theirs and
+//     rejects, or recognizes their own trading name and teaches it.
+//
+// WHAT THE COPY MAY NOT DO. It is merchant-facing, and it never accuses the
+// consumer. "We could not confirm this receipt is from your shop" is the
+// register: the subject is Giya's own uncertainty, not the customer's honesty.
+// The overwhelmingly common cause of both variants is a bad photograph of a
+// genuine purchase, and a reviewer primed to suspect their own customer is a
+// reviewer who will reject one. The CONSUMER-facing copy does not change at
+// all: a receipt in review already tells them honestly that a person is
+// looking at it, and nothing here reaches them.
+
+export type MerchantCheckTone = "unreadable" | "mismatch";
+
+export interface MerchantCheckNotice {
+  tone: MerchantCheckTone;
+  title: string;
+  body: string;
+  /** The header as read, for the "is this yours?" line. Null when unreadable. */
+  headerText: string | null;
+  /** The label under the header. Null when there is nothing to attribute. */
+  rivalNote: string | null;
+  /** Whether the one-tap "always accept this header" affordance applies. */
+  canLearnAlias: boolean;
+}
+
+/**
+ * The banner the decision screen shows when Stage 5 could not confirm the
+ * merchant, or null when it could (or when the receipt predates the check).
+ *
+ * A `match` verdict returns null rather than a reassuring green box: the queue
+ * is a list of things that need a decision, and a passed check is not one.
+ */
+export function merchantCheckNotice(
+  meta: ParseMetaView | null,
+  businessName: string,
+): MerchantCheckNotice | null {
+  const check = meta?.merchantCheck ?? null;
+  if (check === null || check.verdict === "match") return null;
+
+  if (check.verdict === "unreadable") {
+    return {
+      tone: "unreadable",
+      title: "We could not read the shop name on this receipt",
+      body:
+        `Nothing legible came off the top of the photo, so we could not confirm ` +
+        `it is from ${businessName}. The top of a receipt is usually the first ` +
+        `part to crease or fade. Check the photo yourself: if it is your ` +
+        `receipt, approve it.`,
+      headerText: null,
+      rivalNote: null,
+      canLearnAlias: false,
+    };
+  }
+
+  const rival = check.rival;
+  return {
+    tone: "mismatch",
+    title: `We could not confirm this receipt is from ${businessName}`,
+    body:
+      `The name printed at the top does not look like ${businessName}. That is ` +
+      `often just how a shop's receipts are headed, or a misread of a worn ` +
+      `line. Check the photo: if this is how your receipts print, approve it ` +
+      `and tell us to accept this header from now on.`,
+    headerText: check.headerText,
+    rivalNote:
+      rival === null
+        ? null
+        : `This header also matches ${rival.name}, another business on Giya.`,
+    // Nothing to learn without a header to learn, and the learn action reads
+    // the string from the receipt rather than from this screen anyway.
+    canLearnAlias: check.headerText !== null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Status and reason copy
 // ---------------------------------------------------------------------------
 

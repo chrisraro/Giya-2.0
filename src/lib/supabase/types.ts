@@ -296,6 +296,54 @@ export type Database = {
           },
         ]
       }
+      business_merchant_aliases: {
+        Row: {
+          alias: string
+          alias_normalized: string | null
+          business_id: string
+          created_at: string
+          created_by: string | null
+          id: string
+          receipt_id: string | null
+          source: string
+        }
+        Insert: {
+          alias: string
+          alias_normalized?: string | null
+          business_id: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          receipt_id?: string | null
+          source?: string
+        }
+        Update: {
+          alias?: string
+          alias_normalized?: string | null
+          business_id?: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          receipt_id?: string | null
+          source?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "business_merchant_aliases_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "business_merchant_aliases_receipt_id_fkey"
+            columns: ["receipt_id"]
+            isOneToOne: false
+            referencedRelation: "receipts"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       business_staff: {
         Row: {
           business_id: string

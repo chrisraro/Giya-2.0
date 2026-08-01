@@ -11,6 +11,7 @@ import type {
   ConsumerHistoryView,
   FraudSignalView,
   MatchedReceiptView,
+  MerchantCheckView,
   ParseMetaFieldView,
   ParseMetaView,
   ReviewDecisionItem,
@@ -188,6 +189,51 @@ function toEvidence(value: unknown): Record<string, unknown> {
  * throwing, because a reviewer with no chips can still work and a reviewer
  * looking at a stack trace cannot.
  */
+function finiteOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * `parse_meta.merchant_check`, narrowed.
+ *
+ * An UNRECOGNIZED OR ABSENT verdict yields null rather than a default. Null
+ * renders as "this receipt predates the merchant-name check" and asks the
+ * reviewer nothing; guessing "match" would tell them a check passed that never
+ * ran, and guessing "mismatch" would accuse a shop of scanning a foreign
+ * receipt on the strength of a missing jsonb key.
+ */
+function parseMerchantCheck(value: unknown): MerchantCheckView | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const check = value as Record<string, unknown>;
+  const verdict = check.verdict;
+  if (verdict !== "match" && verdict !== "mismatch" && verdict !== "unreadable") return null;
+
+  const rawRival = check.rival;
+  let rival: MerchantCheckView["rival"] = null;
+  if (typeof rawRival === "object" && rawRival !== null && !Array.isArray(rawRival)) {
+    const row = rawRival as Record<string, unknown>;
+    if (typeof row.name === "string" && row.name.length > 0) {
+      rival = {
+        businessId: typeof row.business_id === "string" ? row.business_id : null,
+        name: row.name,
+        score: finiteOrNull(row.score),
+      };
+    }
+  }
+
+  return {
+    verdict,
+    score: finiteOrNull(check.score),
+    threshold: finiteOrNull(check.threshold),
+    headerText:
+      typeof check.header_text === "string" && check.header_text.trim().length > 0
+        ? check.header_text.trim()
+        : null,
+    matchedAlias: typeof check.matched_alias === "string" ? check.matched_alias : null,
+    rival,
+  };
+}
+
 export function parseParseMeta(value: unknown): ParseMetaView | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const meta = value as Record<string, unknown>;
@@ -208,6 +254,10 @@ export function parseParseMeta(value: unknown): ParseMetaView | null {
   const ocr = typeof meta.ocr === "object" && meta.ocr !== null ? (meta.ocr as Record<string, unknown>) : {};
 
   return {
+    merchantCheck: parseMerchantCheck(meta.merchant_check),
+    reviewReasons: Array.isArray(meta.review_reasons)
+      ? meta.review_reasons.filter((reason): reason is string => typeof reason === "string")
+      : [],
     engine: typeof meta.engine === "string" ? meta.engine : null,
     tier: typeof meta.tier === "string" ? meta.tier : null,
     templateId: typeof meta.template_id === "string" ? meta.template_id : null,

@@ -44,13 +44,14 @@ export default async function BusinessRewardsPage() {
     );
   }
 
-  const { rewards, campaigns } = catalog.data;
+  const { rewards, campaigns, earningRule } = catalog.data;
 
   return (
     <RewardsManager
       businessName={context.businessName}
       rewards={rewards}
       availableCampaigns={campaigns.filter((campaign) => !campaign.terminal)}
+      earningRule={earningRule}
     />
   );
 }

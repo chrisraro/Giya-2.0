@@ -6,6 +6,8 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { receiptIdSchema } from "../schemas";
+import { learnMerchantAlias } from "../server/alias";
+import type { LearnAliasErrorCode } from "../server/alias";
 import { reviewReceipt } from "../server/review";
 import type { ReviewErrorCode } from "../server/review";
 import { resolveReviewerContext } from "./access";
@@ -154,4 +156,54 @@ export async function rejectReceiptAction(input: unknown): Promise<ReviewActionR
   }
 
   return { ok: true, status: "rejected", reason: outcome.reason };
+}
+
+// ---------------------------------------------------------------------------
+// "This is my receipt header, always accept it"
+// ---------------------------------------------------------------------------
+
+export type LearnAliasActionResult =
+  | { ok: true; alias: string; alreadyKnown: boolean }
+  | { ok: false; code: LearnAliasErrorCode | "NOT_ALLOWED" | "INVALID_INPUT"; message: string };
+
+/**
+ * Teach this business the receipt header the pipeline read.
+ *
+ * THE PAYLOAD IS A RECEIPT ID AND NOTHING ELSE, and that is the security
+ * property, not a convenience. An alias widens what auto-approves at a
+ * merchant, so the string it is built from is re-read server-side from that
+ * receipt's `parse_meta` (see `learnMerchantAlias`); accepting the header text
+ * from the browser would let one compromised reviewer session teach an
+ * arbitrary header. No business id is accepted either: the tenant comes from
+ * the session, and the service re-checks the receipt against it.
+ */
+export async function learnMerchantAliasAction(
+  input: unknown,
+): Promise<LearnAliasActionResult> {
+  const reviewer = await resolveReviewerContext();
+  if (reviewer === null) return { ok: false, code: "NOT_ALLOWED", message: NOT_ALLOWED };
+
+  const parsed = z.object({ receiptId: receiptIdSchema }).safeParse(input);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      code: "INVALID_INPUT",
+      message: "That receipt could not be identified. Refresh and try again.",
+    };
+  }
+
+  const outcome = await learnMerchantAlias({
+    receiptId: parsed.data.receiptId,
+    actorId: reviewer.userId,
+    businessId: reviewer.businessId,
+    actorRole: reviewer.role,
+    requestId: randomUUID(),
+  });
+
+  if (!outcome.ok) return { ok: false, code: outcome.code, message: outcome.message };
+
+  // The alias changes how FUTURE receipts route, so the queue and the
+  // dashboard tile are unaffected; only this screen's own banner is.
+  revalidatePath(`${RECEIPTS_PATH}/${parsed.data.receiptId}`);
+  return { ok: true, alias: outcome.alias, alreadyKnown: outcome.alreadyKnown };
 }

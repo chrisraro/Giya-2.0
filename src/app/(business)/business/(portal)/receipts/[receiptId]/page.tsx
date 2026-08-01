@@ -1,6 +1,10 @@
 import { notFound, redirect } from "next/navigation";
 
-import { approveReceiptAction, rejectReceiptAction } from "@/features/receipts/review/actions";
+import {
+  approveReceiptAction,
+  learnMerchantAliasAction,
+  rejectReceiptAction,
+} from "@/features/receipts/review/actions";
 import { resolveReviewerContext } from "@/features/receipts/review/access";
 import { ReviewDecisionScreen } from "@/features/receipts/review/decision-screen";
 import { loadReviewDecisionItem } from "@/features/receipts/review/queue";
@@ -48,6 +52,7 @@ export default async function BusinessReceiptDecisionPage({
       now={new Date()}
       onApprove={approveReceiptAction}
       onReject={rejectReceiptAction}
+      onLearnAlias={learnMerchantAliasAction}
     />
   );
 }

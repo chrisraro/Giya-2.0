@@ -139,6 +139,189 @@ function trigrams(value: string): Set<string> {
   return grams;
 }
 
+// ===========================================================================
+// The merchant-name check (the foreign-receipt defence)
+// ===========================================================================
+//
+// WHAT HOLE THIS CLOSES. `matchBusiness` above cannot defend a pre-bound scan
+// on its own, and the reason is structural rather than a bug in it: the
+// caller's candidate set for a pre-bound receipt is the pre-bound business and
+// nothing else, so `verifyPreBound`'s `contradicting` test has no other
+// candidate to find strong identity evidence on, the 0.85 floor always
+// applies, and 0.85 is exactly `matchAccept`. Every pre-bound receipt
+// therefore accepted. Concretely: buy food at a competitor, open Giya, tap a
+// merchant, scan the competitor's receipt. The receipt is fresh, unique and
+// under the amount ceiling, so every other defence passes it, and the
+// merchant's points liability is funded by purchases made at their rivals.
+//
+// FOUR DECISIONS ARE BAKED IN HERE, AND THEY ARE NOT INTERCHANGEABLE.
+//
+// 1. A MISMATCH ROUTES TO REVIEW, NEVER REJECTS. This function returns a
+//    verdict; it never returns a confidence the router could turn into a
+//    `wrong_business` rejection, and the pipeline deliberately does NOT feed
+//    rival businesses into `matchBusiness`'s candidate list, because that
+//    would raise `contradicted`, zero the confidence and REJECT. OCR misreads
+//    merchant names for a living - this project's own testing has read "Bilao"
+//    as "Bilbao" and a TIN's `009` as `899` - and a false reject on a real
+//    customer's genuine purchase is the worst outcome this product can
+//    produce. A false review costs a merchant thirty seconds.
+//
+// 2. AN UNREADABLE NAME IS TREATED EXACTLY LIKE A MISMATCH. Null must not mean
+//    pass. "The check failed to run" silently becoming "the check passed" is
+//    how points get minted, and the top of a receipt is the most damaged part
+//    of it, so this case is common rather than exotic. The two are returned as
+//    DIFFERENT verdicts, not one boolean, because "could not read the shop
+//    name" and "the receipt says JOLLIBEE" prompt completely different human
+//    decisions: one is a photo problem, the other is fraud.
+//
+// 3. THE THRESHOLD IS GENEROUS (0.35), BEST-OF ACROSS THE BUSINESS NAME AND
+//    EVERY ALIAS. The attack signal is enormous - JOLLIBEE against KAPE
+//    BICOLANDIA scores near zero - while every false positive is a near-miss
+//    caused by our own OCR. Those are two well-separated populations, so a low
+//    threshold splits them cleanly; extra strictness buys almost no safety and
+//    costs real review-queue volume that merchants pay for in attention.
+//
+// 4. A HEADER THAT MATCHES A DIFFERENT GIYA MERCHANT BETTER THAN IT MATCHES
+//    THE BOUND ONE ROUTES TO REVIEW EVEN WHEN THE BOUND SCORE CLEARED 0.35.
+//    That is the high-signal case: someone scanning a rival Giya shop's
+//    receipt. "Better than" rather than "at all" is what keeps this usable -
+//    two businesses whose names genuinely overlap ("Kape Bicol" beside "Kape
+//    Bicolandia") would otherwise send every receipt either shop ever takes to
+//    a human, forever, with no way for a reviewer to resolve it.
+
+/** Doc 36 Stage 5, this slice's addition. Deliberately low; see note 3 above. */
+export const MERCHANT_NAME_THRESHOLD = 0.35;
+
+export type MerchantNameVerdict = "match" | "mismatch" | "unreadable";
+
+/** A live, publicly listed business other than the pre-bound one. */
+export interface RivalMerchant {
+  businessId: string;
+  name: string;
+}
+
+export interface MerchantNameCheckInput {
+  /** The extracted merchant line (doc 36 Stage 7). Null when extraction failed. */
+  merchantName: string | null;
+  /** `businesses.name` of the pre-bound business. */
+  businessName: string;
+  /** Every alias configured for or taught to this business. */
+  aliases?: readonly string[];
+  /**
+   * Candidate rival merchants, already narrowed by the caller. An empty list
+   * is not a claim that no rival matches: the caller's prefilter can miss an
+   * OCR-mangled rival name, in which case the bound-name comparison below is
+   * what routes the receipt. The rival check adds attribution, never safety.
+   */
+  rivals?: readonly RivalMerchant[];
+  trigramSimilarity: (a: string, b: string) => number;
+  threshold?: number;
+}
+
+export interface MatchedRivalMerchant extends RivalMerchant {
+  score: number;
+}
+
+export interface MerchantNameCheck {
+  verdict: MerchantNameVerdict;
+  /** Best-of across the business name and every alias, 0 when unreadable. */
+  score: number;
+  /**
+   * The header as it was extracted, verbatim and untrimmed of meaning: this is
+   * what a reviewer reads and what the one-tap alias affordance learns. Null
+   * when nothing was extracted, which is what makes the review queue able to
+   * render the two failure cases differently without re-deriving the verdict.
+   */
+  headerText: string | null;
+  /** The alias that carried the score, or null when the business name did. */
+  matchedAlias: string | null;
+  /** Set only when a rival is what forced the verdict. */
+  rival: MatchedRivalMerchant | null;
+  threshold: number;
+}
+
+/**
+ * Score one candidate name against the normalized header.
+ *
+ * Exact equality after normalization is pinned to 1 rather than left to the
+ * injected similarity function. That is what makes the one-tap "always accept
+ * this header" promise literal: an alias a merchant taught from a receipt must
+ * make the identical receipt pass, whatever Postgres's `similarity()` happens
+ * to think of the string.
+ */
+function scoreName(
+  normalizedHeader: string,
+  candidate: string,
+  similarity: (a: string, b: string) => number,
+): number {
+  const normalized = normalizeForMatch(candidate);
+  if (normalized.length === 0) return 0;
+  if (normalized === normalizedHeader) return 1;
+  return round4(Math.min(MAX_CONFIDENCE, Math.max(0, similarity(normalizedHeader, normalized))));
+}
+
+/**
+ * Does the name printed at the top of this receipt belong to the business the
+ * consumer scanned it against?
+ *
+ * PURE, and returns a verdict rather than a score the router could reject on.
+ * The pipeline threads the answer through the same `forceReview` mechanism the
+ * amount ceiling and the LLM-assist rail already use.
+ */
+export function checkMerchantName(input: MerchantNameCheckInput): MerchantNameCheck {
+  const threshold = input.threshold ?? MERCHANT_NAME_THRESHOLD;
+  const headerText =
+    input.merchantName === null || input.merchantName.trim().length === 0
+      ? null
+      : input.merchantName.trim();
+  const normalizedHeader = headerText === null ? "" : normalizeForMatch(headerText);
+
+  // Both "no merchant line at all" and "a merchant line with no letters or
+  // digits in it" are the same finding: we did not read the shop name. A
+  // header of "~~~~" carries exactly as much identity evidence as a null.
+  if (normalizedHeader.length === 0) {
+    return {
+      verdict: "unreadable",
+      score: 0,
+      headerText,
+      matchedAlias: null,
+      rival: null,
+      threshold,
+    };
+  }
+
+  let score = scoreName(normalizedHeader, input.businessName, input.trigramSimilarity);
+  let matchedAlias: string | null = null;
+  for (const alias of input.aliases ?? []) {
+    const aliasScore = scoreName(normalizedHeader, alias, input.trigramSimilarity);
+    if (aliasScore > score) {
+      score = aliasScore;
+      matchedAlias = alias;
+    }
+  }
+
+  let rival: MatchedRivalMerchant | null = null;
+  for (const candidate of input.rivals ?? []) {
+    const rivalScore = scoreName(normalizedHeader, candidate.name, input.trigramSimilarity);
+    if (rivalScore < threshold || rivalScore <= score) continue;
+    if (rival === null || rivalScore > rival.score) {
+      rival = { ...candidate, score: rivalScore };
+    }
+  }
+
+  if (rival !== null) {
+    return { verdict: "mismatch", score, headerText, matchedAlias, rival, threshold };
+  }
+  return {
+    verdict: score >= threshold ? "match" : "mismatch",
+    score,
+    headerText,
+    matchedAlias: score >= threshold ? matchedAlias : null,
+    rival: null,
+    threshold,
+  };
+}
+
 // Doc 36 Stage 5 routing table, applied by the caller to match_confidence.
 export function matchOutcome(
   confidence: number,

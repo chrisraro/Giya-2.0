@@ -142,6 +142,29 @@ Scoring inputs (best-of, not additive):
 - `0.5 – 0.85` → route receipt to `review` (reviewer confirms the business).
 - `< 0.5` → `rejected`, `reject_reason='wrong_business'` (pre-bound) or unmatched-discard `[V1]` (generic scan; consumer prompted to pick the business and resubmit).
 
+### Merchant-name check (the foreign-receipt defence)
+
+*amendment: added by `0034_business_merchant_aliases.sql`; the table above is unchanged.*
+
+The scoring table alone cannot defend a pre-bound scan. A pre-bound receipt has exactly one candidate, so nothing can supply the "contradicting evidence" the floor row excludes: the floor of 0.85 is always the score, 0.85 is exactly the auto-accept threshold, and every pre-bound receipt accepted. A receipt from any other shop, scanned against a merchant, minted that merchant's points.
+
+So Stage 5 also runs a **merchant-name check** over the extracted merchant line, best-of against `businesses.name` and every alias, at a threshold of **0.35**:
+
+| Verdict | Condition | Outcome |
+|---|---|---|
+| `match` | best-of score `>= 0.35`, and no rival scores higher | routes normally |
+| `mismatch` | best-of score `< 0.35`, **or** a different live business scores higher | `review` |
+| `unreadable` | no merchant line was extracted | `review` |
+
+Four properties are load-bearing:
+
+- **It never rejects.** The verdict reaches the router as a force-review only, exactly as the amount ceiling and the LLM-assist rail do; `match_confidence` is not touched. OCR misreads shop names routinely, and a false reject on a genuine purchase is worse than any leakage it prevents.
+- **`unreadable` is not a pass.** The top of a receipt is its most damaged region, so a null merchant line is common; treating it as a pass would silently disable the check on a large slice of traffic. It is recorded as a *distinct* reason from `mismatch`, because one is a photo problem and the other is a foreign receipt.
+- **The threshold is deliberately generous.** A foreign header scores near zero against the bound shop, while every false positive is a near-miss caused by our own OCR; the two populations are far apart, so strictness buys almost no safety and costs real queue volume.
+- **Aliases belong to the business, not to a template.** `receipt_templates.parse_config.merchant_aliases` still works and is unioned in, but a brand new merchant has no template at all, so learned aliases live in `business_merchant_aliases` (`business_id`, `alias`, generated `alias_normalized`, unique per business). The review queue teaches them: the decision screen offers a one-tap "this is my receipt header, always accept it" that stores the header the pipeline read. There is no grace period, because a grace period leaves the hole open exactly when a shop is too new to notice leakage.
+
+The verdict, the score, the header text, the matched alias and any rival are written to `receipts.parse_meta.merchant_check`, alongside `parse_meta.review_reasons` (the full list of force-review causes, so the queue can explain itself and the figures can be counted).
+
 ## Stage 6 — Template matching & the template system
 
 `receipt_templates` (`../20-data/24-schema-receipts-ai.md`): business-uploaded reference receipts that teach the parser. Multiple active templates per business (e.g. "Main branch POS" + "Handwritten pad"); `source_kind ∈ ('pos','invoice','handwritten')`.

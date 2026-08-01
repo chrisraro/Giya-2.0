@@ -8,15 +8,41 @@ import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/consumer/empty-state";
 import { cn } from "@/lib/utils";
 
+import { describeImpliedSpend, impliedSpend, type EarningRuleShape } from "../economics";
 import type { RewardCatalogItem } from "../types";
 
 type ActionResult = { ok: true } | { ok: false; message: string };
 
 export interface RewardListProps {
   rewards: RewardCatalogItem[];
+  /** The active base earning rule, for each card's implied-spend caption. */
+  earningRule: EarningRuleShape | null;
   onEdit: (reward: RewardCatalogItem) => void;
   onSetActive: (rewardId: string, isActive: boolean) => Promise<ActionResult>;
   emptyBody: string;
+}
+
+/**
+ * The same sentence as the form, on every card. THE LIST IS WHERE THE STALE
+ * CASE SHOWS UP: the earning rate lives on the Campaigns page, so a merchant
+ * who changes it silently re-prices every reward they set up months ago, and
+ * nothing else on any screen would tell them. The form only ever speaks about
+ * the one reward being edited.
+ *
+ * Kept to a caption to earn its place on an already dense card: one line, no
+ * container, no icon, and the hedge footnote (`impliedSpendNote`) is left to
+ * the form, where the merchant is actually choosing the number. The no-rule
+ * sentence is suppressed here too - repeating "nobody can earn points yet" on
+ * every card in a grid is nagging, and the merchant meets it once in the form
+ * and again as the server's refusal if they try to save.
+ */
+function spendCaption(
+  earningRule: EarningRuleShape | null,
+  pointsCost: number,
+): string | null {
+  const spend = impliedSpend(earningRule, pointsCost);
+  if (spend.kind === "no_rule") return null;
+  return describeImpliedSpend(spend);
 }
 
 /** Doc 32 section 9.3: "remaining displayed with low-stock badge <= 10%". */
@@ -52,10 +78,12 @@ function stockChipClass(state: StockState): string {
 
 function RewardCard({
   reward,
+  earningRule,
   onEdit,
   onSetActive,
 }: {
   reward: RewardCatalogItem;
+  earningRule: EarningRuleShape | null;
   onEdit: (reward: RewardCatalogItem) => void;
   onSetActive: (rewardId: string, isActive: boolean) => Promise<ActionResult>;
 }) {
@@ -64,6 +92,7 @@ function RewardCard({
 
   const state = stockState(reward);
   const campaign = reward.campaign;
+  const caption = spendCaption(earningRule, reward.pointsCost);
 
   async function toggleActive() {
     setRowError(null);
@@ -99,6 +128,8 @@ function RewardCard({
           {stockLabel(reward)}
         </span>
       </div>
+
+      {caption ? <p className="text-body-s text-on-surface-variant">{caption}</p> : null}
 
       {reward.description ? (
         <p className="text-body-s text-on-surface-variant">{reward.description}</p>
@@ -146,7 +177,13 @@ function RewardCard({
   );
 }
 
-export function RewardList({ rewards, onEdit, onSetActive, emptyBody }: RewardListProps) {
+export function RewardList({
+  rewards,
+  earningRule,
+  onEdit,
+  onSetActive,
+  emptyBody,
+}: RewardListProps) {
   if (rewards.length === 0) {
     return <EmptyState icon="redeem" title="No rewards yet" body={emptyBody} />;
   }
@@ -155,7 +192,12 @@ export function RewardList({ rewards, onEdit, onSetActive, emptyBody }: RewardLi
     <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {rewards.map((reward) => (
         <li key={reward.id}>
-          <RewardCard reward={reward} onEdit={onEdit} onSetActive={onSetActive} />
+          <RewardCard
+            reward={reward}
+            earningRule={earningRule}
+            onEdit={onEdit}
+            onSetActive={onSetActive}
+          />
         </li>
       ))}
     </ul>

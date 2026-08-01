@@ -93,6 +93,32 @@ export interface ParseMetaFieldView {
   present: boolean;
 }
 
+/** The rival named by `parse_meta.merchant_check.rival`, when one was found. */
+export interface MerchantCheckRivalView {
+  businessId: string | null;
+  name: string;
+  score: number | null;
+}
+
+/**
+ * `parse_meta.merchant_check` as written by `buildParseMeta`: doc 36 Stage 5's
+ * merchant-name check, the defence against a receipt from another shop being
+ * scanned against this one.
+ *
+ * `verdict` is three-valued rather than a boolean because "we could not read
+ * the shop name" and "the shop name is not yours" are different findings that
+ * a reviewer answers differently, and the queue must not flatten them.
+ */
+export interface MerchantCheckView {
+  verdict: "match" | "mismatch" | "unreadable";
+  score: number | null;
+  threshold: number | null;
+  /** The header exactly as the pipeline read it. Null when nothing was read. */
+  headerText: string | null;
+  matchedAlias: string | null;
+  rival: MerchantCheckRivalView | null;
+}
+
 /** The readable half of `receipts.parse_meta`, narrowed from its jsonb. */
 export interface ParseMetaView {
   engine: string | null;
@@ -104,6 +130,15 @@ export interface ParseMetaView {
   dateAmbiguous: boolean | null;
   notes: string[];
   ocrMeanConfidence: number | null;
+  /** Null on a row written before the check existed, or on an unmatched receipt. */
+  merchantCheck: MerchantCheckView | null;
+  /**
+   * `parse_meta.review_reasons`: why the pipeline asked a human to look.
+   * Empty on rows written before the field existed, which is indistinguishable
+   * from "nothing forced a review" and is treated as such - the reasons
+   * annotate the queue, they never gate it.
+   */
+  reviewReasons: string[];
 }
 
 /** One row of `/business/receipts`. */
