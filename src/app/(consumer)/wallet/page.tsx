@@ -128,6 +128,18 @@ export default async function WalletPage() {
         ) : (
           balances.map((balance) => <BalanceRow key={balance.businessId} balance={balance} />)
         )}
+
+        {/* The expiry rule is stated where the balance is read, not only in the
+            terms. Doing it the other way round is how a loyalty programme ends
+            up accused of moving the goalposts: a rule nobody met until their
+            points vanished reads as retroactive even when it was written down
+            all along. Shown only when there is a balance, because there is
+            nothing to qualify otherwise. */}
+        {balances.length > 0 ? (
+          <p className="pt-1 text-body-s text-on-surface-variant">
+            Points expire 12 months after you earn them, counted separately for each time you earn.
+          </p>
+        ) : null}
       </section>
 
       {user ? (

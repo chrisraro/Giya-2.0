@@ -43,8 +43,19 @@ export default function TermsPage() {
       <LegalSection heading="Points are not money">
         <p>
           Points have no cash value. They cannot be transferred to another person or exchanged for cash, and they can
-          only be redeemed for the rewards offered in the app. Points can expire according to the rules of each
-          loyalty program, which are shown in the app for each program.
+          only be redeemed for the rewards offered in the app.
+        </p>
+      </LegalSection>
+
+      <LegalSection heading="When points expire">
+        <p>
+          Points expire 12 months after the day you earn them. Expiry is counted separately for each time you earn,
+          so points you earn today are unaffected by points you earned last year, and nothing expires all at once on
+          a single date. Points you earn at one business are separate from points you earn at another.
+        </p>
+        <p>
+          If a business stops taking part in Giya, points you hold with that business can no longer be redeemed,
+          because the reward was always theirs to give rather than ours.
         </p>
       </LegalSection>
 
