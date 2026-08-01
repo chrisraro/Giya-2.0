@@ -1,7 +1,7 @@
 # 03 — Loyalty benchmarks: what to copy, what to avoid
 
 **Date:** 2026-08-01
-**Method:** four parallel research streams (screen IA, user flows, PH market, complaints), ~30 sources, primary-source-first. Findings then checked against this repo's actual code.
+**Method:** six parallel research streams (screen IA, user flows, PH market, complaints, PH mobile reality, PH consumer-protection law), ~60 sources, primary-source-first. Findings then checked against this repo's actual code.
 **Angle:** what Giya can copy now, not a faithful teardown.
 
 ## Executive Summary
@@ -137,7 +137,28 @@ This compounds finding 2: our redemption requires both parties online, at a coun
 
 **Cash still dominates the counter, which validates the whole thesis.** Digital is 57.4 percent of PH retail payments by volume, but only **29 percent of point-of-sale payments**. The digital majority comes from P2P transfers and bills, not counter transactions. Every competitor that rides a payment rail or a POS terminal is structurally blind to the majority of transactions at a carinderia. Receipt capture is the only mechanism that sees cash.
 
-**Randomness triggers a DTI permit.** Pure points-for-purchase may be exempt, but anything with an element of chance, a spin-to-win, a mystery reward, a raffle, requires a sales promotion permit filed at least 15 days ahead, capped at one year, with a DTI representative witnessing draws. That rules out the single most habit-forming pattern in PH consumer apps (Shopee and Lazada spin wheels and daily streaks) unless we take on per-campaign, per-merchant filings.
+**The DTI permit position is worse than "randomness triggers a permit."** An earlier read of this had it that pure points are probably exempt and only chance-based mechanics need a filing. A dedicated pass at the primary sources does not support that.
+
+- RA 7394 Art. 4(bm) defines a sales promotion to include, as a second and separate sentence with no chance element at all, "techniques purely intended to increase the sales, patronage and/or goodwill of a product." A loyalty programme is that by construction.
+- **"Redemption" is one of DTI's own enumerated permit-requiring promo types**, alongside Raffle, Discount, Premium, Games and Contest, on the e-Sigaw application itself. "Collect points, redeem for a reward" is the checkbox.
+- **DTI's published exemption list contains three categories** — government, private entities partnered with a government agency, and social, civic, religious or professional organisations serving their own members. A commercial SME loyalty programme is none of them.
+- The widely repeated "loyalty programmes qualify for a Certificate of Exemption" claim traces, in every instance found, to **consultancy sites selling the filing service**. No DAO section, circular or DTI page supports it. Treat as marketing copy.
+- **A permitted promotion is capped at one year**, extendable by six months. There is no perpetual permit. Blanket approval exists since July 2024 via DTI-IRegIS, valid two years, but is reported at **PHP 20,000 per scheme** — 20 to 80 times a single promo permit, and a serious number for an SME.
+
+Penalties under DAO 7 s.1999 run PHP 500 to PHP 300,000 plus PHP 1,000 per day of continuing violation. The realistic threat model is not a raid: in a documented case a consumer used the absence of a DTI permit as a **sword in private litigation** after being denied a senior discount on a "promo."
+
+Two consequences land directly on the product. **First, decide who holds the permit** — Giya as platform, or each merchant — because a per-merchant annual filing belongs in onboarding, not in a support ticket. **Second, a campaign builder is a permit-generating machine**: every "2x points weekend" and every signup bonus is a discrete, time-boxed campaign, and anything with chance in it is certain to need a filing.
+
+### Compliance work this creates in code, not just in counsel
+
+- **"While supplies last" is prohibited** under DTI promo rules; the sponsor is liable to keep supply sufficient for the whole period. Our reward cards render an `outOfStock` state. Under a permit that state is itself the violation, so stock exhaustion has to be prevented at the reward-configuration layer rather than displayed at the card layer.
+- **A winner has at least 60 days to claim.** Our claim window is shorter. If a reward ever runs under a permit, that window is a floor set by regulation.
+- **Senior and PWD discounts must remain the customer's choice.** DTI's stated position is that seniors must be free to choose between the mandated 20 percent and a promo discount. A points engine that silently suppresses a statutory discount is the exact fact pattern behind a filed suit.
+- **NPC registration is probably mandatory the moment we segment.** NPC Circular 2022-04 s.5: a system "involving automated decision-making or profiling shall, in all instances, be registered." That is not gated by the 250-employee or 1,000-sensitive-record thresholds. Tiering, targeted offers and the Meta audience work all read as profiling. It needs a DPO with a dedicated address and registration within 20 days of go-live; the alternative is a notarised sworn declaration, and there is no do-nothing option.
+- **Consent must be separate and unticked.** NPC Circular 2023-04 invalidates implied, opt-out and pre-ticked consent, requires layered or just-in-time notices as the default, and expressly prohibits deceptive design patterns. Account operation and marketing must be two consents, and opt-out honoured within 24 hours.
+- **Loyalty cards are named in NPC Circular 2023-03** on ID cards, which covers "physical or digital." Keep the member QR to what identifies the holder and nothing more.
+
+The cheapest de-risking move available costs nothing: a written query to DTI FTEB Sales Promotion Division describing Giya's exact mechanics. A written DTI answer outweighs every secondary source on this topic.
 
 ## Contrarian Views And Risks
 
@@ -145,11 +166,31 @@ Stated at full strength, because it targets this product specifically.
 
 **Double Jeopardy.** Ehrenberg-Bass finds a brand's loyalty is a near-deterministic function of market share: small brands have fewer buyers *and* those buyers are less loyal. Loyalty is downstream of penetration. On this account a loyalty programme cannot lift a small merchant into big-brand loyalty metrics.
 
-**Loyalty programmes recruit the already-loyal.** Dowling and Uncles (*Sloan Management Review*, 1997) concluded such schemes "do not fundamentally alter market structure and instead increase market expenditures without really creating any extra brand loyalty", and are "surprisingly ineffective" given their popularity. Peer-reviewed, long-standing, not overturned. The widely-quoted vendor statistics on the other side ("members spend 38% more") have an obvious fatal flaw: members are recruited *from* heavy buyers, so the comparison cannot establish causation.
+**Loyalty programmes recruit the already-loyal, and the size of that bias is now quantified.** Dowling and Uncles (*Sloan Management Review*, 1997) concluded such schemes are "surprisingly ineffective" given their popularity. The vendor statistics on the other side ("members spend 18 to 38 percent more") compare members to non-members, and members self-select from heavy buyers. **Leenheer et al. (*IJRM*, 2007) corrected for that endogenous selection and found the real effect on share of wallet is positive, significant, and seven times smaller than the naive comparison.** Divide any member-versus-non-member claim by roughly seven. The 2026 *Journal of Retailing* meta-analysis of 434 effect sizes is positive, but it pools member-versus-non-member designs, so it is a precise estimate of a confounded quantity — an upper bound, not an estimate.
+
+**The cleanest test in the literature is a null.** Sharp and Sharp (*IJRM*, 1997) benchmarked Australia's Fly Buys against Dirichlet expectations specifically to control for self-selection: only 2 of 6 participating brands showed any excess loyalty, and it was weak.
+
+**Dowling and Uncles' most damaging single fact.** Only about 10 percent of buyers are exclusively loyal to a brand over a year, and those exclusively loyal buyers tend to be **light** buyers. The customers a programme can make exclusive are the ones worth least. Heavy customers are, by the same panel data, heavy customers of competitors too.
+
+**The "5 percent retention lifts profit 25 to 95 percent" figure is inflated folklore.** The primary source is Reichheld and Sasser (*HBR*, 1990), whose actual numbers were 85 percent in one bank's branch system, 50 percent in an insurance brokerage and 30 percent in an auto-service chain — a 25 to 85 percent range, from proprietary consulting analyses of three contractual service industries, never peer-reviewed or replicated. The 95 percent upper bound entered circulation through a 2014 HBR blog post citing a Bain marketing brief. Reinartz and Kumar (*HBR*, 2002) then empirically falsified three of its four assumed mechanisms: loyal customers were not cheaper to serve, not willing to pay more, and not better referrers. **Do not use this number in a deck.** The same applies to the Nielsen "84 percent of consumers" figure, which is stated intent from an online panel, and to a widely quoted "McKinsey: 58 percent never use the benefits" that does not appear in McKinsey's publications at all.
+
+**When someone measured actual firm outcomes, the sign flipped.** McKinsey looked at 55 public North American and European companies: those spending more on loyalty grew at 4.4 percent a year against 5.5 percent for those that did not, with EBITDA margins about 10 percent lower than same-sector peers. Their own conclusion was that programmes "on average do not [pay off] and may in fact destroy value." **Food retail was among the negative sectors.** This is correlational, but it runs against the commercial interest of the firm that published it.
+
+**Breakage is the uncomfortable part of the ledger.** The standard liability formula is outstanding points times one minus breakage times cost per point. Breakage is what makes the economics work, and breakage is by definition the programme failing at its stated job. For a large issuer unredeemed points are deferred revenue with float; for a single cafe an outstanding balance is a future cost against a thin margin with no float and no way to diversify redemption timing.
 
 **Gamification evidence does not transfer.** Meta-analytic effects come overwhelmingly from education and health, not commercial transactions, and attenuate past a semester as novelty decays.
 
 **Even the celebrated positive result is mostly abandonment.** Nunes and Drèze's endowed-progress car-wash study hit 34 percent completion against a 19 percent control. The famous win means 66 to 81 percent of cards were abandoned.
+
+**But the two best pro-programme findings are at exactly our scale, and both are directly buildable.** Nunes and Drèze (*JCR*, 2006): a card needing 8 washes from zero completed 19 percent of the time; a card needing 10 but pre-stamped with 2 — an identical 8 remaining — completed **34 percent** of the time and sooner, and the effect was **stronger when a reason for the head start was given**. Kivetz, Urminsky and Zheng (*JMR*, 2006), in a real cafe programme across roughly 10,000 coffee purchases: interpurchase time falls about **20 percent, roughly 7 days**, as members approach a reward, and the tendency to accelerate predicts retention and faster reengagement. This is a small cafe with a stamp card, which is our merchant.
+
+Two honest caveats that shape the design rather than dismiss it. The acceleration **resets after redemption** — the mechanism is a repeating sawtooth of pull-forward, not a permanent step change in frequency, which argues for short cycles over accumulating balances. And Kivetz's primary sample is redeemed cards, so early quitters are underweighted.
+
+The category evidence agrees on where this works: across 29 supermarket categories the programme effect was positive in 19 and **negative in 10**, and the sign was set by penetration, frequency, impulse and stockpilability. Cafes, bakeries, milk tea and barbershops sit in the good quadrant; apparel, gifts and hardware sit in the one where the evidence says a programme loses money. **Merchant selection matters more than feature set.**
+
+Two things the evidence says not to ship: **leaderboards and competitive tiers**, which reduce engagement for persistently low-ranked users and demotivate the already-motivated, and **generic cross-merchant points**, which Dowling and Uncles class as tactical froth that sits beside the value proposition rather than reinforcing it. Progress bars and streaks are supported; ranking customers against each other is not.
+
+**The differentiation the literature hands us for free: measure incrementality.** Every credible number requires a control, which is why Leenheer's sevenfold correction exists. Nobody in this market shows a merchant a members-versus-matched-non-members or pre/post-with-control comparison. A programme that can prove a real +2 percent is more defensible than one claiming a fake +18 percent — and the receipt corpus is exactly the substrate for computing it.
 
 **What must hold for this to be worth building:**
 
@@ -165,14 +206,15 @@ Stated at full strength, because it targets this product specifically.
 - **Do our target merchants reliably issue receipts at all?** The PHP 500 non-VAT threshold means our typical transaction may legally produce nothing. Field validation, not engineering.
 - **Do we accept handwritten BIR booklets?** Simultaneously the moat and the hardest fraud problem.
 - **RESOLVED: points expiry is legal.** RA 10962 (Gift Check Act 2017) bans expiry dates on gift checks but **explicitly excludes** "those under loyalty, rewards, or promotional programs, as determined by DTI" (Supreme Court E-Library; DTI DAO 19-03 s.2019). Our 12-month policy is on solid ground. Caveat: if we ever issue anything resembling stored value OUTSIDE a loyalty programme, no-expiry applies and penalties run PHP 500,000 to 1,000,000.
-- **Does a perpetual loyalty programme need a DTI sales promotion permit?** The framework's 30-days-before-start structure implies defined periods and the sources reached do not address ongoing programmes. McDonald's PH cites permit numbers on its rewards pages. **Needs counsel, and if a permit is required per merchant, it belongs in the onboarding flow.**
+- **Does a perpetual loyalty programme need a DTI sales promotion permit?** Still open, but the earlier optimistic reading is withdrawn — see the permit section above. The only real argument for exemption is that a perpetual programme lacks the "limited duration" element in DTI's own five-part test, which is untested, and DTI's stated position in the 2024 Taragis case was that a marketing stunt "falls under the definition of sales promotion" once its purpose is admitted. **Send the written query to DTI FTEB before engaging counsel; it costs nothing and outranks every secondary source.**
+- **No Philippine or Southeast Asian loyalty-economics evidence exists.** Every study cited here is US, EU or Australian, mostly grocery, airline and campus. Frequency assumptions, margin structures, data cost and the cash-versus-digital mix are all materially different and untested here. Nobody has published whether a single-location cafe makes or loses money on a stamp card anywhere, let alone here.
 - **Real PH basket sizes** for carinderias and cafes. Only forum-grade figures found; likely skewed high.
 - **PH smartphone and data reality** — dominant devices, whether uploads are deferred to free WiFi. Gates the camera and upload design.
 - **Any published PH loyalty adoption or redemption rates.** Genuine evidence gap; treat any such claim with suspicion.
 
 ## Sources
 
-Full source lists with per-claim confidence are in the four research streams. Principal primaries:
+Full source lists with per-claim confidence are in the six research streams. Principal primaries:
 
 - McDonald's crew training PDF (learningwebhost.mcd.com) — in-store sequence, crew cannot see balances
 - McDonald's US Deals FAQ and Rewards FAQ — 15-minute code window, one reward per order, receipt recovery rules
