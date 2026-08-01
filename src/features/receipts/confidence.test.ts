@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   parseConfidence,
+  reviewRouteCauses,
   routeReceipt,
   shouldEmitLowConfidenceSignal,
   DEFAULT_ROUTING_THRESHOLDS,
@@ -490,5 +491,114 @@ describe("shouldEmitLowConfidenceSignal", () => {
     expect(shouldEmitLowConfidenceSignal(-1)).toBe(true);
     expect(shouldEmitLowConfidenceSignal(2)).toBe(false);
     expect(shouldEmitLowConfidenceSignal(Number.NaN)).toBe(true);
+  });
+});
+
+// ===========================================================================
+// D10: reviewRouteCauses
+// ===========================================================================
+//
+// The review-rate breakdown needs to say WHICH threshold routed a receipt, and
+// this is the only place entitled to answer. The comparisons quantize their
+// inputs first, so a caller re-deriving `parse < approve` from the stored
+// numbers would agree almost always and disagree exactly on the boundary cases
+// the quantization exists to fix - which is where a dial is about to be tuned.
+
+describe("reviewRouteCauses", () => {
+  const PASS: FraudVerdict = { kind: "pass" };
+  const REVIEW: FraudVerdict = { kind: "review" };
+
+  function causes(input: {
+    parseConfidence: number;
+    matchConfidence: number;
+    fraud?: FraudVerdict;
+    thresholds?: RoutingThresholds;
+  }) {
+    return reviewRouteCauses({
+      parseConfidence: input.parseConfidence,
+      matchConfidence: input.matchConfidence,
+      fraud: input.fraud ?? PASS,
+      thresholds: input.thresholds ?? DEFAULT_ROUTING_THRESHOLDS,
+    });
+  }
+
+  it("names a parse score short of the approve threshold", () => {
+    expect(causes({ parseConfidence: 0.79, matchConfidence: 1 })).toEqual([
+      "parse_confidence_low",
+    ]);
+  });
+
+  it("names a match score short of the accept threshold", () => {
+    expect(causes({ parseConfidence: 1, matchConfidence: 0.84 })).toEqual([
+      "match_confidence_low",
+    ]);
+  });
+
+  it("names the fraud verdict", () => {
+    expect(causes({ parseConfidence: 1, matchConfidence: 1, fraud: REVIEW })).toEqual([
+      "fraud_review",
+    ]);
+  });
+
+  it("reports EVERY test that was true, not the first", () => {
+    // doc 37: a fraud review wins even when parse confidence alone would
+    // approve. Both are still facts, and collapsing to the winner would hide
+    // half a merchant's review rate behind an evaluation order.
+    expect(causes({ parseConfidence: 0.6, matchConfidence: 0.6, fraud: REVIEW })).toEqual([
+      "parse_confidence_low",
+      "match_confidence_low",
+      "fraud_review",
+    ]);
+  });
+
+  it("is empty for an approval", () => {
+    expect(causes({ parseConfidence: 0.9, matchConfidence: 0.9 })).toEqual([]);
+  });
+
+  it("CRITICAL: is empty for a rejection, so no receipt is attributed to a human who never saw it", () => {
+    // Under the review floor is `unreadable`, not review; under the match floor
+    // is `wrong_business`; a fraud block is a rejection too. None of them may
+    // contribute a review reason.
+    expect(causes({ parseConfidence: 0.4, matchConfidence: 1 })).toEqual([]);
+    expect(causes({ parseConfidence: 1, matchConfidence: 0.4 })).toEqual([]);
+    expect(
+      causes({
+        parseConfidence: 1,
+        matchConfidence: 1,
+        fraud: { kind: "block", rejectReason: "duplicate" },
+      }),
+    ).toEqual([]);
+  });
+
+  it("agrees with routeReceipt on the quantization boundary", () => {
+    // The two combinations the STORED_PRECISION comment names, which land a few
+    // ulps off their decimal value in IEEE 754. The router quantizes and so
+    // does this, so the boundary receipt attributes to nothing and approves.
+    const boundary = {
+      parseConfidence: 0.35 * 1 + 0.2 * 0.5 + 0.15 * 0.5 + 0.3 * 0.75 + 0.05,
+      matchConfidence: 1,
+      fraud: PASS,
+      thresholds: DEFAULT_ROUTING_THRESHOLDS,
+    };
+    const outcome: RouteOutcome = routeReceipt(boundary);
+
+    expect(outcome.status).toBe("approved");
+    expect(reviewRouteCauses(boundary)).toEqual([]);
+  });
+
+  it("follows a tuned threshold rather than the default", () => {
+    const thresholds: RoutingThresholds = {
+      ...DEFAULT_ROUTING_THRESHOLDS,
+      approve: 0.6,
+    };
+    expect(causes({ parseConfidence: 0.7, matchConfidence: 1 })).toEqual([
+      "parse_confidence_low",
+    ]);
+    expect(causes({ parseConfidence: 0.7, matchConfidence: 1, thresholds })).toEqual([]);
+  });
+
+  it("normalizes a non-finite score the same way the router does", () => {
+    // NaN reads as 0, which is under the review floor, which is a REJECTION.
+    expect(causes({ parseConfidence: Number.NaN, matchConfidence: 1 })).toEqual([]);
   });
 });

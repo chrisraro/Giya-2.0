@@ -20,6 +20,7 @@ import {
   formatConfidence,
   formatDateTime,
   merchantCheckNotice,
+  operatorFailureNotice,
   queueAge,
   slaChipClass,
   toneChipClass,
@@ -234,6 +235,10 @@ export function ReviewDecisionScreen({
   const age = queueAge(item.createdAt, now);
   const composite = compositeFraudScore(item.signals);
   const merchantNotice = merchantCheckNotice(item.parseMeta, businessName);
+  // D7. Rendered ABOVE the merchant notice because it explains the empty form
+  // the reviewer is looking at, and because on this path there is no merchant
+  // check to render at all: the OCR call never came back, so Stage 5 never ran.
+  const operatorNotice = operatorFailureNotice(item.parseMeta);
 
   const totalCentavos = parseOptionalPeso(fields.total);
   const confirmTotalLabel =
@@ -494,6 +499,17 @@ export function ReviewDecisionScreen({
           className="rounded-md3-md border border-outline bg-surface-container p-4 text-body-m text-on-surface"
         >
           {outcome}
+        </div>
+      )}
+
+      {/* ---- D7: our failure, said out loud to the merchant -------------- */}
+      {operatorNotice !== null && (
+        <div
+          role="note"
+          className="flex flex-col gap-1 rounded-md3-md border border-outline bg-surface-container p-4"
+        >
+          <p className="text-title-m text-on-surface">{operatorNotice.title}</p>
+          <p className="text-body-m text-on-surface-variant">{operatorNotice.body}</p>
         </div>
       )}
 

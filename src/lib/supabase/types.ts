@@ -2563,6 +2563,14 @@ export type Database = {
         Returns: Json
       }
       expire_claims: { Args: { p_limit?: number }; Returns: number }
+      receipt_routing_breakdown: {
+        Args: { p_business_id?: string; p_days?: number }
+        Returns: {
+          key: string
+          kind: string
+          tally: number
+        }[]
+      }
       record_receipt_visit: {
         Args: { p_receipt_id: string }
         Returns: undefined

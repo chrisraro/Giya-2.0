@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { resolveAdminContext } from "@/features/admin/access";
 import { OverviewScreen } from "@/features/admin/overview-screen";
 import { loadPlatformOverview } from "@/features/admin/queue";
+import { loadRoutingBreakdown } from "@/features/receipts/server/routing-stats";
 
 // `/admin` - doc 31 §2's platform dashboard, cut to what live tables can answer.
 //
@@ -20,7 +21,24 @@ export default async function AdminOverviewPage() {
   const admin = await resolveAdminContext();
   if (admin === null) notFound();
 
-  const overview = await loadPlatformOverview();
+  // Both reads are independent, and neither can fail the other: a routing
+  // breakdown that could not be read renders its own "cannot read right now"
+  // inside a page whose tiles are otherwise fine.
+  //
+  // `businessId: null` is the platform-wide call, and this is the ONLY place in
+  // the codebase entitled to make it: `resolveAdminContext()` two lines above is
+  // the fence, exactly as it is for every other read in `features/admin/queue.ts`.
+  const [overview, routing] = await Promise.all([
+    loadPlatformOverview(),
+    loadRoutingBreakdown({ businessId: null }),
+  ]);
 
-  return <OverviewScreen overview={overview} adminName={admin.displayName} now={new Date()} />;
+  return (
+    <OverviewScreen
+      overview={overview}
+      adminName={admin.displayName}
+      now={new Date()}
+      routing={routing}
+    />
+  );
 }

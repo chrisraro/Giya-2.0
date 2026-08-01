@@ -176,6 +176,46 @@ export function routeReceipt(input: RouteReceiptInput): RouteOutcome {
   return { status: "approved" };
 }
 
+// Which of routeReceipt's three probabilistic tests sent this receipt to a
+// human. `fraud_review` covers doc 37's whole verdict; the pipeline splits it
+// into a staff self-scan and a composite breach from the signal rows, which
+// this module deliberately does not see.
+export type ReviewRouteCause =
+  | "parse_confidence_low"
+  | "match_confidence_low"
+  | "fraud_review";
+
+// The `review` branch of routeReceipt, as a LIST of the tests that were true.
+//
+// IT LIVES HERE, NEXT TO routeReceipt, AND NOWHERE ELSE. The instrumentation
+// that D10 asks for needs to say WHICH threshold routed a receipt, and the only
+// safe place to answer that is beside the function that did the routing: the
+// comparisons quantize their inputs first (see STORED_PRECISION), so a caller
+// re-deriving `parse < thresholds.approve` from the stored numbers would agree
+// with the router almost always and disagree exactly on the boundary cases the
+// quantization exists to fix. A breakdown that is wrong precisely where the
+// dial is about to be tuned is worse than no breakdown.
+//
+// Returns [] for any outcome other than `review`, including a rejection, so the
+// caller cannot accidentally attribute a receipt no human ever saw. It reports
+// EVERY test that was true rather than the first, because doc 37 is explicit
+// that a fraud review wins even when parse confidence alone would approve - so
+// "the fraud verdict was the reason" and "the parse score was also short" are
+// both facts, and collapsing them would hide half of a merchant's review rate
+// behind whichever cause happened to be checked first.
+export function reviewRouteCauses(input: RouteReceiptInput): ReviewRouteCause[] {
+  if (routeReceipt(input).status !== "review") return [];
+
+  const parse = toStoredPrecision(normalizeConfidence(input.parseConfidence));
+  const match = toStoredPrecision(normalizeConfidence(input.matchConfidence));
+  const causes: ReviewRouteCause[] = [];
+
+  if (parse < input.thresholds.approve) causes.push("parse_confidence_low");
+  if (match < input.thresholds.matchAccept) causes.push("match_confidence_low");
+  if (input.fraud.kind === "review") causes.push("fraud_review");
+  return causes;
+}
+
 // Doc 36 Stage 9 trailing note: sub-threshold mean OCR confidence emits an
 // `ai_confidence_low` fraud signal at severity `info` so reviewers see it
 // as context. Severity `info` carries weight 0.1 in doc 37's composite,

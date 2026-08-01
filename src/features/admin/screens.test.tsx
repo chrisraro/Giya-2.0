@@ -22,11 +22,23 @@ vi.mock("server-only", () => ({}));
 //     because "nothing here" and "we could not look" are different sentences.
 // ===========================================================================
 
+import { foldRoutingBreakdown } from "@/features/receipts/routing-breakdown";
+
 import { OverviewScreen } from "./overview-screen";
 import { AdminQueueScreen } from "./queue-screen";
 import type { AdminQueueItem, PlatformOverview } from "./types";
 
 const NOW = new Date("2026-07-26T12:00:00.000Z");
+
+/**
+ * A readable D10 breakdown, so the overview's own assertions are not testing
+ * the routing panel by accident. The panel has its own suite; every case below
+ * that is not about it passes a breakdown that renders quietly.
+ */
+const ROUTING = foldRoutingBreakdown(
+  [{ kind: "status", key: "approved", tally: 9 }],
+  30,
+);
 
 function item(overrides: Partial<AdminQueueItem> = {}): AdminQueueItem {
   return {
@@ -173,6 +185,7 @@ describe("OverviewScreen", () => {
         })}
         adminName="Ops Lead"
         now={NOW}
+        routing={ROUTING}
       />,
     );
 
@@ -189,6 +202,7 @@ describe("OverviewScreen", () => {
         overview={overview({ receiptsInReview: null })}
         adminName="Ops Lead"
         now={NOW}
+        routing={ROUTING}
       />,
     );
     expect(screen.getAllByText("Cannot read right now").length).toBe(1);
@@ -200,6 +214,7 @@ describe("OverviewScreen", () => {
         overview={overview({ fraudBlocks7d: 1, recentBlocks: [item({ topSeverity: "block" })] })}
         adminName="Ops Lead"
         now={NOW}
+        routing={ROUTING}
       />,
     );
     expect(screen.getByText("Kape Diaria")).toBeInTheDocument();
@@ -207,13 +222,25 @@ describe("OverviewScreen", () => {
   });
 
   it("explains an empty block list instead of leaving a bare zero", () => {
-    render(<OverviewScreen overview={overview()} adminName="Ops Lead" now={NOW} />);
+    render(
+      <OverviewScreen
+        overview={overview()}
+        adminName="Ops Lead"
+        now={NOW}
+        routing={ROUTING}
+      />,
+    );
     expect(screen.getByText("Nothing was blocked recently")).toBeInTheDocument();
   });
 
   it("carries no invented figure anywhere on an empty platform", () => {
     const { container } = render(
-      <OverviewScreen overview={overview()} adminName="Ops Lead" now={NOW} />,
+      <OverviewScreen
+        overview={overview()}
+        adminName="Ops Lead"
+        now={NOW}
+        routing={ROUTING}
+      />,
     );
     // The dashboard fixtures that shipped once in this codebase. None of them
     // may ever appear on a platform-wide surface.

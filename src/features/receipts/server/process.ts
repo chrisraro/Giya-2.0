@@ -11,6 +11,7 @@ import type { Database, Json } from "@/lib/supabase/types";
 
 import {
   parseConfidence,
+  reviewRouteCauses,
   routeReceipt,
   shouldEmitLowConfidenceSignal,
 } from "../confidence";
@@ -24,15 +25,26 @@ import type { MatchCandidate, MerchantNameCheck, RivalMerchant } from "../matchi
 import { parseReceipt } from "../parse";
 import type { ParseConfig, ParseNote, ParsedReceipt } from "../parse";
 import { hammingDistance, phashBand } from "../phash";
-import type { FieldSource, ReceiptRejectReason, RouteOutcome } from "../types";
+import type {
+  FieldSource,
+  FraudVerdict,
+  ReceiptRejectReason,
+  RouteOutcome,
+  RoutingThresholds,
+} from "../types";
 import { evaluateVelocity } from "../velocity";
 import type { VelocityCounts, VelocityWindow } from "../velocity";
 import { awardPoints, priceReceipt } from "./award";
 import type { AwardPlan, AwardResult } from "./award";
 import { applyCooldownIfEarned, isFraudFamilyRejectReason } from "./cooldown";
 import { notifyReceiptOutcome } from "./notify";
-import { getOcrProvider, OcrError } from "./ocr/provider";
-import type { OcrBlock, OcrProvider, OcrResponse } from "./ocr/provider";
+import { getOcrProvider, OCR_FAILURE_FAULT, OcrError } from "./ocr/provider";
+import type {
+  OcrBlock,
+  OcrErrorCode,
+  OcrProvider,
+  OcrResponse,
+} from "./ocr/provider";
 import { getReceiptSettings } from "./settings";
 import type { ReceiptSettings } from "./settings";
 
@@ -183,23 +195,79 @@ const RIVAL_PROBE_MIN_WORD_LENGTH = 4;
 
 /**
  * Why a receipt was sent to a human, recorded on the receipt so the queue can
- * say it out loud and the instrumentation slice can count it.
+ * say it out loud and so `receipt_routing_breakdown` (migration 0035) can count
+ * the causes apart.
  *
- * These are the `forceReview` causes, which are deliberately NOT fraud signals:
- * a fraud signal is a detection about the SUBMISSION that feeds doc 37's
- * composite, while these are statements about how much this pipeline is
- * willing to decide on its own. Recording them in `parse_meta` rather than
- * inventing a `fraud_signals.signal` value keeps doc 37's catalog and its
- * scoring arithmetic exactly as specified, and keeps a merchant-name miss -
- * which is usually a photo problem - from reading as an accusation in a fraud
- * list.
+ * These are deliberately NOT fraud signals: a fraud signal is a detection about
+ * the SUBMISSION that feeds doc 37's composite, while these are statements
+ * about how much this pipeline is willing to decide on its own. Recording them
+ * in `parse_meta` rather than inventing a `fraud_signals.signal` value keeps doc
+ * 37's catalog and its scoring arithmetic exactly as specified, and keeps a
+ * merchant-name miss - which is usually a photo problem - from reading as an
+ * accusation in a fraud list.
+ *
+ * ---------------------------------------------------------------------------
+ * EVERY PATH TO A HUMAN IS NAMED HERE. THAT IS THE POINT OF THE LIST.
+ * ---------------------------------------------------------------------------
+ * The list was once only the `forceReview` family, which meant a receipt routed
+ * to a human by a THRESHOLD - low parse confidence, low match confidence, the
+ * fraud composite, a staff self-scan - was recorded with an empty array. Empty
+ * is also what a receipt written before this field existed carries, so the two
+ * were indistinguishable, and any count over them was a guess dressed as a
+ * measurement. The threshold causes are therefore named too, which makes the
+ * "unattributed" bucket in the breakdown mean exactly one thing: a row from
+ * before the field existed.
+ *
+ * The causes split into two families and the split is load-bearing:
+ *
+ *   * The FORCED family (`amount_sanity`, `customer_blacklisted`,
+ *     `llm_assisted_field`, `merchant_name_mismatch`,
+ *     `merchant_name_unreadable`) are the rules that can UPGRADE an otherwise
+ *     clean approval to a review. They alone feed `forceReview`.
+ *   * The ROUTED family (`parse_confidence_low`, `match_confidence_low`,
+ *     `fraud_composite`, `staff_self_scan`) are `routeReceipt`'s own thresholds
+ *     (../confidence.ts) and doc 37's verdict. They are ATTRIBUTION ONLY and
+ *     must never reach `forceReview`: routing is decided by `routeReceipt` and
+ *     re-deriving the same decision here would be a second implementation of
+ *     it, one careless edit away from disagreeing with the first.
+ *
+ * `ocr_operator_failure` is neither: it is what a receipt carries when WE could
+ * not read it (D7). See `handleOcrFailure`.
+ *
+ * ---------------------------------------------------------------------------
+ * THE PRE-AGREED LOOSENING ORDER (D10). DO NOT RE-ARGUE THIS AT 3AM.
+ * ---------------------------------------------------------------------------
+ * If more than roughly a quarter of a merchant's receipts still need a human
+ * after their first week, loosen in THIS order and no other:
+ *
+ *   1. `parse_confidence_low` first. The approve threshold is a tolerance, not
+ *      a guard: a receipt below it has been read, just not confidently, and the
+ *      cost of being wrong is a few points on a real purchase.
+ *   2. Then reconsider whether `llm_assisted_field` must ALWAYS force review.
+ *      It is a belt-and-braces rule on top of the 0.5 confidence weight (see
+ *      `runPipeline`), so relaxing it leaves a mechanism standing.
+ *   3. `merchant_name_mismatch` LAST, and reluctantly. It is the only rule in
+ *      the list guarding actual money: it is the foreign-receipt defence, and
+ *      loosening it means paying one merchant's points for another shop's
+ *      paper. A slow queue costs patience; this costs the budget.
+ *
+ * `customer_blacklisted` and `fraud_composite` are not on the ladder at all.
+ * They are doc 37's consequences and are tuned in doc 37's terms, not here.
  */
 type ReviewReason =
+  // The forced family: these upgrade an approval, and only these.
   | "amount_sanity"
   | "customer_blacklisted"
   | "llm_assisted_field"
   | "merchant_name_mismatch"
-  | "merchant_name_unreadable";
+  | "merchant_name_unreadable"
+  // The routed family: attribution for what `routeReceipt` already decided.
+  | "parse_confidence_low"
+  | "match_confidence_low"
+  | "fraud_composite"
+  | "staff_self_scan"
+  // D7: our failure, not the photograph's. See `handleOcrFailure`.
+  | "ocr_operator_failure";
 
 // ---------------------------------------------------------------------------
 // Dependencies
@@ -1918,30 +1986,62 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
   // of them into one `||` threw that away at the exact moment it was known.
   // The boolean below is derived from the list, so the routing behaviour of
   // the four pre-existing causes is unchanged to the character.
-  const reviewReasons: ReviewReason[] = [];
-  if (validation.forceReview) reviewReasons.push("amount_sanity");
-  if (blacklisted) reviewReasons.push("customer_blacklisted");
-  if (llmAssisted) reviewReasons.push("llm_assisted_field");
+  const forcedReasons: ReviewReason[] = [];
+  if (validation.forceReview) forcedReasons.push("amount_sanity");
+  if (blacklisted) forcedReasons.push("customer_blacklisted");
+  if (llmAssisted) forcedReasons.push("llm_assisted_field");
   // D1 and D3: a mismatch and an unreadable name both route to review, and
   // they are recorded as DIFFERENT reasons. "We could not read the shop name"
   // and "the receipt says JOLLIBEE" prompt completely different human
   // decisions - one is a photo problem, the other is a foreign receipt - and a
   // queue that renders them identically forces every reviewer to re-derive the
   // difference from the image.
-  if (merchantCheck?.verdict === "mismatch") reviewReasons.push("merchant_name_mismatch");
-  if (merchantCheck?.verdict === "unreadable") reviewReasons.push("merchant_name_unreadable");
+  if (merchantCheck?.verdict === "mismatch") forcedReasons.push("merchant_name_mismatch");
+  if (merchantCheck?.verdict === "unreadable") forcedReasons.push("merchant_name_unreadable");
+
+  const routed = routeReceipt({
+    parseConfidence: confidence,
+    matchConfidence: match.confidence,
+    fraud: verdict,
+    thresholds: settings.routing,
+  });
 
   const outcome = resolveOutcome({
-    routed: routeReceipt({
-      parseConfidence: confidence,
-      matchConfidence: match.confidence,
-      fraud: verdict,
-      thresholds: settings.routing,
-    }),
+    routed,
     validationRejection: validation.rejection,
-    forceReview: reviewReasons.length > 0,
+    // ONLY the forced family. The routed family below is attribution and must
+    // not feed this: `routeReceipt` has already decided, and a second copy of
+    // its comparisons here would be free to drift away from it.
+    forceReview: forcedReasons.length > 0,
     matchedBusinessId,
   });
+
+  // ---- Attribution (D10) --------------------------------------------------
+  //
+  // Written ONLY when the receipt actually ended up in front of a human. A
+  // `review_reasons` list on an approved or rejected receipt is not a record,
+  // it is a counterfactual: `resolveOutcome` lets a validation rejection
+  // outrank a forced review, so a receipt could carry "llm_assisted_field"
+  // while being rejected as `too_old`, and any share computed over that is
+  // wrong in the direction that flatters us.
+  //
+  // The forced causes come first and the routed causes after, deliberately:
+  // the forced ones are the rules a MERCHANT can act on (raise the amount
+  // bound, teach an alias), the routed ones are platform dials. The loosening
+  // ladder on `ReviewReason` reads in the same order.
+  const reviewReasons: ReviewReason[] =
+    outcome.status === "review"
+      ? [
+          ...forcedReasons,
+          ...routedReviewReasons({
+            parseConfidence: confidence,
+            matchConfidence: match.confidence,
+            signals,
+            fraud: verdict,
+            thresholds: settings.routing,
+          }),
+        ]
+      : [];
 
   // ---- Stage 10 preparation: price the receipt before writing 'approved' --
   //
@@ -2071,6 +2171,52 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
       (finalOutcome.status === "rejected" ? ` (${finalOutcome.reason})` : "") +
       ` parse=${confidence} match=${match.confidence} signals=${signals.length}`,
   );
+}
+
+/**
+ * The routed half of D10's attribution: which of `routeReceipt`'s three
+ * probabilistic tests put this receipt in front of a human.
+ *
+ * The comparisons themselves are ../confidence.ts's (`reviewRouteCauses`), so
+ * the numbers here can never disagree with the numbers that routed. All this
+ * function adds is the one split that module cannot make: doc 37 returns a
+ * single `review` verdict for both a staff self-scan and a composite breach,
+ * and those are entirely different findings. A staff self-scan is a standing
+ * conflict-of-interest rule that fires on every receipt an owner scans and can
+ * never be tuned away; a composite breach is a score against a threshold that
+ * CAN be. Counting them together would make a merchant whose owner scans their
+ * own lunch look like a merchant with a fraud problem, and would put an
+ * untunable cause on a list whose whole purpose is deciding what to tune.
+ */
+function routedReviewReasons(input: {
+  parseConfidence: number;
+  matchConfidence: number;
+  signals: readonly FraudSignal[];
+  fraud: FraudVerdict;
+  thresholds: RoutingThresholds;
+}): ReviewReason[] {
+  const causes = reviewRouteCauses({
+    parseConfidence: input.parseConfidence,
+    matchConfidence: input.matchConfidence,
+    fraud: input.fraud,
+    thresholds: input.thresholds,
+  });
+
+  const reasons: ReviewReason[] = [];
+  for (const cause of causes) {
+    if (cause === "parse_confidence_low") reasons.push("parse_confidence_low");
+    else if (cause === "match_confidence_low") reasons.push("match_confidence_low");
+    else {
+      // fraud.ts routes a staff self-scan to review "regardless of composite",
+      // so the signal's presence is the discriminator, not the score.
+      reasons.push(
+        input.signals.some((signal) => signal.signal === "staff_self_scan")
+          ? "staff_self_scan"
+          : "fraud_composite",
+      );
+    }
+  }
+  return reasons;
 }
 
 /**
@@ -2324,16 +2470,70 @@ const FAILED_ATTEMPT_ENGINE: Record<OcrProvider["name"], string> = {
 };
 
 /**
- * Doc 36 "Retry, timeouts, DLQ". Three outcomes, and the receipt is never left
- * in a state no future attempt can reach:
+ * Doc 36 "Retry, timeouts, DLQ", rewritten around decision D7.
  *
- *   * IMAGE_UNREADABLE (422) is non-retryable and "falls through to the
- *     confidence/rejection path immediately" -> rejected / unreadable.
- *   * Any retryable failure with attempts left is left at status='processing',
- *     which doc 36 Stage 2 names as retry-eligible, so the next delivery
- *     resumes at the next attempt number.
- *   * Attempts exhausted -> rejected / manual with reject_note
- *     'processing_failed', the DLQ contract.
+ * ---------------------------------------------------------------------------
+ * AN OPERATOR-SIDE FAILURE IS NEVER REPORTED TO THE CONSUMER AS AN IMAGE
+ * PROBLEM. THAT IS THE WHOLE OF D7 AND EVERY BRANCH BELOW SERVES IT.
+ * ---------------------------------------------------------------------------
+ * What this function used to do: an exhausted Vision quota, a rejected
+ * credential or a half-deployed service became a retryable 503, the receipt
+ * parked, the attempt budget ran out, and the receipt was dead-lettered as
+ * `rejected` / `manual` / `processing_failed`. `receipt-copy.ts` then told a
+ * paying customer "We could not accept this receipt". Google Cloud Vision's
+ * free tier is 1,000 units a month, so that is not a thought experiment: it is
+ * what the last week of a month looks like on a project where billing was never
+ * enabled, and the customer standing at the counter is told their photograph is
+ * the defect.
+ *
+ * `OCR_FAILURE_FAULT` (./ocr/provider.ts) splits the taxonomy in two and the
+ * three branches follow from it directly:
+ *
+ *   1. IMAGE / OCR_IMAGE_UNREADABLE. The photo genuinely could not be read.
+ *      Non-retryable, and doc 36 says it "falls through to the confidence/
+ *      rejection path immediately" -> rejected / unreadable, whose copy is the
+ *      one piece of coaching in the whole matrix a consumer can act on. This
+ *      branch is unchanged and must stay that way: the honest 422 is what earns
+ *      the other two branches the right to say nothing about the photograph.
+ *
+ *   2. IMAGE / OCR_IMAGE_TOO_LARGE. Also a property of this submission and also
+ *      fixed by a retake, but it is not a failure to READ: the bytes never
+ *      reached an engine. It keeps its existing rejected / manual outcome (and
+ *      the retake the `manual` copy offers) with the note narrowed from
+ *      `processing_failed` to `image_too_large`, so the dead-letter note stops
+ *      meaning two unrelated things and an operator scanning for our own
+ *      failures no longer trips over submissions that were never our problem.
+ *
+ *   3. OPERATOR / everything else. We failed. Two sub-cases, and the split is
+ *      about whether an automatic attempt could still save the receipt:
+ *
+ *        a. A retryable failure with budget left, or a credential failure at
+ *           any point, PARKS the receipt at 'processing'. Doc 36 Stage 2 names
+ *           that status retry-eligible. A credential failure parks whatever the
+ *           budget says, because retrying is pointless but FIXING it is not: a
+ *           token rotation noticed the next morning must not have cost a day of
+ *           receipts, and 0035's sweep is the backstop underneath.
+ *        b. Otherwise the receipt goes to the merchant's REVIEW queue with
+ *           `ocr_operator_failure` recorded, and the consumer is told the shop
+ *           is checking it (`reviewCopy`, the same string every other review
+ *           uses).
+ *
+ * WHY REVIEW AND NOT A REJECTION, stated plainly because it is the decision:
+ * the receipt is probably fine. We never read it, so we hold no evidence
+ * against it, and we do hold the image - which a human can open and key in by
+ * hand. Rejecting is the only outcome that throws away a real purchase, and it
+ * does so on the strength of a fact about OUR billing. Review costs the
+ * merchant a minute of work; rejection costs a customer their points and tells
+ * them a falsehood about their photograph to do it. The one honest objection is
+ * that a sustained outage floods the queue, and that is answered by the parking
+ * in (3a): the queue only ever receives receipts that no automatic attempt is
+ * going to save, and a merchant seeing a pile of them is seeing something true
+ * that a silent DLQ was hiding from them.
+ *
+ * The consumer is NOT told whose fault it was. "The store is checking this" is
+ * true, is the same sentence a low-confidence parse produces, and does not
+ * invite a pointless retake. Explaining our billing to them would be a second
+ * copy matrix and a worse message.
  */
 async function handleOcrFailure(input: OcrFailureInput): Promise<void> {
   const { deps, receipt, attempt, settings, error } = input;
@@ -2372,6 +2572,7 @@ async function handleOcrFailure(input: OcrFailureInput): Promise<void> {
     );
   }
 
+  // ---- Branch 1: the photograph genuinely could not be read ---------------
   if (code === "OCR_IMAGE_UNREADABLE") {
     await finalizeWithoutParse(deps, receipt.id, {
       status: "rejected",
@@ -2385,23 +2586,82 @@ async function handleOcrFailure(input: OcrFailureInput): Promise<void> {
     return;
   }
 
-  // An OPERATOR failure, not a receipt failure. The provider marks both of
-  // these non-retryable because retrying the same call is pointless, and it is
-  // right about the call - but that is a statement about the credential, not
-  // about this photograph. Rejecting here would burn every receipt submitted
-  // during a token rotation, and no consumer action could recover them, so
-  // they wait at 'processing' until the environment is fixed. The attempt
-  // budget deliberately does not apply.
-  if (code === "OCR_AUTH_FAILED" || code === "OCR_MISCONFIGURED") {
+  // ---- Branch 2: the submission was too large to send ---------------------
+  if (OCR_FAILURE_FAULT[code] === "image") {
+    console.warn(
+      `[receipts/process] receipt ${receipt.id} was refused as too large (${code})`,
+    );
+    await finalizeWithoutParse(
+      deps,
+      receipt.id,
+      { status: "rejected", reason: "manual" },
+      // Narrowed from 'processing_failed'. Both notes are internal (0017
+      // withholds the column from the client), but they are read by an
+      // operator asking "what did WE break", and an oversized upload is not an
+      // answer to that question.
+      "image_too_large",
+    );
+    await notifyRejected(deps, receipt, "manual");
+    return;
+  }
+
+  // ---- Branch 3a: park, because an attempt or an operator can still fix it -
+  //
+  // A credential failure parks unconditionally. The provider marks these
+  // non-retryable because retrying the same call is pointless, and it is right
+  // about the call - but that is a statement about the credential, not about
+  // this photograph, and the fix is a human setting an environment variable.
+  // Occupying the merchant's review queue with work a two-minute deploy would
+  // have made unnecessary is the wrong trade while the receipt is still young;
+  // 0035's sweep is what stops the parking being forever.
+  const credentialFailure = code === "OCR_AUTH_FAILED" || code === "OCR_MISCONFIGURED";
+  if (credentialFailure) {
     console.error(
       `[receipts/process] OCR credentials are wrong (${code}); receipt ${receipt.id} is parked at 'processing' until they are fixed`,
     );
     return;
   }
+  if (retryable && attempt < settings.ocrMaxAttempts) {
+    console.warn(
+      `[receipts/process] receipt ${receipt.id} OCR attempt ${attempt} failed retryably (${code}); leaving it processing`,
+    );
+    return;
+  }
 
-  if (!retryable || attempt >= settings.ocrMaxAttempts) {
+  // ---- Branch 3b: we are out of attempts, and it was our failure ----------
+  console.error(
+    `[receipts/process] receipt ${receipt.id} exhausted OCR attempts (${attempt}/${settings.ocrMaxAttempts}): ${code}. Routing to human review; this is an operator failure, not a bad photo.`,
+  );
+  await routeToOperatorReview(deps, receipt, code);
+}
+
+/**
+ * D7's terminal state for a failure that was ours: the merchant's review queue,
+ * with the cause recorded where every other review reason is recorded.
+ *
+ * THE ONE CASE THAT CANNOT GO TO REVIEW is a receipt with no business. 0017
+ * gives no RLS audience a path to a receipt whose `business_id` is null, so
+ * such a row in `review` sits in a queue nobody can open, forever - which is
+ * strictly worse than a rejection, because at least a rejection tells the
+ * consumer something. `resolveOutcome` makes exactly this call for exactly this
+ * reason and this mirrors it, down to falling back rather than inventing a
+ * tenant. It keeps the dead-letter note so the DLQ still names the cause.
+ *
+ * `parse_meta` is written here even though nothing was parsed. The queue reads
+ * `review_reasons` to tell a reviewer why a receipt is in front of them, and a
+ * receipt that arrives with an empty parse and no explanation is the most
+ * confusing thing that queue can contain. Only the two keys that are true are
+ * written: claiming an `engine` or a `tier` for a parse that never ran would
+ * put a fiction in the column the review screen renders per-field chips from.
+ */
+async function routeToOperatorReview(
+  deps: ProcessReceiptDeps,
+  receipt: ReceiptRow,
+  code: OcrErrorCode,
+): Promise<void> {
+  if (receipt.business_id === null) {
     console.error(
-      `[receipts/process] receipt ${receipt.id} exhausted OCR attempts (${attempt}/${settings.ocrMaxAttempts}): ${code}`,
+      `[receipts/process] receipt ${receipt.id} failed on our side but has no business to review it; dead-lettering instead`,
     );
     await finalizeWithoutParse(
       deps,
@@ -2409,18 +2669,49 @@ async function handleOcrFailure(input: OcrFailureInput): Promise<void> {
       { status: "rejected", reason: "manual" },
       "processing_failed",
     );
-    // Doc 36's dead-letter path: "consumer notified and may resubmit". The
-    // 'manual' copy offers a retake, which is the right advice - the failure
-    // was ours, not theirs, and `reject_note='processing_failed'` stays
-    // internal (0017 withholds the column from the client, and this message
-    // never carries it).
     await notifyRejected(deps, receipt, "manual");
     return;
   }
 
-  console.warn(
-    `[receipts/process] receipt ${receipt.id} OCR attempt ${attempt} failed retryably (${code}); leaving it processing`,
-  );
+  const { error } = await deps.supabase
+    .from("receipts")
+    .update({
+      status: "review",
+      reject_reason: null,
+      // Operator vocabulary, client-unreadable (0017), and the string an
+      // operator greps for when the month's Vision bill is the question.
+      reject_note: `ocr_operator_failure:${code}`,
+      parse_meta: toJson({
+        review_reasons: ["ocr_operator_failure"] satisfies ReviewReason[],
+        ocr: { failure_code: code },
+      }),
+      // Stamped: this receipt is done being processed automatically, and doc
+      // 36's SLA clock for the human who now owns it starts here.
+      processed_at: deps.now().toISOString(),
+    })
+    .eq("id", receipt.id)
+    // The claim's own predicate, re-asserted. A receipt another worker has
+    // already finalized is left exactly as that worker finalized it.
+    .eq("status", "processing");
+
+  if (error !== null) {
+    console.error(
+      `[receipts/process] could not route receipt ${receipt.id} to review after an operator failure`,
+      error,
+    );
+    return;
+  }
+
+  // The same message a low-confidence parse produces, from the same matrix:
+  // "The store is checking this". It is true, it invites no pointless retake,
+  // and it says nothing about the photograph, which is the entire point of D7.
+  await notifyReceiptOutcome({
+    deps,
+    userId: receipt.user_id,
+    receiptId: receipt.id,
+    businessId: receipt.business_id,
+    outcome: { status: "review" },
+  });
 }
 
 /**
