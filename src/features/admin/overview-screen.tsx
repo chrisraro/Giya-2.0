@@ -1,6 +1,8 @@
 import Link from "next/link";
 
 import { EmptyState } from "@/components/consumer/empty-state";
+import { RoutingBreakdownPanel } from "@/features/receipts/components/routing-breakdown-panel";
+import type { RoutingBreakdown } from "@/features/receipts/routing-breakdown";
 import { cn } from "@/lib/utils";
 
 import { formatPlatformAmount, queueAge, severityMeta, slaChipClass } from "./presenter";
@@ -124,9 +126,25 @@ export interface OverviewScreenProps {
   overview: PlatformOverview;
   adminName: string;
   now: Date;
+  /**
+   * D10's platform-wide review rate. Null when the read failed, and the panel
+   * says so rather than claiming 0%.
+   *
+   * A separate prop rather than a member of `PlatformOverview` on purpose: the
+   * overview's tiles are all bounded live COUNTS answering "what needs a person
+   * today", while this is an aggregate over 30 days answering "which dial should
+   * we loosen". Folding it in would put a slow question inside the shape whose
+   * whole contract is that every field is a cheap indexed count.
+   */
+  routing: RoutingBreakdown | null;
 }
 
-export function OverviewScreen({ overview, adminName, now }: OverviewScreenProps) {
+export function OverviewScreen({
+  overview,
+  adminName,
+  now,
+  routing,
+}: OverviewScreenProps) {
   return (
     <div className="flex flex-col gap-6">
       <div>
@@ -174,6 +192,20 @@ export function OverviewScreen({ overview, adminName, now }: OverviewScreenProps
           alarmAbove={0}
         />
       </div>
+
+      {/*
+        D10, platform scope. It sits below the tiles and above the fraud strip
+        deliberately: the tiles are today's work, the blocks are today's
+        incidents, and this is the only thing on the page that is a POLICY
+        question. It is the number that decides whether to loosen a dial, and
+        the pre-agreed loosening order is recorded in `ReviewReason` in
+        src/features/receipts/server/process.ts so it is not re-argued here.
+
+        Identical component to the merchant's, on purpose: an admin about to
+        widen a threshold and the merchant complaining about manual approvals
+        must be reading the same number the same way.
+      */}
+      <RoutingBreakdownPanel breakdown={routing} scope="the platform" />
 
       <section aria-labelledby="recent-blocks" className="flex flex-col gap-3">
         <h2 id="recent-blocks" className="text-title-m text-on-surface">

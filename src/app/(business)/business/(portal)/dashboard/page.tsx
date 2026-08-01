@@ -16,8 +16,10 @@ import { loadActivationFacts } from "@/features/businesses/activation/server/sta
 import { GoLiveCard } from "@/features/businesses/activation/components/go-live-card";
 import { resolvePortalContext } from "@/features/businesses/server/portal-context";
 import { getBaseRule } from "@/features/campaigns/server/repo";
+import { RoutingBreakdownPanel } from "@/features/receipts/components/routing-breakdown-panel";
 import { resolveReviewerContext } from "@/features/receipts/review/access";
 import { countPendingReview, PENDING_COUNT_CAP } from "@/features/receipts/review/queue";
+import { loadRoutingBreakdown } from "@/features/receipts/server/routing-stats";
 import { cn } from "@/lib/utils";
 
 /**
@@ -84,6 +86,30 @@ export default async function BusinessDashboardPage() {
   const pendingReviewCount =
     reviewer === null ? null : await countPendingReview(reviewer.businessId);
 
+  // ---------------------------------------------------------------------
+  // D10: the review RATE, next to the review QUEUE.
+  //
+  // WHY THE DASHBOARD AND NOT /business/receipts. The queue answers "what do I
+  // have to do right now" and is a working list; this answers "is this product
+  // working for me at all", which is a question about a period and belongs
+  // where the merchant already reads periods. Putting it on the queue page
+  // would also show it only to someone who already went looking, and the whole
+  // point is that a merchant drowning in manual approvals should not have to go
+  // looking to find that out. It sits directly under the queue tile so the
+  // count and the rate read as one thought: "12 waiting, and 31% of everything
+  // needs me".
+  //
+  // TENANCY: `reviewer.businessId` comes from `resolveReviewerContext()`, the
+  // same source the queue tile uses, and it is the ONLY fence on a service-role
+  // read (see ../../../../../features/receipts/server/routing-stats.ts). The
+  // panel is gated on the same reviewer context for the same reason the tile
+  // is: owners and managers are the only roles that can act on any of it, and
+  // a marketing seat being shown their shop's review rate is a number they can
+  // neither change nor interpret.
+  // ---------------------------------------------------------------------
+  const routing =
+    reviewer === null ? null : await loadRoutingBreakdown({ businessId: reviewer.businessId });
+
   // Null means a read ERRORED, not that the merchant has no data. Zeros are a
   // legitimate answer and are rendered as zeros; an unproven number is not
   // rendered at all.
@@ -129,6 +155,8 @@ export default async function BusinessDashboardPage() {
           <ReviewQueueTile pending={pendingReviewCount} />
         </div>
       )}
+
+      {reviewer !== null && <RoutingBreakdownPanel breakdown={routing} scope="your shop" />}
 
       {dashboard === null ? (
         <Card variant="outlined">

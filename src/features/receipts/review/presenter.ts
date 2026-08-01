@@ -589,6 +589,46 @@ export interface MerchantCheckNotice {
  * A `match` verdict returns null rather than a reassuring green box: the queue
  * is a list of things that need a decision, and a passed check is not one.
  */
+/**
+ * D7's notice: this receipt is in the queue because WE could not read it.
+ *
+ * IT IS THE ONE NOTICE WHOSE RECEIPT HAS NO PARSE AT ALL. An operator failure
+ * means the OCR call never succeeded, so every field on the form below is
+ * empty, there is no merchant check, no confidence and no signal. Without this
+ * the reviewer opens a blank form with a photograph next to it and no idea why,
+ * which is the most confusing row the queue can hold - and the likeliest
+ * conclusion they would draw is that the customer submitted something broken.
+ *
+ * It says whose failure it was in as many words. The consumer is deliberately
+ * NOT told (they get the ordinary "the store is checking this"), but the
+ * merchant is doing unpaid work on our behalf and is owed the reason.
+ *
+ * No cause code, no quota, no vendor. `reject_note` carries
+ * `ocr_operator_failure:{code}` for an operator and 0017 withholds that column
+ * from the client for good reasons that do not stop applying because the reader
+ * is a shop owner.
+ */
+export interface OperatorFailureNotice {
+  title: string;
+  body: string;
+}
+
+export function operatorFailureNotice(
+  meta: ParseMetaView | null,
+): OperatorFailureNotice | null {
+  if (meta === null || !meta.reviewReasons.includes("ocr_operator_failure")) {
+    return null;
+  }
+  return {
+    title: "We could not read this one, and that is on us",
+    body:
+      "Our scanner did not come back for this receipt, so nothing was filled " +
+      "in automatically. The photo is fine as far as we know. Read it off the " +
+      "image and key in the total and the date, and the customer gets their " +
+      "points as normal.",
+  };
+}
+
 export function merchantCheckNotice(
   meta: ParseMetaView | null,
   businessName: string,

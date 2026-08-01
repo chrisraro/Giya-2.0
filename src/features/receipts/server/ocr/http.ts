@@ -85,6 +85,18 @@ const errorBodySchema = z.object({ code: z.string().optional() });
 /** doc 36's documented 422 code. */
 const IMAGE_UNREADABLE = "IMAGE_UNREADABLE";
 
+/**
+ * The 503 body code the OCR service uses to say its engine's quota is spent
+ * rather than that the engine is merely busy (supabase/functions/ocr/index.ts).
+ *
+ * This is the ONE body code read outside the 422 branch. Everything else about
+ * a 503 is the same to this client - "not now, ask again" - but a quota cliff
+ * is an operator instruction ("enable billing") that a per-minute throttle is
+ * not, and D7 wants that legible in `ocr_results.error` rather than reconstructed
+ * from a Google Cloud console six days later.
+ */
+const QUOTA_EXHAUSTED = "VISION_QUOTA_EXHAUSTED";
+
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}${path}`;
 }
@@ -153,7 +165,19 @@ async function errorForStatus(response: Response): Promise<OcrError> {
   // 503 is doc 36's documented overload status. 429 and the rest of the 5xx
   // range are the same class of answer - "not now, ask again" - and treating
   // them as retryable is what the attempt budget in `ocr.max_attempts` is for.
+  //
+  // Both codes below are OPERATOR failures under D7, so neither one can reject
+  // a receipt whatever the body says; the split buys the operator a diagnosis,
+  // not the consumer a different outcome.
   if (status === 503 || status === 429 || status >= 500) {
+    const code = await readErrorCode(response);
+    if (code === QUOTA_EXHAUSTED) {
+      return new OcrError(
+        "OCR_QUOTA_EXHAUSTED",
+        `OCR engine quota is exhausted (status=${status}, code=${code})`,
+        { retryable: true, status },
+      );
+    }
     return new OcrError("OCR_UNAVAILABLE", `OCR service is unavailable (status=${status})`, {
       retryable: true,
       status,

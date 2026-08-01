@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   countPendingReview: vi.fn(),
   loadActivationFacts: vi.fn(),
   getBaseRule: vi.fn(),
+  loadRoutingBreakdown: vi.fn(),
 }));
 
 vi.mock("@/features/businesses/server/portal-context", () => ({
@@ -40,6 +41,16 @@ vi.mock("@/features/receipts/review/access", () => ({
 vi.mock("@/features/receipts/review/queue", () => ({
   countPendingReview: mocks.countPendingReview,
   PENDING_COUNT_CAP: 99,
+}));
+
+// D10's review-rate panel. Only the READ is stubbed; the panel itself renders
+// for real, for the same reason the go-live card does - a stubbed panel would
+// say whatever the stub said, and the whole subject of this file is that the
+// dashboard says true things. Its own suite is
+// src/features/receipts/components/routing-breakdown-panel.test.tsx.
+vi.mock("@/features/receipts/server/routing-stats", () => ({
+  loadRoutingBreakdown: mocks.loadRoutingBreakdown,
+  ROUTING_WINDOW_DAYS: 30,
 }));
 
 // The activation slice. The FACTS are mocked; the presenter, the checklist and
@@ -63,6 +74,8 @@ vi.mock("@/features/businesses/activation/actions", () => ({
 vi.mock("@/features/campaigns/actions", () => ({
   upsertBaseRule: vi.fn(),
 }));
+
+import { foldRoutingBreakdown } from "@/features/receipts/routing-breakdown";
 
 const DashboardPage = (await import("./page")).default;
 
@@ -166,6 +179,9 @@ beforeEach(() => {
     role: "owner",
   });
   mocks.countPendingReview.mockResolvedValue(0);
+  // An empty window by default, matching EMPTY_DASHBOARD: a merchant who has
+  // just signed up has no receipts and must be told so, not shown a rate.
+  mocks.loadRoutingBreakdown.mockResolvedValue(foldRoutingBreakdown([], 30));
   mocks.loadBusinessDashboard.mockResolvedValue(EMPTY_DASHBOARD);
   // The default tenant on this page is LIVE, so activation renders nothing and
   // every assertion below is about the numbers, exactly as it was before the
@@ -320,6 +336,60 @@ describe("the review queue tile is untouched", () => {
     await renderDashboard();
     expect(screen.queryByText("Receipts to review")).not.toBeInTheDocument();
     expect(mocks.countPendingReview).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------- D10
+//
+// The review RATE, under the review QUEUE. The queue answers "what do I have to
+// do right now"; this answers "is this working for me at all", which is the
+// number that decides whether a merchant stays. The panel's own rendering is
+// pinned in src/features/receipts/components/routing-breakdown-panel.test.tsx;
+// what is asserted here is the wiring: the right tenant, the right gate, and
+// that a failed read cannot flatter us.
+
+describe("the review-rate panel", () => {
+  it("renders for a reviewer and is scoped to their own business", async () => {
+    mocks.loadRoutingBreakdown.mockResolvedValue(
+      foldRoutingBreakdown(
+        [
+          { kind: "status", key: "approved", tally: 7 },
+          { kind: "status", key: "review", tally: 3 },
+          { kind: "reason", key: "merchant_name_mismatch", tally: 3 },
+        ],
+        30,
+      ),
+    );
+
+    await renderDashboard();
+
+    expect(screen.getByText("How much of this runs on its own")).toBeInTheDocument();
+    expect(screen.getByText("70%")).toBeInTheDocument();
+    expect(screen.getByText("Shop name on the receipt did not match")).toBeInTheDocument();
+    // TENANCY: the service role bypasses RLS, so this argument is the fence.
+    expect(mocks.loadRoutingBreakdown).toHaveBeenCalledWith({ businessId: BUSINESS_ID });
+  });
+
+  it("is absent for a role that cannot review receipts", async () => {
+    // Same gate as the queue tile, for the same reason: a marketing seat can
+    // neither act on this number nor interpret it.
+    mocks.resolveReviewerContext.mockResolvedValue(null);
+
+    await renderDashboard();
+
+    expect(screen.queryByText("How much of this runs on its own")).not.toBeInTheDocument();
+    expect(mocks.loadRoutingBreakdown).not.toHaveBeenCalled();
+  });
+
+  it("CRITICAL: says it could not read rather than claiming a perfect 0%", async () => {
+    // "0% needed a person" is the single most reassuring sentence this product
+    // can say to a merchant. A dropped connection may not say it.
+    mocks.loadRoutingBreakdown.mockResolvedValue(null);
+
+    await renderDashboard();
+
+    expect(screen.getByText(/cannot read right now/i)).toBeInTheDocument();
+    expect(screen.queryByText("0%")).not.toBeInTheDocument();
   });
 });
 

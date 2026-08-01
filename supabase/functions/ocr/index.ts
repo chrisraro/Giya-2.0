@@ -821,14 +821,34 @@ function toBase64(bytes: Uint8Array): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * The one 503 code the caller acts on differently: the engine's quota is spent,
+ * as opposed to the engine being momentarily busy.
+ *
+ * Vision's free tier is 1,000 units a MONTH. On a project where billing was
+ * never enabled that is not a blip, it is a cliff the last week of every month
+ * falls off, and the two failures need different human responses: a throttle
+ * needs nobody, a spent quota needs an operator to enable billing. Folded
+ * together (as they were) an exhausted month reads in `ocr_results.error` as
+ * "Google is unavailable" and the operator waits for weather that never clears.
+ *
+ * src/features/receipts/server/ocr/http.ts is the only reader, and it maps this
+ * to OCR_QUOTA_EXHAUSTED. The STATUS stays 503 on purpose: nothing about the
+ * receipt's handling changes, because under D7 both are operator failures and
+ * neither may ever reject a consumer's photograph. This is a diagnosis, not a
+ * new outcome.
+ */
+const QUOTA_EXHAUSTED_CODE = "VISION_QUOTA_EXHAUSTED";
+
+/**
  * Google's statuses and error codes, folded onto doc 36 Stage 4's four.
  *
  * RESOURCE_EXHAUSTED (429 / code 8) is the one worth naming. Vision quota is
- * per-project and per-minute, and a burst of scans at a busy counter is an
- * EXPECTED operating condition rather than an exception. It must degrade to a
- * retryable service failure. What it must never do is degrade to a
- * transcription: the pipeline's contract is that an OCR failure routes the
- * receipt to review, never to an award (plan risk 3).
+ * per-project and per-minute AND per-month on the free tier, and a burst of
+ * scans at a busy counter is an EXPECTED operating condition rather than an
+ * exception. It must degrade to a retryable service failure. What it must never
+ * do is degrade to a transcription: the pipeline's contract is that an OCR
+ * failure routes the receipt to review, never to an award (plan risk 3), and
+ * since D7 never to a rejection blamed on the photograph either.
  */
 function mapUpstreamStatus(status: number, detail: string): ServiceError {
   const suffix = detail.length > 0 ? ` ${detail}` : "";
@@ -847,7 +867,14 @@ function mapUpstreamStatus(status: number, detail: string): ServiceError {
       `Google Vision rejected the request as too large.${suffix}`,
     );
   }
-  if (status === 429 || status >= 500) {
+  if (status === 429) {
+    return new ServiceError(
+      503,
+      QUOTA_EXHAUSTED_CODE,
+      `Google Vision refused the call for quota (status 429). Check the project's Vision quota and that billing is enabled.${suffix}`,
+    );
+  }
+  if (status >= 500) {
     return new ServiceError(
       503,
       "VISION_UNAVAILABLE",
@@ -863,11 +890,11 @@ function mapUpstreamStatus(status: number, detail: string): ServiceError {
   // `rejected`/`unreadable` (process.ts handleOcrFailure), which tells a
   // consumer their photograph was bad when in fact our request was. A deploy
   // that broke the payload would reject every receipt submitted until someone
-  // noticed. 503 instead spends the attempt budget and lands in
-  // `rejected`/`manual` with `processing_failed` - the DLQ, where an operator
-  // is meant to look. Blaming our own bug on the customer's photo is the worse
-  // of the two failures, and the attempt budget bounds the cost of the better
-  // one. The status and the upstream body travel in the message either way.
+  // noticed. 503 instead spends the attempt budget and, since D7, lands the
+  // receipt in the merchant's REVIEW queue rather than in a rejection: a human
+  // can see the image, so the honest answer to "we could not read this" is that
+  // somebody looks, not that the customer is blamed. The status and the upstream
+  // body travel in the message either way.
   return new ServiceError(
     503,
     "VISION_BAD_REQUEST",
@@ -879,9 +906,17 @@ function mapUpstreamStatus(status: number, detail: string): ServiceError {
  * HTTP status when the request was well formed but one image was not. */
 function mapImageError(error: { code?: number; message?: string; status?: string }): ServiceError {
   const detail = `${error.status ?? ""} ${error.message ?? ""}`.trim();
-  // 8 = RESOURCE_EXHAUSTED, 4 = DEADLINE_EXCEEDED, 14 = UNAVAILABLE: all
-  // "ask again".
-  if (error.code === 8 || error.code === 4 || error.code === 14) {
+  // 8 = RESOURCE_EXHAUSTED. Same cliff as a 429 and named the same way, so an
+  // exhausted month is diagnosable whichever shape Vision reports it in.
+  if (error.code === 8) {
+    return new ServiceError(
+      503,
+      QUOTA_EXHAUSTED_CODE,
+      `Google Vision refused the image for quota. Check the project's Vision quota and that billing is enabled. ${detail}`,
+    );
+  }
+  // 4 = DEADLINE_EXCEEDED, 14 = UNAVAILABLE: both "ask again".
+  if (error.code === 4 || error.code === 14) {
     return new ServiceError(503, "VISION_UNAVAILABLE", `Google Vision could not serve the image. ${detail}`);
   }
   if (error.code === 16 || error.code === 7) {

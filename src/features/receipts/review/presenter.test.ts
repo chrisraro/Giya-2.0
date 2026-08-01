@@ -23,6 +23,7 @@ import {
   formatDate,
   formatDateTime,
   highestSeverity,
+  operatorFailureNotice,
   queueAge,
   severityMeta,
   slaChipClass,
@@ -352,5 +353,71 @@ describe("copy hygiene", () => {
       Object.keys(REJECT_REASON_LABELS).sort(),
     );
     expect(REJECT_REASON_ORDER.slice(-2)).toEqual(["duplicate", "fraud_suspected"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D7: the reviewer's notice for a receipt WE failed to read
+// ---------------------------------------------------------------------------
+
+function parseMetaWith(reviewReasons: string[]): ParseMetaView {
+  return {
+    engine: null,
+    tier: null,
+    templateId: null,
+    fields: {},
+    vatConsistent: null,
+    withinAmountSanity: null,
+    dateAmbiguous: null,
+    notes: [],
+    ocrMeanConfidence: null,
+    merchantCheck: null,
+    reviewReasons,
+  };
+}
+
+describe("operatorFailureNotice", () => {
+  it("explains the empty form when the pipeline failed on our side", () => {
+    // This is the one receipt in the queue with NO parse at all: the OCR call
+    // never came back, so every field is blank and there is no merchant check,
+    // no confidence and no signal. Without the notice a reviewer opens a blank
+    // form beside a photograph and concludes the customer sent something broken.
+    const notice = operatorFailureNotice(parseMetaWith(["ocr_operator_failure"]));
+
+    expect(notice).not.toBeNull();
+    expect(notice?.title).toMatch(/on us/i);
+    expect(notice?.body).toMatch(/key in the total and the date/i);
+  });
+
+  it("is absent for every other reason a receipt reaches a human", () => {
+    expect(operatorFailureNotice(parseMetaWith([]))).toBeNull();
+    expect(operatorFailureNotice(parseMetaWith(["merchant_name_mismatch"]))).toBeNull();
+    expect(operatorFailureNotice(parseMetaWith(["parse_confidence_low", "amount_sanity"]))).toBeNull();
+    expect(operatorFailureNotice(null)).toBeNull();
+  });
+
+  it("still fires when the operator failure is one reason among several", () => {
+    expect(
+      operatorFailureNotice(parseMetaWith(["ocr_operator_failure", "customer_blacklisted"])),
+    ).not.toBeNull();
+  });
+
+  it("CRITICAL: names no vendor, no quota and no cause code", () => {
+    // reject_note carries `ocr_operator_failure:{code}` for an operator, and
+    // 0017 withholds that column from the client for reasons that do not stop
+    // applying because the reader happens to be a shop owner.
+    const notice = operatorFailureNotice(parseMetaWith(["ocr_operator_failure"]));
+    const text = `${notice?.title ?? ""} ${notice?.body ?? ""}`;
+
+    expect(text).not.toMatch(/google|vision|quota|credit|billing|token|OCR_/i);
+    expect(text).not.toContain("—");
+    expect(text).not.toContain("–");
+  });
+
+  it("does not blame the photograph", () => {
+    const notice = operatorFailureNotice(parseMetaWith(["ocr_operator_failure"]));
+
+    expect(notice?.body).toMatch(/photo is fine/i);
+    expect(notice?.body).not.toMatch(/blurry|unreadable|bad photo|retake/i);
   });
 });

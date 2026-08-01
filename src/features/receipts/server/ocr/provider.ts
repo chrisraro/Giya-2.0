@@ -64,34 +64,93 @@ export interface OcrHealth {
 }
 
 /**
- * The error taxonomy of doc 36 Stage 4, plus the two failure modes any HTTP
- * client has to name for itself.
+ * The error taxonomy of doc 36 Stage 4, plus the failure modes any HTTP client
+ * has to name for itself.
+ *
+ * ---------------------------------------------------------------------------
+ * THE TAXONOMY'S FIRST QUESTION IS WHOSE FAULT IT WAS (D7).
+ * ---------------------------------------------------------------------------
+ * Every code below belongs to exactly one of two families, and `ocrFailureFault`
+ * is the mapping. The split is not cosmetic: it decides what a paying consumer
+ * is told about a photograph they cannot see anything wrong with.
+ *
+ *   IMAGE   The photograph is genuinely the problem. Blaming it is correct,
+ *           and the retake call to action is the honest next step.
+ *   OPERATOR We failed. Quota exhausted, a credential rejected, a service half
+ *           deployed, a provider down, a body we could not parse. NONE of these
+ *           is evidence about the image, and telling a consumer "we could not
+ *           read this photo" when the truth is "we ran out of Vision credit" is
+ *           a lie that also sends them to retake a perfectly good receipt.
+ *
+ * `retryable` answers a different question - will another attempt help - and the
+ * two are independent. OCR_AUTH_FAILED is not retryable AND is our fault;
+ * OCR_IMAGE_UNREADABLE is not retryable and is not. Deriving one from the other
+ * is exactly the conflation that made a billing lapse read as a bad photo.
  */
 export type OcrErrorCode =
-  /** 401: bad or missing service token. */
+  /** 401: bad or missing service token. OPERATOR: our credential, not their photo. */
   | "OCR_AUTH_FAILED"
-  /** 413: image too large for the service. */
+  /** 413: image too large for the service. IMAGE. */
   | "OCR_IMAGE_TOO_LARGE"
-  /** 422 {"code":"IMAGE_UNREADABLE"}: the service could not read the image. */
+  /** 422 {"code":"IMAGE_UNREADABLE"}: the service could not read the image. IMAGE. */
   | "OCR_IMAGE_UNREADABLE"
   /**
    * 503 or a transport failure: the service is overloaded or unreachable.
-   * Also where the Edge Function's Hugging Face 402 (credits exhausted) and
-   * 429 (throttled) land, which on a free-tier account are expected operating
-   * conditions rather than exceptions. Retryable by construction, and if the
-   * attempt budget runs out the receipt routes to review - never to a
-   * fabricated transcription.
+   * OPERATOR. Retryable by construction, and if the attempt budget runs out the
+   * receipt routes to review - never to a fabricated transcription, and since
+   * D7 never to a rejection either.
    */
   | "OCR_UNAVAILABLE"
-  /** The 30s worker HTTP timeout elapsed. */
+  /**
+   * 503 {"code":"VISION_QUOTA_EXHAUSTED"}: the OCR engine's quota is spent.
+   * OPERATOR, and split out of OCR_UNAVAILABLE deliberately.
+   *
+   * Google Cloud Vision's free tier is 1,000 units a month, so this is not a
+   * hypothetical: it is what the last week of a month looks like on a project
+   * where billing was never enabled, and it arrives as a cliff rather than a
+   * blip. Folded into OCR_UNAVAILABLE it reads in `ocr_results.error` as "Google
+   * had a bad minute" and an operator waits for it to pass, which it never does.
+   * Named, the row says what to do: enable billing, or raise the quota.
+   *
+   * Retryable in the same sense as any 503 - a per-minute throttle clears in a
+   * minute - so the attempt budget still applies, and the terminal state is the
+   * operator one.
+   */
+  | "OCR_QUOTA_EXHAUSTED"
+  /** The 30s worker HTTP timeout elapsed. OPERATOR. */
   | "OCR_TIMEOUT"
-  /** A 200 whose body is not the documented shape, or an unmapped status. */
+  /**
+   * A 200 whose body is not the documented shape, or an unmapped status.
+   * OPERATOR: a shape mismatch is a deployment mismatch between this app and
+   * the OCR service, and the consumer's photo had no part in it.
+   */
   | "OCR_BAD_RESPONSE"
   /**
    * A URL is configured without its credential: OCR_SERVICE_URL without
    * OCR_SERVICE_TOKEN, or SUPABASE_EDGE_OCR_URL without OCR_FUNCTION_SECRET.
+   * OPERATOR, and the most clearly ours of all of them.
    */
   | "OCR_MISCONFIGURED";
+
+/**
+ * Whose failure a code describes (D7). See the taxonomy comment above.
+ *
+ * A TOTAL RECORD, not a function with a default, so adding a code to
+ * `OcrErrorCode` without deciding whose fault it is fails to compile. The
+ * default that would otherwise be written is `"operator"` - which is the safe
+ * direction, since it can only ever cost a review - but a silent default is
+ * how the distinction rots back into a boolean.
+ */
+export const OCR_FAILURE_FAULT: Record<OcrErrorCode, "image" | "operator"> = {
+  OCR_IMAGE_UNREADABLE: "image",
+  OCR_IMAGE_TOO_LARGE: "image",
+  OCR_AUTH_FAILED: "operator",
+  OCR_MISCONFIGURED: "operator",
+  OCR_QUOTA_EXHAUSTED: "operator",
+  OCR_UNAVAILABLE: "operator",
+  OCR_TIMEOUT: "operator",
+  OCR_BAD_RESPONSE: "operator",
+};
 
 /**
  * A failure from the OCR boundary.

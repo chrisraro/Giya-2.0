@@ -41,6 +41,7 @@ import {
   validateParsedReceipt,
 } from "./process";
 import type { ProcessReceiptDeps } from "./process";
+import { reviewCopy } from "../components/receipt-copy";
 import { parseReceipt } from "../parse";
 
 // ===========================================================================
@@ -1174,6 +1175,129 @@ describe("pricing (doc 35)", () => {
 });
 
 // ===========================================================================
+// D10: review attribution
+// ===========================================================================
+//
+// Eight independent rules can route a receipt to a human. Before this suite,
+// only the five `forceReview` causes were ever recorded, so a receipt sent to a
+// queue by a THRESHOLD carried an empty `review_reasons` - which is also what a
+// receipt written before the field existed carries. Any count over the two was
+// a guess, and the whole point of measuring the review rate is that it is not
+// one. These tests pin that every path names itself.
+
+function reviewReasonsOf(harness: Harness): unknown {
+  const meta = harness.receiptUpdate()?.parse_meta as Record<string, unknown> | undefined;
+  return meta?.review_reasons;
+}
+
+describe("review attribution (D10)", () => {
+  it("names the fraud verdict's staff self-scan rather than lumping it with the composite", async () => {
+    // doc 37 routes a staff self-scan to review "regardless of composite", so
+    // it is a standing conflict-of-interest rule that can never be tuned away.
+    // Counting it as a composite breach would make an owner who scans their own
+    // lunch look like a merchant with a fraud problem.
+    const harness = createHarness({
+      world: createWorld({ staff: { id: "staff-1", role: "manager" } }),
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    expect(harness.receiptUpdate()?.status).toBe("review");
+    expect(reviewReasonsOf(harness)).toEqual(["staff_self_scan"]);
+  });
+
+  it("names a parse score short of the approve threshold", async () => {
+    const harness = createHarness({
+      // 0.35 + 0.20 + 0.15 + 0.30x0.1 + 0.05 VAT = 0.78: under the 0.8 approve
+      // threshold and over the 0.5 unreadable floor, which is exactly the band
+      // this reason describes.
+      response: ocrResponse({ meanConfidence: 0.1 }),
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    expect(harness.receiptUpdate()?.status).toBe("review");
+    expect(reviewReasonsOf(harness)).toContain("parse_confidence_low");
+  });
+
+  it("names a match score short of the accept threshold", async () => {
+    // The pre-bound floor is exactly `matchAccept` by default, so the only
+    // honest way to exercise this branch is to move the threshold, which is
+    // also how an operator would ever hit it.
+    const harness = createHarness({
+      settings: {
+        routing: { ...DEFAULT_RECEIPT_SETTINGS.routing, matchAccept: 0.95 },
+      },
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    expect(harness.receiptUpdate()?.status).toBe("review");
+    expect(reviewReasonsOf(harness)).toContain("match_confidence_low");
+  });
+
+  it("lists every rule that was true, not the first one checked", async () => {
+    // doc 37 is explicit that a fraud review wins even when parse confidence
+    // alone would approve. Both are still facts about this receipt, and
+    // collapsing to the winner would hide half a merchant's review rate behind
+    // whichever cause happened to be evaluated first.
+    const harness = createHarness({
+      world: createWorld({ staff: { id: "staff-1", role: "owner" } }),
+      response: ocrResponse({ meanConfidence: 0.1 }),
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const reasons = reviewReasonsOf(harness) as string[];
+    expect(reasons).toContain("staff_self_scan");
+    expect(reasons).toContain("parse_confidence_low");
+  });
+
+  it("records nothing on a receipt that approved on its own", async () => {
+    const harness = createHarness();
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    expect(harness.receiptUpdate()?.status).toBe("approved");
+    expect(reviewReasonsOf(harness)).toEqual([]);
+  });
+
+  it("CRITICAL: records nothing on a REJECTED receipt, even one a rule wanted reviewed", async () => {
+    // `resolveOutcome` lets a fraud block outrank a forced review, so this
+    // receipt has a live forced cause (a blacklisted customer) AND ends up
+    // rejected as a duplicate. Writing the cause anyway would make the
+    // breakdown count a human who never looked, and it would do so in the
+    // direction that flatters us: a lower apparent review rate.
+    const world = createWorld({
+      customer: { segment: "blacklisted", visit_count: 3 },
+      phashNeighbours: [
+        { id: OTHER_RECEIPT_ID, user_id: "someone-else", image_hash: IMAGE_HASH },
+      ],
+    });
+    const harness = createHarness({ world });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    expect(harness.receiptUpdate()?.status).toBe("rejected");
+    expect(reviewReasonsOf(harness)).toEqual([]);
+  });
+
+  it("does not let attribution change routing: the reasons are read off the outcome", async () => {
+    // The routed family must never reach `forceReview`. A receipt that
+    // `routeReceipt` approves has no routed cause by construction, so adding
+    // the attribution cannot turn an approval into a review - and this is the
+    // assertion that would fail if someone later fed the list back into the
+    // decision.
+    const harness = createHarness();
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    expect(harness.receiptUpdate()?.status).toBe("approved");
+    expect(harness.supabase.rpcCalls).toHaveLength(1);
+  });
+});
+
+// ===========================================================================
 // OCR failure handling (doc 36 "Retry, timeouts, DLQ")
 // ===========================================================================
 
@@ -1232,7 +1356,31 @@ describe("OCR failure handling", () => {
     expect(harness.insertedRows("ai_usage_events")).toHaveLength(0);
   });
 
-  it("sends an exhausted receipt to manual / processing_failed (the DLQ contract)", async () => {
+  // -------------------------------------------------------------------------
+  // D7: A BEHAVIOUR CHANGE, AND THE OLD ASSERTIONS ARE THE THING BEING FIXED.
+  //
+  // The three tests below used to assert `rejected` / `manual` /
+  // 'processing_failed' - doc 36's dead-letter contract - for an exhausted
+  // OCR_UNAVAILABLE or an unmapped OCR_BAD_RESPONSE. That contract is now
+  // wrong, and it was wrong in a specific, expensive direction: every one of
+  // those codes is an OPERATOR failure (see OCR_FAILURE_FAULT in
+  // ./ocr/provider.ts), and `receipt-copy.ts` renders a `manual` rejection to
+  // the consumer as "We could not accept this receipt". Google Cloud Vision's
+  // free tier is 1,000 units a month, so the single likeliest cause of these
+  // rejections is that we stopped paying - and the customer got told, in
+  // effect, that their photograph was the defect.
+  //
+  // The receipt is probably fine. We never read it, so we hold no evidence
+  // against it, and we do hold the image, which a human can open. So the
+  // terminal state is the merchant's REVIEW queue with the cause recorded.
+  // Rejecting was the only outcome that destroyed a real purchase, and it did
+  // so on the strength of a fact about our billing.
+  //
+  // What is NOT relaxed: the attempt budget still bounds how long the pipeline
+  // keeps trying, `ocr_results` still records every failed attempt with its
+  // error, and the genuinely-unreadable 422 still rejects (the test above).
+  // -------------------------------------------------------------------------
+  it("routes an exhausted receipt to review, not to a rejection: the failure was ours", async () => {
     const world = createWorld({ ocrAttempts: [{ attempt: 2 }] });
     const harness = createHarness({
       world,
@@ -1245,10 +1393,33 @@ describe("OCR failure handling", () => {
     await processReceipt(RECEIPT_ID, harness.deps);
 
     const update = harness.receiptUpdate();
-    expect(update?.status).toBe("rejected");
-    expect(update?.reject_reason).toBe("manual");
-    expect(update?.reject_note).toBe("processing_failed");
+    expect(update?.status).toBe("review");
+    expect(update?.reject_reason).toBeNull();
+    // Operator vocabulary, withheld from the client by 0017's column grant. It
+    // names the code so an exhausted quota is diagnosable from the row.
+    expect(update?.reject_note).toBe("ocr_operator_failure:OCR_UNAVAILABLE");
     expect(harness.insertedRows("ocr_results")[0]?.attempt).toBe(3);
+  });
+
+  it("records the operator failure as the review reason, so D10 can count it", async () => {
+    const harness = createHarness({
+      settings: { ocrMaxAttempts: 1 },
+      ocrError: new OcrError("OCR_QUOTA_EXHAUSTED", "vision quota spent", {
+        retryable: true,
+        status: 503,
+      }),
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const update = harness.receiptUpdate();
+    expect(update?.status).toBe("review");
+    // The queue reads this to tell the reviewer why an empty receipt is in
+    // front of them, and receipt_routing_breakdown (0035) counts it.
+    expect((update?.parse_meta as { review_reasons?: unknown }).review_reasons).toEqual([
+      "ocr_operator_failure",
+    ]);
+    expect(update?.reject_note).toBe("ocr_operator_failure:OCR_QUOTA_EXHAUSTED");
   });
 
   it("respects a tuned ocr.max_attempts from settings", async () => {
@@ -1262,7 +1433,56 @@ describe("OCR failure handling", () => {
 
     await processReceipt(RECEIPT_ID, harness.deps);
 
-    expect(harness.receiptUpdate()?.reject_note).toBe("processing_failed");
+    // Budget of 1 means attempt 1 is already the last one, so the receipt is
+    // finalized on this pass rather than parked. The tuned setting is what is
+    // under test; the terminal state is D7's.
+    expect(harness.receiptUpdate()?.status).toBe("review");
+  });
+
+  it("still rejects when there is no business whose queue could hold it", async () => {
+    // 0017 gives no RLS audience a path to a receipt with a null business_id,
+    // so 'review' would file it in a queue nobody can open, forever. That is
+    // strictly worse than a rejection, which at least tells the consumer
+    // something. `resolveOutcome` makes the identical call for the identical
+    // reason, and this is the only surviving caller of the dead-letter state.
+    const base = createWorld().receipt as Record<string, unknown>;
+    const world = createWorld({ receipt: { ...base, business_id: null } });
+    const harness = createHarness({
+      world,
+      settings: { ocrMaxAttempts: 1 },
+      ocrError: new OcrError("OCR_UNAVAILABLE", "overloaded", {
+        retryable: true,
+        status: 503,
+      }),
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const update = harness.receiptUpdate();
+    expect(update?.status).toBe("rejected");
+    expect(update?.reject_reason).toBe("manual");
+    expect(update?.reject_note).toBe("processing_failed");
+  });
+
+  it("still rejects an oversized image, and stops calling it a processing failure", async () => {
+    // 413 is a property of the submission, not of our billing, and a retake
+    // fixes it. It keeps the `manual` rejection (whose copy offers exactly that
+    // retake) and gives up the `processing_failed` note, so an operator
+    // grepping the dead-letter note for OUR failures no longer trips over
+    // submissions that were never our problem.
+    const harness = createHarness({
+      ocrError: new OcrError("OCR_IMAGE_TOO_LARGE", "9MB", {
+        retryable: false,
+        status: 413,
+      }),
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const update = harness.receiptUpdate();
+    expect(update?.status).toBe("rejected");
+    expect(update?.reject_reason).toBe("manual");
+    expect(update?.reject_note).toBe("image_too_large");
   });
 
   it("treats a failure to sign the image URL as a retryable attempt", async () => {
@@ -1297,7 +1517,11 @@ describe("OCR failure handling", () => {
     expect((updates[0]?.payload as Record<string, unknown>).status).toBe("processing");
   });
 
-  it("sends an unmapped OCR response to the DLQ rather than parking it", async () => {
+  it("sends an unmapped OCR response to review rather than parking it", async () => {
+    // A body we could not parse is a deployment mismatch between this app and
+    // the OCR service. Retrying gets the identical body, so it is terminal on
+    // this attempt - but the consumer's photograph had no part in it, so the
+    // terminal state is a human, not a rejection.
     const harness = createHarness({
       ocrError: new OcrError("OCR_BAD_RESPONSE", "garbage body", {
         retryable: false,
@@ -1307,7 +1531,8 @@ describe("OCR failure handling", () => {
 
     await processReceipt(RECEIPT_ID, harness.deps);
 
-    expect(harness.receiptUpdate()?.reject_note).toBe("processing_failed");
+    expect(harness.receiptUpdate()?.status).toBe("review");
+    expect(harness.receiptUpdate()?.reject_note).toBe("ocr_operator_failure:OCR_BAD_RESPONSE");
   });
 
   it("never throws when the OCR provider rejects with something unexpected", async () => {
@@ -1576,8 +1801,46 @@ describe("Stage 10 notification", () => {
     ).toBe("unreadable");
   });
 
-  it("notifies on the exhausted-attempts dead end (doc 36: consumer notified and may resubmit)", async () => {
+  it("CRITICAL (D7): tells the consumer the shop is checking it, never that their photo failed", async () => {
+    // The whole decision, end to end. This used to raise `receipt_rejected`
+    // carrying `reject_reason: 'manual'`, which renders as "We could not accept
+    // this receipt" - a statement about the consumer's submission made when the
+    // truth was that our OCR call never succeeded.
     const harness = createHarness({
+      settings: { ocrMaxAttempts: 1 },
+      ocrError: new OcrError("OCR_QUOTA_EXHAUSTED", "vision quota spent", {
+        retryable: true,
+        status: 503,
+      }),
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const rows = raised(harness);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe("receipt_in_review");
+    // The same string every other review produces, from the same matrix. No
+    // second set of copy was written for this path.
+    expect(rows[0]?.title).toBe(reviewCopy().title);
+    expect(rows[0]?.body).toBe(reviewCopy().body);
+
+    const message = `${String(rows[0]?.title)} ${String(rows[0]?.body)}`;
+    // Not a word about the photograph, and not a word about our billing
+    // either: the consumer is told what is happening, not whose fault it was.
+    expect(message).not.toMatch(/photo|image|picture|retake|blur/i);
+    expect(message).not.toMatch(/quota|credit|billing|outage/i);
+    expect(message).not.toContain("processing_failed");
+    // And no retake is offered, because there is nothing wrong to retake.
+    expect(
+      (rows[0]?.data as { params?: Record<string, unknown> }).params?.reject_reason,
+    ).toBeUndefined();
+  });
+
+  it("still notifies a rejection on the one operator path that cannot reach a queue", async () => {
+    const base = createWorld().receipt as Record<string, unknown>;
+    const world = createWorld({ receipt: { ...base, business_id: null } });
+    const harness = createHarness({
+      world,
       settings: { ocrMaxAttempts: 1 },
       ocrError: new OcrError("OCR_BAD_RESPONSE", "garbage", {
         retryable: true,

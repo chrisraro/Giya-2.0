@@ -7,11 +7,23 @@
 -- schedule did not break public.expire_claims, and the service_role-only
 -- grants on every function 0028 touches.
 --
--- The three receipt cases are the whole point of the design and are asserted
--- as a matched set, because each one alone is easy to get right:
---   * STUCK AND OUT OF BUDGET  -> rejected / manual / 'processing_failed'
+-- The receipt cases are the whole point of the design and are asserted as a
+-- matched set, because each one alone is easy to get right:
+--   * STUCK AND OUT OF BUDGET  -> review / 'ocr_operator_failure:sweep'  (0035)
 --   * STUCK BUT WITHIN BUDGET  -> untouched (a retry could still save it)
 --   * OUT OF BUDGET BUT RECENT -> untouched (merely slow is not dead)
+--   * STUCK WITH NO BUSINESS   -> rejected / manual / 'processing_failed'
+--
+-- THE FIRST CASE CHANGED IN 0035 (decision D7) AND THE OLD ASSERTIONS WERE THE
+-- BUG. Every receipt this sweep can see is one WE failed to process: a receipt
+-- whose IMAGE was the problem never parks, because handleOcrFailure finalizes
+-- an unreadable photo on the attempt that discovered it. So 'processing' hours
+-- later means our OCR call never succeeded - an exhausted Vision quota (free
+-- tier: 1,000 units a MONTH), a rejected credential, a half-deployed function.
+-- Dead-lettering those as rejected/manual made receipt-copy.ts tell a paying
+-- customer "We could not accept this receipt" about a photograph that was fine.
+-- The receipt now goes to the merchant's review queue, where a human can open
+-- the image we still hold and key it in.
 --
 -- Runs entirely inside one transaction and rolls back. Execute as a privileged
 -- role (postgres) against a database with migrations 0001-0028 applied. pgTAP
@@ -35,7 +47,7 @@ begin;
 
 set local search_path = public, extensions;
 
-select plan(23);
+select plan(27);
 
 -- ---------------------------------------------------------------- fixtures
 insert into auth.users (id, aud, role, email, raw_user_meta_data)
@@ -142,21 +154,29 @@ select is(
   '1',
   'the sweep moved exactly one receipt');
 
--- 4-7. the genuinely dead receipt lands in doc 36's dead-letter state
+-- 4-8. the genuinely dead receipt lands in front of a human, not in a rejection
 select is(
   (select status from public.receipts where id = current_setting('test.dead')::uuid),
-  'rejected',
-  'a stuck receipt past its attempt budget is rejected');
+  'review',
+  'a stuck receipt past its attempt budget goes to review, because the failure was ours');
 
-select is(
-  (select reject_reason from public.receipts where id = current_setting('test.dead')::uuid),
-  'manual',
-  'the dead-letter rejection reason is manual');
+select ok(
+  (select reject_reason is null
+     from public.receipts where id = current_setting('test.dead')::uuid),
+  'CRITICAL: no reject_reason, so no consumer copy can blame the photograph');
 
 select is(
   (select reject_note from public.receipts where id = current_setting('test.dead')::uuid),
-  'processing_failed',
-  'the dead-letter note is processing_failed');
+  'ocr_operator_failure:sweep',
+  'the note is operator vocabulary and says the sweep, not the pipeline, gave up');
+
+-- The review queue reads review_reasons to tell a reviewer why an empty receipt
+-- is in front of them, and receipt_routing_breakdown counts it.
+select is(
+  (select parse_meta -> 'review_reasons' from public.receipts
+    where id = current_setting('test.dead')::uuid),
+  '["ocr_operator_failure"]'::jsonb,
+  'the review reason is recorded, so the breakdown can attribute it');
 
 select ok(
   (select processed_at is not null and reviewed_by is null and reviewed_at is null
@@ -247,6 +267,46 @@ select is(
   '1',
   'removing the override puts the same receipt back over the platform budget');
 
+-- 16-18. THE ONE RECEIPT THAT IS STILL REJECTED: no business, so no queue.
+-- 0017 gives no RLS audience a path to a receipt with a null business_id, so
+-- 'review' would file it in a queue nobody can open, forever - strictly worse
+-- than a rejection, which at least tells the consumer something.
+-- `resolveOutcome` in process.ts makes the identical call for this identical
+-- reason. Inserted directly with business_id null, which the schema permits
+-- (submit accepts a receipt with no scan target).
+with r as (
+     insert into public.receipts
+       (business_id, user_id, status, image_path, image_hash, sha256, updated_at)
+     values
+       (null,
+        'e3333333-3333-4333-8333-333333333333',
+        'processing',
+        'e3333333-3333-4333-8333-333333333333/sweep-orphan.jpg',
+        'bbbbbbbbbbbbbbbb', 'sweep-orphan-sha-000000000000000000000000000000',
+        now() - interval '48 hours')
+     returning id)
+select set_config('test.orphan', (select id::text from r), true);
+
+insert into public.ocr_results (receipt_id, attempt, engine, engine_version, error)
+select current_setting('test.orphan')::uuid, a, 'google-vision', 'unknown',
+       'OCR_QUOTA_EXHAUSTED: vision quota spent'
+  from generate_series(1, 3) as a;
+
+select is(
+  public.sweep_stuck_receipts(200)::text,
+  '1',
+  'the orphaned receipt is swept');
+
+select is(
+  (select status from public.receipts where id = current_setting('test.orphan')::uuid),
+  'rejected',
+  'a stuck receipt with no business is still dead-lettered, because no queue can hold it');
+
+select is(
+  (select reject_note from public.receipts where id = current_setting('test.orphan')::uuid),
+  'processing_failed',
+  'the orphan keeps the original dead-letter note');
+
 -- ------------------------------------------------------------ expire_claims
 -- Not a re-run of rpc_claim_smoke.sql, which owns the reversal ledger, the
 -- balance restore and the inventory cap. All that is asserted here is that
@@ -259,7 +319,7 @@ select is(
   'expire_claims still runs and expires nothing when nothing has lapsed');
 
 -- ------------------------------------------------------------ the schedules
--- 17-19. both jobs registered, on the doc 39 offsets, calling the real
+-- both jobs registered, on the doc 39 offsets, calling the real
 -- functions. cron.job rows live outside this transaction, so these read the
 -- deployed schedule rather than anything the fixtures created.
 select is(
@@ -282,7 +342,7 @@ select ok(
   'both jobs are active and call the sweep functions directly');
 
 -- ------------------------------------------------------------ grants
--- 20-23. system sweeps, service_role only, the 0016 pairing. No consumer and
+-- system sweeps, service_role only, the 0016 pairing. No consumer and
 -- no staff member may drain the expiry queue or reject a receipt, and no client
 -- role may read the scheduler's error strings through sweep_job_health.
 select ok(
