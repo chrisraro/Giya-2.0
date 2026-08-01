@@ -69,6 +69,17 @@ function decisionItem(overrides: Partial<ReviewDecisionItem> = {}): ReviewDecisi
       dateAmbiguous: false,
       notes: [],
       ocrMeanConfidence: 0.71,
+      // Stage 5's merchant-name check passed on this fixture, so the screen
+      // renders no banner and every assertion below is unchanged.
+      merchantCheck: {
+        verdict: "match",
+        score: 1,
+        threshold: 0.35,
+        headerText: "ALING NENA BAKERY",
+        matchedAlias: null,
+        rival: null,
+      },
+      reviewReasons: [],
     },
     parseConfidence: 0.82,
     matchConfidence: 0.9,

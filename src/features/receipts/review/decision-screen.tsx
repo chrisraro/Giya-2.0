@@ -19,12 +19,13 @@ import {
   fieldChip,
   formatConfidence,
   formatDateTime,
+  merchantCheckNotice,
   queueAge,
   slaChipClass,
   toneChipClass,
 } from "./presenter";
 import type { ReviewDecisionItem, ReviewLineItemView } from "./types";
-import type { ReviewActionResult } from "./actions";
+import type { LearnAliasActionResult, ReviewActionResult } from "./actions";
 
 // ===========================================================================
 // `/business/receipts/[receiptId]` - the decision screen.
@@ -56,6 +57,7 @@ import type { ReviewActionResult } from "./actions";
 // ===========================================================================
 
 export type ReviewDecisionAction = (input: unknown) => Promise<ReviewActionResult>;
+export type LearnAliasAction = (input: unknown) => Promise<LearnAliasActionResult>;
 
 export interface ReviewDecisionScreenProps {
   item: ReviewDecisionItem;
@@ -64,6 +66,12 @@ export interface ReviewDecisionScreenProps {
   now: Date;
   onApprove: ReviewDecisionAction;
   onReject: ReviewDecisionAction;
+  /**
+   * "This is my receipt header, always accept it." Optional so a caller that
+   * has not wired it yet renders the merchant-name banner without the
+   * affordance rather than crashing; the banner alone is still the finding.
+   */
+  onLearnAlias?: LearnAliasAction;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +206,7 @@ export function ReviewDecisionScreen({
   now,
   onApprove,
   onReject,
+  onLearnAlias,
 }: ReviewDecisionScreenProps) {
   const router = useRouter();
 
@@ -218,9 +227,13 @@ export function ReviewDecisionScreen({
   const [rejectReason, setRejectReason] = React.useState<string>("unreadable");
   const [rejectNote, setRejectNote] = React.useState("");
 
+  const [aliasPending, setAliasPending] = React.useState(false);
+  const [aliasOutcome, setAliasOutcome] = React.useState<string | null>(null);
+
   const decidable = item.status === "review" && !item.submittedByViewer && !alreadyDecided;
   const age = queueAge(item.createdAt, now);
   const composite = compositeFraudScore(item.signals);
+  const merchantNotice = merchantCheckNotice(item.parseMeta, businessName);
 
   const totalCentavos = parseOptionalPeso(fields.total);
   const confirmTotalLabel =
@@ -345,6 +358,24 @@ export function ReviewDecisionScreen({
     setFieldErrors(result.fieldErrors);
   }
 
+  async function submitLearnAlias() {
+    if (onLearnAlias === undefined) return;
+    setAliasPending(true);
+    // The receipt id is the WHOLE payload. The header string is re-read
+    // server-side from parse_meta, so nothing this component holds can widen
+    // what auto-approves at this business.
+    const result = await onLearnAlias({ receiptId: item.receiptId });
+    setAliasPending(false);
+    setAliasOutcome(
+      result.ok
+        ? result.alreadyKnown
+          ? `“${result.alias}” was already on your list of accepted headers.`
+          : `Saved. Receipts headed “${result.alias}” will be accepted from now on.`
+        : result.message,
+    );
+    if (result.ok) router.refresh();
+  }
+
   async function submitApprove() {
     const built = buildFields();
     if (!built.ok) {
@@ -463,6 +494,73 @@ export function ReviewDecisionScreen({
           className="rounded-md3-md border border-outline bg-surface-container p-4 text-body-m text-on-surface"
         >
           {outcome}
+        </div>
+      )}
+
+      {/* ---- The merchant-name check ------------------------------------ */}
+      {/*
+        Doc 36 Stage 5's foreign-receipt defence, as a reviewer reads it.
+
+        TWO VARIANTS, DELIBERATELY UNALIKE. "We could not read the shop name"
+        shows no header and offers nothing to learn, because there is nothing
+        to learn: it is a photo problem, and the reviewer's job is to look at
+        the image. "The header reads X" shows X in a monospaced block and
+        offers the one-tap that teaches it. A reviewer must be able to tell the
+        two apart at a glance without re-deriving it from the picture.
+
+        The tone is `surface-container` with an outline rather than
+        `error-container`: this is a question, not an alarm, and the
+        overwhelmingly common cause of both variants is a bad photograph of a
+        genuine purchase. Nothing here accuses the customer.
+      */}
+      {merchantNotice !== null && (
+        <div
+          role="note"
+          className="flex flex-col gap-3 rounded-md3-md border border-outline bg-surface-container p-4"
+        >
+          <div className="flex flex-col gap-1">
+            <p className="text-title-m text-on-surface">{merchantNotice.title}</p>
+            <p className="text-body-m text-on-surface-variant">{merchantNotice.body}</p>
+          </div>
+
+          {merchantNotice.headerText !== null && (
+            <div className="flex flex-col gap-1">
+              <p className="text-label-l text-on-surface">What the top of the receipt says</p>
+              <p className="rounded-md3-sm bg-surface-container-highest px-3 py-2 font-mono text-body-m text-on-surface">
+                {merchantNotice.headerText}
+              </p>
+              {merchantNotice.rivalNote !== null && (
+                <p className="text-body-s text-on-surface-variant">
+                  {merchantNotice.rivalNote}
+                </p>
+              )}
+            </div>
+          )}
+
+          {merchantNotice.canLearnAlias && onLearnAlias !== undefined && decidable && (
+            <div className="flex flex-wrap items-center gap-3">
+              <PendingButton
+                type="button"
+                variant="tonal"
+                size="sm"
+                pending={aliasPending}
+                pendingLabel="Saving"
+                onClick={() => void submitLearnAlias()}
+              >
+                This is my receipt header, always accept it
+              </PendingButton>
+              <span className="text-body-s text-on-surface-variant">
+                Saving it stops future receipts with this header coming here.
+                It does not decide this one.
+              </span>
+            </div>
+          )}
+
+          {aliasOutcome !== null && (
+            <p role="status" className="text-body-m text-on-surface">
+              {aliasOutcome}
+            </p>
+          )}
         </div>
       )}
 

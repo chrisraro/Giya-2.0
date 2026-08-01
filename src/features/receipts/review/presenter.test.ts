@@ -142,6 +142,8 @@ describe("fieldChip", () => {
     dateAmbiguous: false,
     notes: [],
     ocrMeanConfidence: 0.7,
+    merchantCheck: null,
+    reviewReasons: [],
   };
 
   it("names the source per field", () => {

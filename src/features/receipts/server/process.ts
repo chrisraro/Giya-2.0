@@ -19,8 +19,8 @@ import { buildExtractionPrompt, validateExtraction } from "../extract";
 import type { ExtractionMessage, ExtractionResult } from "../extract";
 import { buildSignal, fraudVerdict } from "../fraud";
 import type { FraudSignal } from "../fraud";
-import { matchBusiness, trigramSimilarity } from "../matching";
-import type { MatchCandidate } from "../matching";
+import { checkMerchantName, matchBusiness, normalizeForMatch, trigramSimilarity } from "../matching";
+import type { MatchCandidate, MerchantNameCheck, RivalMerchant } from "../matching";
 import { parseReceipt } from "../parse";
 import type { ParseConfig, ParseNote, ParsedReceipt } from "../parse";
 import { hammingDistance, phashBand } from "../phash";
@@ -157,6 +157,50 @@ const EMBEDDING_SELECTION_WEIGHT = 0.7;
 /** Postgres unique_violation. */
 const UNIQUE_VIOLATION = "23505";
 
+/**
+ * How many rival-merchant candidates the Stage 5 name check will look at, and
+ * how many header words it will probe with.
+ *
+ * The probe is an ILIKE-per-word disjunction served by `businesses_name_trgm`
+ * (0002), NOT an exhaustive scan: it is a PREFILTER whose only job is to put a
+ * plausible rival in front of the pure scorer in ../matching.ts, which makes
+ * the actual decision. A miss here (an OCR-mangled rival name that no word of
+ * the header matches literally) costs the ATTRIBUTION - "this header is
+ * another Giya merchant" - and never costs the defence, because the header
+ * still has to score against the bound business's own name and aliases to
+ * auto-approve. That asymmetry is why a cheap prefilter is the right shape and
+ * why the caps below can be small.
+ */
+const RIVAL_CANDIDATE_LIMIT = 10;
+const RIVAL_PROBE_WORDS = 4;
+/**
+ * Shorter header words are dropped from the probe. "SA", "NG", "CO" and every
+ * two-letter OCR fragment match a large fraction of a business directory by
+ * substring, so including them turns the prefilter into a scan that returns
+ * nothing useful.
+ */
+const RIVAL_PROBE_MIN_WORD_LENGTH = 4;
+
+/**
+ * Why a receipt was sent to a human, recorded on the receipt so the queue can
+ * say it out loud and the instrumentation slice can count it.
+ *
+ * These are the `forceReview` causes, which are deliberately NOT fraud signals:
+ * a fraud signal is a detection about the SUBMISSION that feeds doc 37's
+ * composite, while these are statements about how much this pipeline is
+ * willing to decide on its own. Recording them in `parse_meta` rather than
+ * inventing a `fraud_signals.signal` value keeps doc 37's catalog and its
+ * scoring arithmetic exactly as specified, and keeps a merchant-name miss -
+ * which is usually a photo problem - from reading as an accusation in a fraud
+ * list.
+ */
+type ReviewReason =
+  | "amount_sanity"
+  | "customer_blacklisted"
+  | "llm_assisted_field"
+  | "merchant_name_mismatch"
+  | "merchant_name_unreadable";
+
 // ---------------------------------------------------------------------------
 // Dependencies
 // ---------------------------------------------------------------------------
@@ -268,6 +312,89 @@ export interface ProcessReceiptDeps {
    * required them would stop scanning receipts the day a token was rotated.
    */
   ai?: ReceiptAiDeps;
+  /**
+   * Stage 5's rival-merchant probe: live Giya businesses, other than the bound
+   * one, whose name plausibly resembles the header on this receipt.
+   *
+   * OPTIONAL, AND ABSENT MEANS NO RIVAL ATTRIBUTION - never a weaker check.
+   * That is the honest shape rather than a test affordance, because of what
+   * the probe is and is not. The merchant-name DEFENCE is the comparison
+   * against the bound business's own name and aliases, which is pure and needs
+   * no directory at all. The rival probe only answers the follow-up question:
+   * "and this header belongs to whom?" A receipt from a shop that is not on
+   * Giya has no rival to name and is caught exactly the same way. So a probe
+   * that is missing, slow, or wrong costs a sentence in the review queue, and
+   * cannot cost a receipt or open the hole.
+   *
+   * Injected rather than called inline for the same reason `ai` is: it is the
+   * one read in this stage that needs a query shape (`or` over per-word ILIKE)
+   * beyond the plain equality filters the rest of the pipeline uses.
+   */
+  findRivalMerchants?: (input: {
+    /** Always non-empty: the caller does not probe on an unreadable header. */
+    merchantName: string;
+    excludeBusinessId: string | null;
+  }) => Promise<RivalMerchant[]>;
+}
+
+/**
+ * The production rival probe.
+ *
+ * SCOPED TO WHAT IS ALREADY PUBLIC. `status = 'active'` and `deleted_at is
+ * null` is verbatim 0002's `businesses_public_select` predicate, so the only
+ * rival this can ever name in another tenant's review payload is a business
+ * any signed-out visitor already sees in the directory. A draft or suspended
+ * tenant is never surfaced.
+ *
+ * The probe is a per-word ILIKE disjunction rather than a trigram operator
+ * because PostgREST cannot express `%`, and adding an RPC to say it would put
+ * a second scoring implementation on the money path. `businesses_name_trgm`
+ * (0002, gin_trgm_ops) serves ILIKE substring predicates, so the index still
+ * does the work, and the AUTHORITATIVE scoring stays where every other match
+ * decision in this slice is made: the pure function in ../matching.ts. The
+ * consequence is that an OCR-mangled rival name can be missed here; see the
+ * `findRivalMerchants` note above for why that is affordable.
+ */
+export function findRivalMerchants(
+  supabase: SupabaseClient<Database>,
+): NonNullable<ProcessReceiptDeps["findRivalMerchants"]> {
+  return async ({ merchantName, excludeBusinessId }) => {
+    const words = normalizeForMatch(merchantName)
+      .split(" ")
+      .filter((word) => word.length >= RIVAL_PROBE_MIN_WORD_LENGTH)
+      // Longest first: the most distinctive token of a merchant name is almost
+      // always its longest one, and the probe only has room for a few.
+      .sort((a, b) => b.length - a.length)
+      .slice(0, RIVAL_PROBE_WORDS);
+    if (words.length === 0) return [];
+
+    // PostgREST `or` syntax. The words are alphanumeric by construction
+    // (`normalizeForMatch` strips everything else), so none of them can carry
+    // a comma, a parenthesis or a wildcard into the filter string.
+    const filter = words.map((word) => `name.ilike.*${word}*`).join(",");
+
+    let query = supabase
+      .from("businesses")
+      .select("id, name")
+      .eq("status", "active")
+      .is("deleted_at", null)
+      .or(filter)
+      .limit(RIVAL_CANDIDATE_LIMIT);
+    if (excludeBusinessId !== null) query = query.neq("id", excludeBusinessId);
+
+    const { data, error } = await query;
+    if (error !== null) {
+      console.error("[receipts/process] could not probe for rival merchants", error);
+      return [];
+    }
+    const rows = Array.isArray(data) ? data : [];
+    return rows
+      .filter(
+        (row): row is { id: string; name: string } =>
+          typeof row.id === "string" && typeof row.name === "string",
+      )
+      .map((row) => ({ businessId: row.id, name: row.name }));
+  };
 }
 
 /**
@@ -317,6 +444,7 @@ export function defaultProcessReceiptDeps(): ProcessReceiptDeps | null {
       redis: { incr, expireNx, setNx, get: redisGet },
       now: () => new Date(),
       ai: defaultReceiptAiDeps(),
+      findRivalMerchants: findRivalMerchants(supabase),
     };
   } catch (error) {
     console.error("[receipts/process] OCR provider is misconfigured", error);
@@ -1650,7 +1778,11 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
   const parsed = assist.parsed;
 
   const business = await loadBusiness(supabase, receipt.business_id);
-  const candidates = buildMatchCandidates(business, templates, template);
+  const aliases = mergeAliases(
+    templates,
+    await loadMerchantAliases(supabase, receipt.business_id),
+  );
+  const candidates = buildMatchCandidates(business, templates, template, aliases);
   const match = matchBusiness({
     rawText: response.rawText,
     merchantName: parsed.merchantName,
@@ -1663,6 +1795,40 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
     },
   });
   const matchedBusinessId = match.businessId;
+
+  // ---- Stage 5, second half: does the paper name this shop? --------------
+  //
+  // THE FOREIGN-RECEIPT DEFENCE. Everything above this point accepted a
+  // pre-bound receipt on the strength of the 0.85 floor alone, which equals
+  // `matchAccept`, so a receipt from any other shop on earth sailed through
+  // every check the pipeline had. This is the check that reads the name off
+  // the top of the paper and asks whether it belongs to the merchant the
+  // consumer tapped.
+  //
+  // ITS ONLY LEVER IS `forceReview`. It does not touch `match.confidence` and
+  // must never be given the ability to: lowering that number below
+  // `matchReview` would make `routeReceipt` REJECT as `wrong_business`, and a
+  // rejection here would punish a real customer for our own OCR misreading a
+  // faded header. See `checkMerchantName` for the four decisions behind that.
+  const rivals =
+    deps.findRivalMerchants === undefined ||
+    parsed.merchantName === null ||
+    parsed.merchantName.trim().length === 0
+      ? []
+      : await deps.findRivalMerchants({
+          merchantName: parsed.merchantName,
+          excludeBusinessId: receipt.business_id,
+        });
+  const merchantCheck: MerchantNameCheck | null =
+    business === null
+      ? null
+      : checkMerchantName({
+          merchantName: parsed.merchantName,
+          businessName: business.name,
+          aliases,
+          rivals,
+          trigramSimilarity,
+        });
 
   // ---- Stage 8: validation -----------------------------------------------
   const businessVerifiedAt =
@@ -1743,6 +1909,28 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
   // achieve it - `resolveOutcome` already takes a `forceReview` for exactly
   // this class of "a human must look" rule, and this is one more of them.
   const llmAssisted = assist.assisted.length > 0;
+
+  // Every "a human must look" rule, as a LIST rather than a boolean.
+  //
+  // This is a money path, so the failure has to be legible: a merchant opening
+  // their queue needs to be told which rule put the receipt there, and the
+  // instrumentation slice needs to be able to count them apart. Collapsing all
+  // of them into one `||` threw that away at the exact moment it was known.
+  // The boolean below is derived from the list, so the routing behaviour of
+  // the four pre-existing causes is unchanged to the character.
+  const reviewReasons: ReviewReason[] = [];
+  if (validation.forceReview) reviewReasons.push("amount_sanity");
+  if (blacklisted) reviewReasons.push("customer_blacklisted");
+  if (llmAssisted) reviewReasons.push("llm_assisted_field");
+  // D1 and D3: a mismatch and an unreadable name both route to review, and
+  // they are recorded as DIFFERENT reasons. "We could not read the shop name"
+  // and "the receipt says JOLLIBEE" prompt completely different human
+  // decisions - one is a photo problem, the other is a foreign receipt - and a
+  // queue that renders them identically forces every reviewer to re-derive the
+  // difference from the image.
+  if (merchantCheck?.verdict === "mismatch") reviewReasons.push("merchant_name_mismatch");
+  if (merchantCheck?.verdict === "unreadable") reviewReasons.push("merchant_name_unreadable");
+
   const outcome = resolveOutcome({
     routed: routeReceipt({
       parseConfidence: confidence,
@@ -1751,7 +1939,7 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
       thresholds: settings.routing,
     }),
     validationRejection: validation.rejection,
-    forceReview: validation.forceReview || blacklisted || llmAssisted,
+    forceReview: reviewReasons.length > 0,
     matchedBusinessId,
   });
 
@@ -1788,6 +1976,8 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
     assisted: assist.assisted,
     assistTrace: assist.trace,
     retrievalTrace: ranking.trace,
+    merchantCheck,
+    reviewReasons,
   });
   const persisted = await persistOutcome({
     supabase,
@@ -2344,6 +2534,76 @@ async function loadBusiness(
 }
 
 /**
+ * Every merchant alias this business has, from BOTH sources, deduplicated on
+ * the comparison form the matcher uses.
+ *
+ * TWO SOURCES ON PURPOSE, and neither replaces the other:
+ *
+ *   * `receipt_templates.parse_config.merchant_aliases` is doc 36 Stage 6's
+ *     documented shape and keeps working untouched, so a merchant who has
+ *     already configured aliases on a template loses nothing.
+ *   * `business_merchant_aliases` (0034) is where the review queue's one-tap
+ *     "this is my receipt header, always accept it" writes, and it is the ONLY
+ *     source that exists for the business this whole feature is aimed at: a
+ *     brand new merchant with no template at all. It is also the right home on
+ *     the merits - a shop with a POS slip and a handwritten pad has two
+ *     templates but one name.
+ *
+ * The dedupe is on `normalizeForMatch` output because that is the only form
+ * the scorer ever compares; two aliases that normalize alike are one alias,
+ * and keeping both would only make the review screen's list read as noise.
+ */
+function mergeAliases(
+  templates: readonly TemplateRow[],
+  businessAliases: readonly string[],
+): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  const add = (alias: string): void => {
+    const key = normalizeForMatch(alias);
+    if (key.length === 0 || seen.has(key)) return;
+    seen.add(key);
+    merged.push(alias);
+  };
+  for (const row of templates) {
+    for (const alias of sanitizeParseConfig(row.parse_config).merchant_aliases ?? []) {
+      add(alias);
+    }
+  }
+  for (const alias of businessAliases) add(alias);
+  return merged;
+}
+
+/**
+ * The business's own aliases (0034). Never throws and never fails the receipt:
+ * a read error degrades to "no learned aliases", which can only send a receipt
+ * to a human, never award one.
+ */
+async function loadMerchantAliases(
+  supabase: SupabaseClient<Database>,
+  businessId: string | null,
+): Promise<string[]> {
+  if (businessId === null) return [];
+  const { data, error } = await supabase
+    .from("business_merchant_aliases")
+    .select("alias")
+    .eq("business_id", businessId)
+    .order("created_at", { ascending: true });
+
+  if (error !== null) {
+    console.error(
+      `[receipts/process] could not load merchant aliases for business ${businessId}`,
+      error,
+    );
+    return [];
+  }
+  const rows = Array.isArray(data) ? data : [];
+  return rows
+    .map((row) => (typeof row.alias === "string" ? row.alias : ""))
+    .filter((alias) => alias.length > 0);
+}
+
+/**
  * Doc 36 Stage 5's candidate set.
  *
  * MVP is the pre-bound scan: the consumer scanned from a business page, so
@@ -2354,19 +2614,28 @@ async function loadBusiness(
  * turns a match confidence of 0 into rejected / wrong_business - which is
  * precisely the behaviour 0017's own comment demands, rather than parking an
  * unmatchable receipt in a review queue no audience can read.
+ *
+ * RIVAL BUSINESSES ARE STILL NOT ADDED HERE, AND THAT IS THE FIX RATHER THAN A
+ * GAP IN IT. Handing `matchBusiness` a rival candidate would finally let
+ * `verifyPreBound`'s contradiction path fire - and that path returns
+ * confidence 0, which `routeReceipt` turns into a `wrong_business`
+ * REJECTION. Rejecting is the one outcome the merchant-name check is forbidden
+ * to produce: OCR misreads shop names routinely, and a false reject on a real
+ * customer's genuine purchase is worse than anything this defence prevents. So
+ * the foreign-receipt case is answered by `checkMerchantName`, whose verdict
+ * reaches the router as a `forceReview` and can only ever cost a human a look.
  */
 function buildMatchCandidates(
   business: BusinessRow | null,
   templates: readonly TemplateRow[],
   selected: SelectedTemplate | null,
+  aliases: readonly string[],
 ): MatchCandidate[] {
   if (business === null) return [];
 
-  const aliases: string[] = [];
   let tin: string | null = null;
   for (const row of templates) {
     const config = sanitizeParseConfig(row.parse_config);
-    aliases.push(...(config.merchant_aliases ?? []));
     if (tin === null && config.tin !== undefined) tin = config.tin;
   }
 
@@ -2375,7 +2644,7 @@ function buildMatchCandidates(
       businessId: business.id,
       name: business.name,
       tin,
-      merchantAliases: aliases,
+      merchantAliases: [...aliases],
       // Doc 36 Stage 5's "+0.05 for a validated-template structural match":
       // a template of this business won Stage 6 selection.
       hasValidatedTemplateMatch: selected !== null,
@@ -2745,6 +3014,10 @@ function buildParseMeta(input: {
   assisted: readonly AssistedField[];
   assistTrace: Record<string, unknown>;
   retrievalTrace: Record<string, unknown>;
+  /** Stage 5's merchant-name check. Null only when no business was loaded. */
+  merchantCheck: MerchantNameCheck | null;
+  /** Why a human was asked to look. Empty on a receipt nothing forced. */
+  reviewReasons: readonly ReviewReason[];
 }): Json {
   const tier = input.template === null ? "heuristic" : "template";
   // A24.2 asks for {field: {tier, conf}}. parse.ts does not report which tier
@@ -2790,6 +3063,40 @@ function buildParseMeta(input: {
       confidence: input.match.confidence,
       contradicted: input.match.contradicted,
     },
+    // Stage 5's merchant-name check, written whether it passed or not: "the
+    // name matched, at this score, against this alias" is what makes a
+    // reviewer trust the ones that did not, and a key that appears only on
+    // failures cannot tell a silent regression apart from a clean receipt.
+    merchant_check:
+      input.merchantCheck === null
+        ? null
+        : {
+            verdict: input.merchantCheck.verdict,
+            score: input.merchantCheck.score,
+            threshold: input.merchantCheck.threshold,
+            // The header VERBATIM. This is what the review screen shows and
+            // what its one-tap "always accept this header" learns, and it is
+            // deliberately the pipeline's copy rather than something the
+            // browser sends back: an alias is a widening of what
+            // auto-approves, so the string it is built from must come from the
+            // receipt this platform read, never from a form field.
+            header_text: input.merchantCheck.headerText,
+            matched_alias: input.merchantCheck.matchedAlias,
+            // The rival, when one is what forced the verdict. Only ever a
+            // business that `businesses_public_select` already shows to
+            // signed-out visitors (see `loadRivalMerchants`), so naming it to
+            // another tenant's reviewer discloses nothing that is not public.
+            rival:
+              input.merchantCheck.rival === null
+                ? null
+                : {
+                    business_id: input.merchantCheck.rival.businessId,
+                    name: input.merchantCheck.rival.name,
+                    score: input.merchantCheck.rival.score,
+                  },
+          },
+    // Why a human was asked to look, in the order the pipeline decided it.
+    review_reasons: [...input.reviewReasons],
     ocr: {
       engine: input.response.engine,
       engine_version: input.response.engineVersion,
