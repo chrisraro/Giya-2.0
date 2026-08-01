@@ -167,8 +167,16 @@ function decisionItem(check: MerchantCheckView | null): ReviewDecisionItem {
   };
 }
 
+// `ok: false as const` and the empty `fieldErrors` are both load-bearing: without
+// the const assertion `ok` widens to boolean and the value stops matching the
+// discriminated union, and `fieldErrors` is required on the failure arm.
 const noop = () =>
-  Promise.resolve({ ok: false, code: "INVALID_INPUT" as const, message: "not used" });
+  Promise.resolve({
+    ok: false as const,
+    code: "INVALID_INPUT" as const,
+    message: "not used",
+    fieldErrors: [] as string[],
+  });
 
 function renderScreen(
   check: MerchantCheckView | null,
