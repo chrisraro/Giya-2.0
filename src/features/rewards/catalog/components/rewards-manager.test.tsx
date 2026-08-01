@@ -1,8 +1,9 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { RewardsManager } from "./rewards-manager";
 import * as actions from "../actions";
+import type { EarningRuleShape } from "../economics";
 import type { CampaignOption, RewardCatalogItem } from "../types";
 
 vi.mock("../actions", () => ({
@@ -20,6 +21,16 @@ const liveCampaign: CampaignOption = {
   endsAt: null,
   claimable: true,
   terminal: false,
+};
+
+/** The seeded shop: 1 point per 50 centavos, i.e. 2 points per peso. */
+const seededEarningRule: EarningRuleShape = {
+  ruleType: "amount_rate",
+  rateCentavosPerPoint: 50,
+  fixedPoints: null,
+  rounding: "floor",
+  hasTiers: false,
+  gated: false,
 };
 
 function reward(overrides: Partial<RewardCatalogItem> = {}): RewardCatalogItem {
@@ -48,6 +59,7 @@ function renderManager(props: Partial<React.ComponentProps<typeof RewardsManager
       businessName="Kape Diaria"
       rewards={[reward()]}
       availableCampaigns={[liveCampaign]}
+      earningRule={seededEarningRule}
       {...props}
     />,
   );
@@ -269,5 +281,131 @@ describe("RewardsManager: the edit flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Turn off" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Nope.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The implied economics (../economics.ts).
+//
+// The point of these: the form already refuses six configurations claim_reward
+// would refuse forever, and refused NONE of the one that actually cost this
+// merchant money. A PHP 145 drink at 250 points and 2 points per peso is a
+// perfectly legal reward that gives away PHP 145 for PHP 125 of spend, and the
+// only thing standing between a merchant and that mistake is being shown the
+// PHP 125 while they are typing the 250.
+// ---------------------------------------------------------------------------
+
+describe("RewardsManager: implied spend in the form", () => {
+  function openCreateForm() {
+    fireEvent.click(screen.getByRole("button", { name: "New reward" }));
+    return within(screen.getByRole("dialog"));
+  }
+
+  it("shows the spend behind the seeded configuration as the merchant types it", () => {
+    renderManager({ rewards: [] });
+    const dialog = openCreateForm();
+
+    fireEvent.change(screen.getByLabelText("Points cost"), { target: { value: "250" } });
+
+    expect(
+      dialog.getByText("A customer reaches this after ₱125.00 of spend."),
+    ).toBeInTheDocument();
+  });
+
+  it("updates the figure on every keystroke, without waiting for a save", () => {
+    renderManager({ rewards: [] });
+    const dialog = openCreateForm();
+
+    fireEvent.change(screen.getByLabelText("Points cost"), { target: { value: "250" } });
+    expect(dialog.getByText(/₱125\.00 of spend/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Points cost"), { target: { value: "500" } });
+    expect(dialog.getByText(/₱250\.00 of spend/)).toBeInTheDocument();
+    expect(dialog.queryByText(/₱125\.00 of spend/)).not.toBeInTheDocument();
+  });
+
+  it("does not block the save: the sentence is information, not a rule", async () => {
+    vi.mocked(actions.createReward).mockResolvedValue({ ok: true });
+    renderManager({ rewards: [] });
+
+    fireEvent.click(screen.getByRole("button", { name: "New reward" }));
+    fireEvent.change(screen.getByLabelText("Reward name"), { target: { value: "Spanish Latte" } });
+    fireEvent.change(screen.getByLabelText("Points cost"), { target: { value: "250" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create reward" }));
+
+    await waitFor(() => expect(actions.createReward).toHaveBeenCalledTimes(1));
+  });
+
+  it("hedges rather than states a figure it cannot stand behind", () => {
+    renderManager({
+      rewards: [],
+      earningRule: { ...seededEarningRule, rounding: "ceil" },
+    });
+    const dialog = openCreateForm();
+
+    fireEvent.change(screen.getByLabelText("Points cost"), { target: { value: "250" } });
+
+    expect(dialog.getByText(/after about ₱/)).toBeInTheDocument();
+    expect(dialog.getByText(/rounds part-points up/)).toBeInTheDocument();
+  });
+
+  it("declines to invent a peso figure for a tiered earning rule", () => {
+    renderManager({
+      rewards: [],
+      earningRule: { ...seededEarningRule, ruleType: "tiered_amount", hasTiers: true },
+    });
+    const dialog = openCreateForm();
+
+    fireEvent.change(screen.getByLabelText("Points cost"), { target: { value: "250" } });
+
+    expect(dialog.getByText(/pays by spending tier/)).toBeInTheDocument();
+    expect(dialog.queryByText(/₱/)).not.toBeInTheDocument();
+  });
+
+  it("says nobody can earn points yet when there is no earning rule", () => {
+    renderManager({ rewards: [], earningRule: null });
+    const dialog = openCreateForm();
+
+    fireEvent.change(screen.getByLabelText("Points cost"), { target: { value: "250" } });
+
+    expect(dialog.getByText(/Nobody can earn points yet/)).toBeInTheDocument();
+    expect(dialog.getByText(/Set your earning rule on the Campaigns page/)).toBeInTheDocument();
+  });
+
+  it("says nothing at all about a free reward or a half-typed cost", () => {
+    renderManager({ rewards: [] });
+    const dialog = openCreateForm();
+
+    // The dialog opens with a cost of 0, which needs no spend sentence.
+    expect(dialog.queryByText(/A customer reaches this/)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Points cost"), { target: { value: "" } });
+    expect(dialog.queryByText(/A customer reaches this/)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Points cost"), { target: { value: "12.5" } });
+    expect(dialog.queryByText(/A customer reaches this/)).not.toBeInTheDocument();
+  });
+});
+
+describe("RewardsManager: implied spend in the list", () => {
+  it("captions every reward, so a changed earning rate is visible on all of them", () => {
+    renderManager({
+      rewards: [reward({ pointsCost: 250 }), reward({ id: "b", name: "Free pastry", pointsCost: 100 })],
+    });
+
+    expect(screen.getByText("A customer reaches this after ₱125.00 of spend.")).toBeInTheDocument();
+    expect(screen.getByText("A customer reaches this after ₱50.00 of spend.")).toBeInTheDocument();
+  });
+
+  it("leaves a free claim uncaptioned rather than saying PHP 0.00", () => {
+    renderManager({ rewards: [reward({ pointsCost: 0 })] });
+
+    expect(screen.queryByText(/A customer reaches this/)).not.toBeInTheDocument();
+  });
+
+  it("does not repeat the no-rule sentence on every card", () => {
+    renderManager({ rewards: [reward(), reward({ id: "b", name: "Free pastry" })], earningRule: null });
+
+    expect(screen.queryByText(/Nobody can earn points yet/)).not.toBeInTheDocument();
   });
 });

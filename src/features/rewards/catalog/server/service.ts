@@ -1,5 +1,6 @@
 import { getBaseRule } from "@/features/campaigns/server/repo";
 
+import { toEarningRuleShape, type EarningRuleShape } from "../economics";
 import type { CreateRewardInput, UpdateRewardInput } from "../schemas";
 import type { ActionResult, CampaignOption, CampaignRow, RewardCatalogItem, RewardRow } from "../types";
 import * as repo from "./repo";
@@ -139,6 +140,13 @@ async function pointsCostUnreachable(
 export interface CatalogView {
   rewards: RewardCatalogItem[];
   campaigns: CampaignOption[];
+  /**
+   * The active base earning rule, reduced to what ../economics.ts needs to say
+   * how much spending a points cost implies. Null means no usable rule, which
+   * the screen states as "nobody can earn points yet" rather than inventing a
+   * figure. Read here rather than on the page so the catalog stays one await.
+   */
+  earningRule: EarningRuleShape | null;
 }
 
 /**
@@ -152,9 +160,13 @@ export async function loadCatalog(
   businessId: string,
   asOf: Date = new Date(),
 ): Promise<ActionResult<CatalogView>> {
-  const [rewardsResult, campaignsResult] = await Promise.all([
+  // The base rule is read alongside the catalog, not instead of it: a missing
+  // rule is a legitimate state (it is what the "nobody can earn points yet"
+  // sentence is for), so it never turns the whole page into a read failure.
+  const [rewardsResult, campaignsResult, baseRule] = await Promise.all([
     repo.listRewards(businessId),
     repo.listCampaigns(businessId),
+    getBaseRule(businessId),
   ]);
 
   if (rewardsResult.error || campaignsResult.error) {
@@ -184,7 +196,14 @@ export async function loadCatalog(
     campaign: campaignById.get(reward.campaign_id) ?? null,
   }));
 
-  return { ok: true, data: { rewards, campaigns } };
+  return {
+    ok: true,
+    data: {
+      rewards,
+      campaigns,
+      earningRule: baseRule === null ? null : toEarningRuleShape(baseRule),
+    },
+  };
 }
 
 // -------------------------------------------------------------------- writes

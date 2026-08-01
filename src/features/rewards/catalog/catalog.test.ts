@@ -471,4 +471,48 @@ describe("loadCatalog", () => {
     expect(table("rewards").eq).toHaveBeenCalledWith("business_id", OWN_BUSINESS);
     expect(table("campaigns").eq).toHaveBeenCalledWith("business_id", OWN_BUSINESS);
   });
+
+  // The catalog screen states what each points cost implies in spend
+  // (../economics.ts), which it cannot do without the active base rule.
+  it("carries the active earning rule, reduced to what the spend sentence reads", async () => {
+    table("rewards").__result = { data: [], error: null };
+    table("campaigns").__result = { data: [], error: null };
+    table("points_rules").__result = {
+      data: {
+        id: "rule-1",
+        kind: "base",
+        rule_type: "amount_rate",
+        rate_centavos_per_point: 50,
+        fixed_points: null,
+        rounding: "floor",
+        tiers: null,
+        conditions: {},
+      },
+      error: null,
+    };
+
+    const result = await service.loadCatalog(OWN_BUSINESS);
+
+    expect(result.ok && result.data?.earningRule).toEqual({
+      ruleType: "amount_rate",
+      rateCentavosPerPoint: 50,
+      fixedPoints: null,
+      rounding: "floor",
+      hasTiers: false,
+      gated: false,
+    });
+    expect(table("points_rules").eq).toHaveBeenCalledWith("business_id", OWN_BUSINESS);
+  });
+
+  it("reads a missing earning rule as null, not as a failed catalog", async () => {
+    table("rewards").__result = { data: [rewardRow()], error: null };
+    table("campaigns").__result = { data: [campaignRow()], error: null };
+    mockNoBaseRule();
+
+    const result = await service.loadCatalog(OWN_BUSINESS);
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.data?.earningRule).toBeNull();
+    expect(result.ok && result.data?.rewards).toHaveLength(1);
+  });
 });

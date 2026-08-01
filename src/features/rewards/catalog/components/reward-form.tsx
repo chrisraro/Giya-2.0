@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useForm, type SubmitHandler } from "react-hook-form";
+import { useForm, useWatch, type SubmitHandler } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 
@@ -9,6 +9,12 @@ import { Button } from "@/components/ui/button";
 import { TextField } from "@/components/ui/text-field";
 import { cn } from "@/lib/utils";
 
+import {
+  describeImpliedSpend,
+  impliedSpend,
+  impliedSpendNote,
+  type EarningRuleShape,
+} from "../economics";
 import {
   MAX_CLAIM_EXPIRY_DAYS,
   MAX_POINTS_COST,
@@ -126,6 +132,11 @@ export interface RewardFormOutput {
 export interface RewardFormProps {
   /** Campaigns a NEW reward may hang off: the tenant's non-terminal ones. */
   campaigns: CampaignOption[];
+  /**
+   * The business's active base earning rule, or null when it has none. Drives
+   * the implied-spend sentence under the points cost; see ../economics.ts.
+   */
+  earningRule: EarningRuleShape | null;
   /** Present when editing; its campaign is fixed and shown read-only. */
   reward?: RewardCatalogItem | null;
   onSubmit: (output: RewardFormOutput) => void;
@@ -139,6 +150,7 @@ const DEFAULT_CLAIM_EXPIRY_DAYS = "30";
 
 export function RewardForm({
   campaigns,
+  earningRule,
   reward = null,
   onSubmit,
   onCancel,
@@ -149,6 +161,7 @@ export function RewardForm({
 
   const {
     register,
+    control,
     handleSubmit,
     formState: { errors },
   } = useForm<RewardFormValues>({
@@ -166,6 +179,20 @@ export function RewardForm({
       terms: reward?.terms ?? "",
     },
   });
+
+  // The sentence follows the field as it is typed, so the merchant sees the
+  // consequence while they are still choosing the number rather than after
+  // saving. A half-typed or non-numeric cost simply produces nothing: the
+  // points-cost field has its own validation message for that, and a second
+  // complaint about the same keystroke would be noise.
+  const typedPointsCost = useWatch({ control, name: "pointsCost" }) ?? "";
+  const trimmedPointsCost = typedPointsCost.trim();
+  const spend = impliedSpend(
+    earningRule,
+    /^\d+$/.test(trimmedPointsCost) ? Number(trimmedPointsCost) : Number.NaN,
+  );
+  const spendSentence = describeImpliedSpend(spend);
+  const spendNote = impliedSpendNote(spend);
 
   const submit: SubmitHandler<RewardFormValues> = (values) => {
     const trimmedDescription = values.description?.trim();
@@ -280,6 +307,28 @@ export function RewardForm({
           {...register("totalInventory")}
         />
       </div>
+
+      {/* The implied economics, stated and left alone.
+          NOT an error and NOT a celebration, so it borrows neither vocabulary:
+          no `text-error`, which on this form means "claim_reward would refuse
+          this", and no mango/tertiary, which on this screen means "points and
+          rewards" and would read as a highlight on a line whose whole job is to
+          be a quiet fact. A container surface and on-surface-variant text put it
+          at the same weight as the helper text above it, in both themes.
+          `aria-live` because the sentence changes under the cursor while the
+          merchant types, and a figure only sighted users get is not the
+          feature. */}
+      {spendSentence ? (
+        <div
+          aria-live="polite"
+          className="flex flex-col gap-1 rounded-md3-xs bg-surface-container-low px-3 py-2"
+        >
+          <p className="text-body-s text-on-surface-variant">{spendSentence}</p>
+          {spendNote ? (
+            <p className="text-body-s text-on-surface-variant">{spendNote}</p>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <TextField

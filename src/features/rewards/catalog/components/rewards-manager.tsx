@@ -8,6 +8,7 @@ import { Chip } from "@/components/ui/chip";
 import { Dialog } from "@/components/ui/dialog";
 
 import { createReward, setRewardActive, updateReward } from "../actions";
+import type { EarningRuleShape } from "../economics";
 import { RewardForm, type RewardFormOutput } from "./reward-form";
 import { RewardList } from "./reward-list";
 import type { CampaignOption, RewardCatalogItem } from "../types";
@@ -19,6 +20,12 @@ export interface RewardsManagerProps {
   rewards: RewardCatalogItem[];
   /** Campaigns a new reward may be parented to (the non-terminal ones). */
   availableCampaigns: CampaignOption[];
+  /**
+   * The business's active base earning rule, or null when it has none. Both the
+   * form and the list use it to say what a points cost implies in spend; see
+   * ../economics.ts for why that sentence exists.
+   */
+  earningRule: EarningRuleShape | null;
 }
 
 type StatusFilter = "all" | "active" | "inactive";
@@ -36,7 +43,12 @@ const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
  * mutation refreshes this page's data - the same convention as
  * src/features/campaigns/components/campaigns-manager.tsx.
  */
-export function RewardsManager({ businessName, rewards, availableCampaigns }: RewardsManagerProps) {
+export function RewardsManager({
+  businessName,
+  rewards,
+  availableCampaigns,
+  earningRule,
+}: RewardsManagerProps) {
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<RewardCatalogItem | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
@@ -151,6 +163,7 @@ export function RewardsManager({ businessName, rewards, availableCampaigns }: Re
 
       <RewardList
         rewards={filtered}
+        earningRule={earningRule}
         onEdit={openEdit}
         onSetActive={handleSetActive}
         emptyBody={
@@ -167,6 +180,7 @@ export function RewardsManager({ businessName, rewards, availableCampaigns }: Re
       >
         <RewardForm
           campaigns={availableCampaigns}
+          earningRule={earningRule}
           reward={editing}
           onSubmit={handleSubmit}
           onCancel={closeDialog}
