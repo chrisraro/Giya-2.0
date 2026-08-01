@@ -629,6 +629,68 @@ export function operatorFailureNotice(
   };
 }
 
+// ---------------------------------------------------------------------------
+// The escalation notice (0036)
+// ---------------------------------------------------------------------------
+//
+// A DIFFERENT QUESTION, AND IT HAS TO LOOK LIKE ONE. Every other receipt in
+// this queue is here because a rule fired, and the reviewer's job is to judge
+// the receipt. An escalated receipt is here because a CUSTOMER DISAGREED WITH
+// US, and the reviewer's job is to judge OUR MACHINE. A reviewer who does not
+// know which of those they are doing will read the fraud panel below and reject
+// on the strength of the very signal the customer is contesting.
+//
+// SO IT NAMES THE MACHINE'S VERDICT AND ASKS THEM TO SECOND-GUESS IT. That is
+// why `escalateReceipt` keeps `reject_reason` when it moves the row back: the
+// verdict is the question, not a leftover.
+//
+// THE REGISTER IS THE SAME AS `merchantCheckNotice`: the subject is Giya's own
+// uncertainty, never the customer's honesty. "Our reader rejected this and the
+// customer says that is wrong" is a statement about us. A notice that opened
+// with "this customer is disputing" would prime a reviewer to defend the
+// rejection, and the whole reason this feature exists is that our rejections
+// have a known error rate: OCR in this project's own testing has misread a
+// TIN's `009` as `899` and "Bilao" as "Bilbao".
+//
+// NOTHING HERE REACHES THE CONSUMER, and nothing from the consumer reaches
+// here. There is no free-text field on an escalation on purpose: a message box
+// would become a channel between a customer and a shop that neither doc 15 nor
+// doc 33 has a moderation story for, and the receipt photograph is the whole
+// argument anyway.
+
+export interface EscalationNotice {
+  title: string;
+  body: string;
+  /** The machine's verdict, as a merchant-facing label. Null when none was recorded. */
+  rejectedAsLabel: string | null;
+}
+
+/**
+ * The banner for a receipt the customer pushed back into this queue, or null
+ * for the overwhelming majority that the pipeline routed itself.
+ */
+export function escalationNotice(input: {
+  escalated: boolean;
+  rejectReason: string | null;
+}): EscalationNotice | null {
+  if (!input.escalated) return null;
+
+  const rejectedAsLabel =
+    input.rejectReason === null
+      ? null
+      : (REJECT_REASON_LABELS[input.rejectReason] ?? input.rejectReason);
+
+  return {
+    title: "Your customer asked you to look at this again",
+    body:
+      "We turned this receipt down and the customer thinks that was wrong, so " +
+      "they sent it to you. You are the only one who can settle it: you have " +
+      "the till record and you may well remember the sale. Read the photo, and " +
+      "if the purchase is real, approve it and they get their points as normal.",
+    rejectedAsLabel,
+  };
+}
+
 export function merchantCheckNotice(
   meta: ParseMetaView | null,
   businessName: string,

@@ -254,6 +254,249 @@ export function rejectionCopy(reason: ReceiptRejectReason | null): ReceiptOutcom
   }
 }
 
+// ===========================================================================
+// ESCALATION: the consumer's one way to contest a rejection
+// ===========================================================================
+//
+// THE PROBLEM THIS CLOSES, and why it belongs in THIS file. Two of the strings
+// above have been quietly dishonest since they were written. `unreadable` says
+// "take another photo" and `fraud_suspected` says "the store can take another
+// look at it for you", and neither was a MECHANISM: there was no action a
+// consumer could take that put a rejected receipt in front of a merchant, and
+// `receipts_sha_unique` (0017) is global and covers rejected rows, so the
+// identical photograph could never be resubmitted. The customer this matters
+// to spent PHP 500, photographed a folded receipt, and binned the paper before
+// they read the rejection. They do not complain. They delete the app and tell
+// the merchant at the counter.
+//
+// One tap now moves a rejected receipt into that merchant's review queue with
+// the image attached, and the merchant decides through the same `reviewReceipt`
+// service as any other approval. These are the words for it, and they live here
+// rather than beside the button for the reason the header of this file gives:
+// this module is the only set of consumer receipt strings, and it is the only
+// one the forbidden-vocabulary sweep in receipt-copy.test.ts covers. A second
+// set written next to a component would look identical on the day it was
+// written and would be one careless edit away from naming the check that
+// tripped.
+//
+// ---------------------------------------------------------------------------
+// WHO MAY NOT ESCALATE, AND WHY IT IS THE WHOLE FRAUD FAMILY
+// ---------------------------------------------------------------------------
+// `fraud_suspected` is obvious: handing an abuser a retry loop against a human
+// is precisely the "submit, observe, adjust, resubmit" iteration doc 37 warns
+// about, and it is the reason the fraud_suspected copy above offers no retake
+// either. The interesting one is `duplicate`, which is deterministic like
+// fraud but whose most likely innocent cause - an honest double scan - is also
+// the single most common real mistake a customer makes. It is excluded too, on
+// three counts:
+//
+//   1. IT IS FRAUD FAMILY, and this codebase already says so in two places:
+//      `isFraudFamilyRejectReason` in server/cooldown.ts and
+//      `FRAUD_FAMILY_REASONS` in review/presenter.ts both group duplicate with
+//      fraud_suspected, because both advance doc 37's strike ladder toward a
+//      scanning block. A consumer rejected as duplicate has ALREADY taken a
+//      strike. Splitting the family here would leave the copy module and the
+//      cooldown module disagreeing about what the fraud family is, and the
+//      disagreement would be invisible until someone tuned one of them.
+//   2. THE HONEST DOUBLE SCAN ALREADY HAS THE MONEY. If a customer genuinely
+//      scanned one receipt twice, the first scan was approved and the points
+//      are in their wallet. There is nothing for a merchant to award, so the
+//      escalation would buy the customer nothing and cost the merchant a
+//      queue item.
+//   3. IT WOULD MOSTLY FAIL AT THE DATABASE ANYWAY. A duplicate's twin is live
+//      by definition, so wherever a receipt number was read, moving the
+//      rejected row back into 'review' collides with `receipts_number_unique`
+//      (0017, and receipt_escalation_smoke.sql test 7 proves it). An
+//      affordance that mostly cannot complete is worse than no affordance.
+//
+// The genuine false positive - two different receipts from one shop, same
+// total, photographed alike, caught by the image hash - keeps exactly the
+// remedy it has today, which the fraud_suspected copy already names: a person
+// at the store. That remedy is worse than a button, and it is the honest one.
+//
+// A NULL OR UNRECOGNISED reason IS escalatable. It falls into the generic
+// bucket whose copy already offers a retake, and the direction to fail in on a
+// reason nobody recorded is the one that favours the customer.
+
+/**
+ * How many escalations one consumer may have OPEN at a time.
+ *
+ * OPEN, not lifetime, and that distinction is the whole design. Every merchant
+ * decision frees a slot and doc 36 targets under 24h for one, so this is a
+ * concurrency bound on unpaid human work rather than a quota of appeals. A
+ * lifetime cap would punish exactly the customer this feature exists for: the
+ * one whose merchant keeps being right to approve.
+ *
+ * WHY THREE. One is too few: a real customer can collect two bad rejections on
+ * a single afternoon at two different shops, and a cap of one would make the
+ * second wait on a decision by a merchant who has nothing to do with it. Five
+ * or ten is too many: the cap's job is to bound what a single scripted account
+ * can put in front of a human, and three open items spread across the platform
+ * is a rounding error on any one queue while still being a hard ceiling. Three
+ * also survives the honest worst case a person can describe out loud, which is
+ * the test a number like this should pass.
+ */
+export const MAX_OPEN_ESCALATIONS = 3;
+
+/**
+ * The two reasons that offer no escalation. Deliberately the same pair as
+ * `FRAUD_FAMILY_REASONS` in review/presenter.ts and `isFraudFamilyRejectReason`
+ * in server/cooldown.ts. Three copies of one list is two too many, and the
+ * other two predate this one; unifying them is a refactor for the slice that
+ * has a reason to touch the cooldown ladder, and it is recorded here as debt
+ * rather than done in passing on a money path.
+ */
+const NOT_ESCALATABLE: ReadonlySet<string> = new Set(["duplicate", "fraud_suspected"]);
+
+/** Whether a rejection reason may be contested. See the note above. */
+export function canEscalateRejection(reason: ReceiptRejectReason | null): boolean {
+  return reason === null ? true : !NOT_ESCALATABLE.has(reason);
+}
+
+/**
+ * What the consumer's status screen should render about escalation.
+ *
+ *   unavailable  nothing to say: still processing, approved, or a rejection
+ *                that is not contestable.
+ *   offered      rejected, contestable, never escalated. The button.
+ *   open         escalated and waiting on the merchant.
+ *   closed       escalated, and the merchant rejected it again. The end of the
+ *                road, said plainly.
+ *
+ * A receipt that was escalated and then APPROVED resolves to `unavailable`
+ * rather than `closed`: the points are the answer, and a note about the appeal
+ * process on top of "Points added" would be an anticlimax at the one moment
+ * this product is allowed to be pleased with itself.
+ */
+export type EscalationState = "unavailable" | "offered" | "open" | "closed";
+
+export function escalationState(input: {
+  status: ReceiptStatus;
+  rejectReason: ReceiptRejectReason | null;
+  /** `receipts.escalated_at`, null on every receipt the pipeline routed itself. */
+  escalatedAt: string | null;
+}): EscalationState {
+  if (input.escalatedAt !== null) {
+    if (input.status === "review") return "open";
+    return input.status === "rejected" ? "closed" : "unavailable";
+  }
+  if (input.status !== "rejected") return "unavailable";
+  return canEscalateRejection(input.rejectReason) ? "offered" : "unavailable";
+}
+
+export interface EscalationOfferCopy {
+  /** The button. */
+  label: string;
+  /** The line under it, explaining what tapping does. */
+  body: string;
+  confirmTitle: string;
+  confirmBody: string;
+  confirmLabel: string;
+  cancelLabel: string;
+}
+
+/**
+ * The offer.
+ *
+ * NO APOLOGY AND NO ACCUSATION. It does not say we got it wrong (we may not
+ * have) and it does not hint that the customer might be trying something (they
+ * almost certainly are not). It says what the button does and who decides,
+ * because the merchant genuinely is the best-placed person: they hold the POS
+ * record and they may remember the customer.
+ *
+ * It promises a DECISION, never an outcome. "The store will decide" is a
+ * promise we can keep; "the store will add your points" is one only the store
+ * can make, and making it here would turn every honest rejection into a
+ * betrayal.
+ */
+export function escalationOfferCopy(): EscalationOfferCopy {
+  return {
+    label: "Ask the store to look at this",
+    body: "A person at the store can open your photo and decide for themselves.",
+    confirmTitle: "Send this to the store?",
+    confirmBody:
+      "They will see your photo and what we read from it, and decide whether to add your points. That usually happens within a day.",
+    confirmLabel: "Yes, send it",
+    cancelLabel: "Not now",
+  };
+}
+
+/**
+ * Waiting on the merchant. Deliberately NOT `reviewCopy()`, even though the
+ * receipt is in the same database status: that copy says "Some receipts get a
+ * quick look from a person", which is a sentence about the pipeline and reads
+ * as a brush-off to somebody who just asked a question. This one says the
+ * customer's own action back to them.
+ */
+export function escalationOpenCopy(): ReceiptOutcomeCopy {
+  return {
+    icon: "hourglass_top",
+    title: "The store is looking at this again",
+    body: "You asked them to take another look, and that usually happens within a day. There is nothing else you need to do, and we will update your wallet if points are added.",
+    action: { label: "Back to wallet", href: WALLET_HREF },
+  };
+}
+
+/**
+ * The merchant looked again and still said no.
+ *
+ * Rendered ALONGSIDE `rejectionCopy(reason)` rather than instead of it, so the
+ * reason keeps its own words and this module keeps one rejection matrix. It is
+ * two sentences and it does not soften: a customer who has used their one
+ * appeal is owed a straight answer about where they stand, and a vague one
+ * would send them round the loop again looking for a button that is not there.
+ */
+export function escalationClosedCopy(): { title: string; body: string } {
+  return {
+    title: "The store looked at this again",
+    body: "A person at the store went through your photo and made the call. There is no further look available for this receipt.",
+  };
+}
+
+/**
+ * Every way an escalation can be refused, as a sentence.
+ *
+ * These are the SERVER's typed refusals rendered for a person, and they live
+ * here for the same reason the rest of the matrix does: the sweep. Two of them
+ * are worth reading twice.
+ *
+ *   NOT_FOUND covers both "no such receipt" and "not yours". One sentence for
+ *   both, per doc 13 and matching `getMyReceipt`: distinguishing them would
+ *   turn the action into an id oracle.
+ *
+ *   SUPERSEDED is the `receipts_number_unique` collision, and it is the hardest
+ *   sentence in this file. A live receipt at that business already claims this
+ *   one's number, which is almost always the customer's own successful
+ *   resubmission and is occasionally somebody else's receipt. The copy says
+ *   only what is true in both cases - something else holds the claim - and
+ *   sends them to their own history to see it. It names no receipt, no number
+ *   and no person, and it never says "duplicate".
+ */
+export type EscalationRefusal =
+  | "NOT_FOUND"
+  | "NOT_ESCALATABLE"
+  | "ALREADY_ESCALATED"
+  | "LIMIT_REACHED"
+  | "SUPERSEDED"
+  | "UNAVAILABLE";
+
+export function escalationRefusalCopy(refusal: EscalationRefusal): string {
+  switch (refusal) {
+    case "NOT_FOUND":
+      return "We could not find that receipt. Open it again from your receipts list and try once more.";
+    case "NOT_ESCALATABLE":
+      return "This one cannot be sent to the store from here. If you think that is not right, the store can still take a look at it for you in person.";
+    case "ALREADY_ESCALATED":
+      return "You have already sent this one to the store. They will make the call and your wallet will update if points are added.";
+    case "LIMIT_REACHED":
+      return "You already have three receipts waiting with stores. Once they have answered one of those, you can send this one too.";
+    case "SUPERSEDED":
+      return "This receipt cannot go back to the store, because another scan from the same store has already taken its place. Have a look at your receipts list.";
+    case "UNAVAILABLE":
+      return "We could not send this to the store just now. Try again in a moment.";
+  }
+}
+
 /**
  * The one-line status used in dense contexts: the wallet's pending entry and
  * each row of the receipts history. Short, complete sentences are wrong here;
@@ -262,17 +505,25 @@ export function rejectionCopy(reason: ReceiptRejectReason | null): ReceiptOutcom
  * The pending label carries NO points amount, per doc 36's wallet UX contract:
  * "no points amount, the amount is unknown until parse". Promising a number
  * before the ledger has one would be the first lie the wallet ever tells.
+ *
+ * `escalated` is optional and defaults to false, so every existing caller keeps
+ * its exact label. It only ever changes the `review` line, and only to say the
+ * customer's own action back to them: a row that reads "Being reviewed by the
+ * store" gives no hint that the reader is the reason it is there, which in a
+ * list of twelve receipts is the difference between finding the one they
+ * appealed and scrolling past it.
  */
 export function receiptStatusLabel(
   status: ReceiptStatus,
   rejectReason: ReceiptRejectReason | null = null,
+  escalated = false,
 ): string {
   switch (status) {
     case "queued":
     case "processing":
       return "Processing receipt";
     case "review":
-      return "Being reviewed by the store";
+      return escalated ? "The store is looking at this again" : "Being reviewed by the store";
     case "approved":
       return "Points added";
     case "rejected":

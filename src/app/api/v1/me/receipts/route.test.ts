@@ -59,6 +59,7 @@ function receipt(index: number, overrides: Partial<ReceiptListItemDTO> = {}): Re
     createdAt: `2026-07-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
     processedAt: "2026-07-25T03:15:40.000Z",
     pointsAwarded: 245,
+    escalatedAt: null,
     ...overrides,
   };
 }
@@ -132,6 +133,7 @@ describe("envelope", () => {
       created_at: "2026-07-01T00:00:00.000Z",
       processed_at: "2026-07-25T03:15:40.000Z",
       points_awarded: 245,
+      escalated_at: null,
     });
   });
 
@@ -333,6 +335,7 @@ describe("no fraud internals in the response body", () => {
       "business_id",
       "business_name",
       "created_at",
+      "escalated_at",
       "merchant_name",
       "points_awarded",
       "processed_at",

@@ -16,6 +16,7 @@ import {
   REJECT_REASON_LABELS,
   REJECT_REASON_ORDER,
   compositeFraudScore,
+  escalationNotice,
   fieldChip,
   formatConfidence,
   formatDateTime,
@@ -239,6 +240,14 @@ export function ReviewDecisionScreen({
   // the reviewer is looking at, and because on this path there is no merchant
   // check to render at all: the OCR call never came back, so Stage 5 never ran.
   const operatorNotice = operatorFailureNotice(item.parseMeta);
+  // 0036. Rendered ABOVE everything else on the screen, including the operator
+  // and merchant notices, because it changes what the reviewer is being asked
+  // rather than adding a fact to it. Everything below reads differently once
+  // you know a customer is contesting the verdict.
+  const escalation = escalationNotice({
+    escalated: item.escalated,
+    rejectReason: item.rejectReason,
+  });
 
   const totalCentavos = parseOptionalPeso(fields.total);
   const confirmTotalLabel =
@@ -499,6 +508,36 @@ export function ReviewDecisionScreen({
           className="rounded-md3-md border border-outline bg-surface-container p-4 text-body-m text-on-surface"
         >
           {outcome}
+        </div>
+      )}
+
+      {/* ---- 0036: the customer is contesting our verdict ---------------- */}
+      {/*
+        THE ONE NOTICE THAT CHANGES THE QUESTION. Every other receipt in this
+        queue is here because a rule fired and the reviewer judges the receipt.
+        This one is here because a customer disagreed with us, and the reviewer
+        judges OUR MACHINE. Without this banner they would open the evidence
+        panel below and reject on the strength of the very signal being
+        contested.
+
+        Secondary container rather than error: a customer asking a question is
+        not an alarm, and the register throughout is Giya's own uncertainty
+        rather than the customer's honesty. The verdict being re-decided is
+        printed in as many words, because it IS the question.
+      */}
+      {escalation !== null && (
+        <div
+          role="note"
+          className="flex flex-col gap-2 rounded-md3-md bg-secondary-container p-4"
+        >
+          <p className="text-title-m text-on-secondary-container">{escalation.title}</p>
+          <p className="text-body-m text-on-secondary-container">{escalation.body}</p>
+          {escalation.rejectedAsLabel !== null && (
+            <p className="text-body-s text-on-secondary-container">
+              Our reader turned it down as:{" "}
+              <span className="font-mono">{escalation.rejectedAsLabel}</span>
+            </p>
+          )}
         </div>
       )}
 

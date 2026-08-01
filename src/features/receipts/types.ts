@@ -100,6 +100,25 @@ export interface ReceiptListItemDTO {
   createdAt: string;
   processedAt: string | null;
   pointsAwarded: number | null;
+  /**
+   * ISO-8601 instant the submitter asked the merchant to look again, or null on
+   * every receipt the pipeline routed by itself (0036).
+   *
+   * IT IS ON THIS DTO BECAUSE THE SCREEN CANNOT BE HONEST WITHOUT IT. The
+   * escalation is one per receipt forever, and after a merchant re-rejects one
+   * the status and reason are indistinguishable from a first rejection. Without
+   * this field the screen would offer the button a second time and the server
+   * would refuse it, which is the worst of both: the guard holds and the
+   * surface lies first.
+   *
+   * It does not breach the rule the comment above states. 0036 adds
+   * `escalated_at` to 0017's column grant deliberately and argues it there: it
+   * is a record of an action the READER THEMSELVES took, holding nothing they
+   * did not supply, about no receipt but their own. The withheld columns are
+   * evidence about the DECISION (reviewer prose, per-field provenance, the
+   * hashes a duplicate oracle is built from) and remain withheld.
+   */
+  escalatedAt: string | null;
 }
 
 /** A parsed line item. Analytics enrichment, never a gate on approval (doc 36 Stage 7). */
@@ -133,4 +152,6 @@ export interface ReceiptRealtimeRow {
   reject_reason: string | null;
   business_id: string | null;
   processed_at: string | null;
+  /** Granted by 0036, so WALRUS will send it to a consumer's subscription. */
+  escalated_at: string | null;
 }

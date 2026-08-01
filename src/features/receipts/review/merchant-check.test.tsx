@@ -144,6 +144,7 @@ function decisionItem(check: MerchantCheckView | null): ReviewDecisionItem {
     createdAt: "2026-07-25T09:00:00.000Z",
     reviewedAt: null,
     rejectReason: null,
+    escalated: false,
     fields: {
       merchantName: check?.headerText ?? null,
       receiptNumber: "0012345",

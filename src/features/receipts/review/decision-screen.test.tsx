@@ -34,6 +34,7 @@ function decisionItem(overrides: Partial<ReviewDecisionItem> = {}): ReviewDecisi
     createdAt: "2026-07-25T09:00:00.000Z",
     reviewedAt: null,
     rejectReason: null,
+    escalated: false,
     fields: {
       merchantName: "SARI SARI EXPRES",
       receiptNumber: "0012345",
@@ -127,6 +128,53 @@ beforeEach(() => {
 });
 
 // ===========================================================================
+
+// ===========================================================================
+// 0036: the receipt the customer pushed back
+// ===========================================================================
+//
+// The reviewer is being asked a different question on these. Without the
+// banner they would open the evidence panel and reject on the strength of the
+// very signal the customer is contesting.
+
+describe("an escalated receipt", () => {
+  it("says up front that the customer asked for another look", () => {
+    renderScreen(decisionItem({ escalated: true, rejectReason: "unreadable" }));
+    expect(screen.getByText("Your customer asked you to look at this again")).toBeInTheDocument();
+  });
+
+  it("prints the verdict being re-decided, because that IS the question", () => {
+    renderScreen(decisionItem({ escalated: true, rejectReason: "unreadable" }));
+    expect(screen.getByText(/Our reader turned it down as/)).toBeInTheDocument();
+    expect(screen.getByText("Could not be read")).toBeInTheDocument();
+  });
+
+  it("keeps the register on our own uncertainty and never accuses the customer", () => {
+    renderScreen(decisionItem({ escalated: true, rejectReason: "unreadable" }));
+    const note = screen.getByRole("note");
+    // A reviewer primed to suspect their own customer is a reviewer who will
+    // reject one, and our rejections have a known error rate.
+    expect(note.textContent).not.toMatch(/dispute|claims|alleges|insists|fraud|suspicious/i);
+    expect(note.textContent).toMatch(/we turned this receipt down/i);
+  });
+
+  it("still offers the ordinary decision actions: the escalation changes the question, not the powers", () => {
+    renderScreen(decisionItem({ escalated: true, rejectReason: "unreadable" }));
+    expect(screen.getByRole("button", { name: "Approve and award points" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
+  });
+
+  it("renders the banner even when no reason was recorded", () => {
+    renderScreen(decisionItem({ escalated: true, rejectReason: null }));
+    expect(screen.getByText("Your customer asked you to look at this again")).toBeInTheDocument();
+    expect(screen.queryByText(/Our reader turned it down as/)).not.toBeInTheDocument();
+  });
+
+  it("says nothing at all on a receipt the pipeline routed itself", () => {
+    renderScreen(decisionItem({ escalated: false }));
+    expect(screen.queryByText(/asked you to look again/i)).not.toBeInTheDocument();
+  });
+});
 
 describe("the evidence display contract", () => {
   it("puts the receipt image beside the editable fields", () => {

@@ -68,6 +68,7 @@ function receipt(overrides: Partial<ReceiptListItemDTO> = {}): ReceiptListItemDT
     createdAt: "2026-07-25T03:15:00.000Z",
     processedAt: null,
     pointsAwarded: null,
+    escalatedAt: null,
     ...overrides,
   };
 }

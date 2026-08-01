@@ -1928,6 +1928,7 @@ export type Database = {
           created_at: string
           created_by: string | null
           device_id: string | null
+          escalated_at: string | null
           id: string
           image_hash: string
           image_path: string
@@ -1961,6 +1962,7 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           device_id?: string | null
+          escalated_at?: string | null
           id?: string
           image_hash: string
           image_path: string
@@ -1994,6 +1996,7 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           device_id?: string | null
+          escalated_at?: string | null
           id?: string
           image_hash?: string
           image_path?: string

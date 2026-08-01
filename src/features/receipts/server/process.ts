@@ -254,7 +254,7 @@ const RIVAL_PROBE_MIN_WORD_LENGTH = 4;
  * `customer_blacklisted` and `fraud_composite` are not on the ladder at all.
  * They are doc 37's consequences and are tuned in doc 37's terms, not here.
  */
-type ReviewReason =
+export type ReviewReason =
   // The forced family: these upgrade an approval, and only these.
   | "amount_sanity"
   | "customer_blacklisted"
@@ -267,7 +267,21 @@ type ReviewReason =
   | "fraud_composite"
   | "staff_self_scan"
   // D7: our failure, not the photograph's. See `handleOcrFailure`.
-  | "ocr_operator_failure";
+  | "ocr_operator_failure"
+  // The tenth reason, and the only one THIS PIPELINE NEVER WRITES. A consumer
+  // contested a rejection and pushed the receipt back into the queue itself
+  // (../server/escalate.ts). It is a member of this union rather than a
+  // vocabulary of its own because `parse_meta.review_reasons` is one list with
+  // one meaning - why is a human looking at this - and 0035's breakdown counts
+  // that list. An escalation that did not name itself here would be counted as
+  // whatever rejected the receipt originally, which would credit
+  // `parse_confidence_low` for queue items the parser had nothing to do with
+  // and tune the loosening ladder on a number nobody measured.
+  //
+  // It is on NEITHER family above and must never reach `forceReview`: no
+  // threshold produced it and no threshold can loosen it away. It is a customer
+  // exercising a remedy, which is not a rule that can be tuned.
+  | "consumer_escalation";
 
 // ---------------------------------------------------------------------------
 // Dependencies

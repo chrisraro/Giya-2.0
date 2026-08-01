@@ -166,6 +166,18 @@ export interface ReviewQueueItem {
    * open it expecting to decide it.
    */
   submittedByViewer: boolean;
+  /**
+   * The CUSTOMER put this receipt here, by contesting a rejection (0036), as
+   * opposed to the pipeline routing it.
+   *
+   * It is on the queue row rather than only on the decision screen because the
+   * reviewer is being asked a DIFFERENT QUESTION on these - "was our machine
+   * wrong?" rather than "is this suspicious?" - and which question they are
+   * answering changes how they read the evidence before they open it. A queue
+   * that flattened the two would have them looking for fraud on a receipt whose
+   * whole story is that a customer says we got it wrong.
+   */
+  escalated: boolean;
 }
 
 /** Doc 37's "consumer's history summary", scoped to the viewing tenant. */
@@ -185,7 +197,15 @@ export interface ReviewDecisionItem {
   submittedByViewer: boolean;
   createdAt: string;
   reviewedAt: string | null;
+  /**
+   * On an ESCALATED receipt this is the verdict being re-decided rather than a
+   * record of a finished decision: `escalateReceipt` deliberately keeps
+   * `reject_reason` when it moves the row back to `review`, because the
+   * machine's answer is the thing the reviewer is being asked about.
+   */
   rejectReason: string | null;
+  /** The customer contested a rejection to get this here (0036). */
+  escalated: boolean;
   fields: ReviewFieldValues;
   lineItems: ReviewLineItemView[];
   parseMeta: ParseMetaView | null;

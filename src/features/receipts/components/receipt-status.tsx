@@ -7,10 +7,17 @@ import { motion, useReducedMotion } from "motion/react";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
+import { PendingButton } from "@/components/ui/pending-button";
+import { Button } from "@/components/ui/button";
+
 import type { ReceiptListItemDTO, ReceiptRejectReason, ReceiptStatus } from "../types";
 import { fetchReceiptDetail } from "./receipt-api-client";
 import {
   approvedCopy,
+  escalationClosedCopy,
+  escalationOfferCopy,
+  escalationOpenCopy,
+  escalationState,
   isSettledStatus,
   pendingCopy,
   receiptOutcome,
@@ -36,8 +43,20 @@ import { useReceiptRealtime } from "./use-receipt-realtime";
 const ACTION_CLASS =
   "inline-flex h-12 items-center rounded-full px-6 text-label-l transition-colors duration-200 ease-standard hover:opacity-90 outline-none focus-visible:ring-2 focus-visible:ring-primary";
 
+/**
+ * The escalation server action (../actions.ts), injected rather than imported.
+ *
+ * Optional so a caller that has not wired it renders the rejection exactly as
+ * before rather than crashing, and so this component stays unit-testable
+ * without a server runtime.
+ */
+export type EscalateAction = (input: unknown) => Promise<
+  { ok: true } | { ok: false; refusal: string; message: string }
+>;
+
 export interface ReceiptStatusProps {
   receipt: ReceiptListItemDTO;
+  onEscalate?: EscalateAction;
 }
 
 /**
@@ -54,10 +73,19 @@ export interface ReceiptStatusProps {
  *     transition into `approved` the caller fetches the authoritative number.
  *   - A status leaving `approved` clears a previously shown points figure, so
  *     a reversal can never leave a stale celebratory number on screen.
+ *   - `escalated_at` follows the same "absent means not sent" rule as every
+ *     other column. It is granted by 0036 so WALRUS will send it, but a payload
+ *     from a build that predates the column, or a partial update, must not be
+ *     read as the customer un-escalating: nothing ever clears that field.
  */
 export function applyReceiptChange(
   current: ReceiptListItemDTO,
-  change: { status?: string; reject_reason?: string | null; processed_at?: string | null },
+  change: {
+    status?: string;
+    reject_reason?: string | null;
+    processed_at?: string | null;
+    escalated_at?: string | null;
+  },
 ): ReceiptListItemDTO {
   const nextStatus = isReceiptStatus(change.status) ? change.status : current.status;
 
@@ -70,6 +98,7 @@ export function applyReceiptChange(
         : toRejectReason(change.reject_reason),
     processedAt: change.processed_at === undefined ? current.processedAt : change.processed_at,
     pointsAwarded: nextStatus === "approved" ? current.pointsAwarded : null,
+    escalatedAt: change.escalated_at === undefined ? current.escalatedAt : change.escalated_at,
   };
 }
 
@@ -109,7 +138,11 @@ export function statusCopy(receipt: ReceiptListItemDTO): ReceiptOutcomeCopy {
     case "approved":
       return approvedCopy(receipt.pointsAwarded, receipt.businessName);
     case "review":
-      return reviewCopy();
+      // An ESCALATED receipt is in the same database status as one the pipeline
+      // routed, and must not read like one. `reviewCopy` says "some receipts
+      // get a quick look from a person", which is a sentence about the pipeline
+      // and lands as a brush-off on somebody who just asked a question.
+      return escalationState(receipt) === "open" ? escalationOpenCopy() : reviewCopy();
     case "rejected":
       return rejectionCopy(receipt.rejectReason);
     case "pending":
@@ -117,9 +150,20 @@ export function statusCopy(receipt: ReceiptListItemDTO): ReceiptOutcomeCopy {
   }
 }
 
-export function ReceiptStatus({ receipt }: ReceiptStatusProps) {
+export function ReceiptStatus({ receipt, onEscalate }: ReceiptStatusProps) {
   const [state, setState] = React.useState<ReceiptListItemDTO>(receipt);
   const receiptId = receipt.receiptId;
+
+  // ---- Escalation ---------------------------------------------------------
+  // Two taps, not one: the button reveals a confirmation, and the confirmation
+  // sends. An escalation is one per receipt forever, so spending it by brushing
+  // a screen would be a genuinely costly misfire, and this is the surface for
+  // somebody who has just been told they lost money. A confirm panel rather
+  // than a Dialog because this is the consumer surface: mobile-first, in the
+  // flow of the page, nothing to trap focus and nothing to dismiss by accident.
+  const [confirming, setConfirming] = React.useState(false);
+  const [escalatePending, setEscalatePending] = React.useState(false);
+  const [escalateError, setEscalateError] = React.useState<string | null>(null);
 
   // Watch until the pipeline settles. `review` keeps watching on purpose: a
   // human can still approve or reject it while the consumer is looking at
@@ -156,6 +200,33 @@ export function ReceiptStatus({ receipt }: ReceiptStatusProps) {
     onRow: handleRow,
     onPoll: refresh,
   });
+
+  const escalation = escalationState(state);
+  const offer = escalationOfferCopy();
+  const closed = escalationClosedCopy();
+
+  const submitEscalation = React.useCallback(async () => {
+    if (onEscalate === undefined) return;
+    setEscalatePending(true);
+    setEscalateError(null);
+    const result = await onEscalate({ receiptId });
+    setEscalatePending(false);
+    setConfirming(false);
+    if (result.ok) {
+      // Optimistic, and safe to be: the server has already written it, and the
+      // action revalidated this path. Moving the local state here is what stops
+      // the button lingering for the round trip on a slow connection, on the
+      // screen where a second tap would be most tempting.
+      setState((current) => ({
+        ...current,
+        status: "review" as const,
+        escalatedAt: new Date().toISOString(),
+      }));
+      void refresh();
+      return;
+    }
+    setEscalateError(result.message);
+  }, [onEscalate, receiptId, refresh]);
 
   const outcome = receiptOutcome(state.status);
   const copy = statusCopy(state);
@@ -272,6 +343,86 @@ export function ReceiptStatus({ receipt }: ReceiptStatusProps) {
           </motion.p>
         ) : null}
       </Card>
+
+      {/* ---- Contesting the rejection ---------------------------------------
+          The mechanism the copy above has been promising since it was written.
+          A rejected receipt used to be a dead end: "take another photo" is not
+          a mechanism for somebody who has binned the paper, and
+          receipts_sha_unique (0017) means the identical photo can never be
+          resubmitted anyway. One tap puts it in the merchant's queue with the
+          image attached, and the merchant decides through the same reviewReceipt
+          service as any other approval.
+
+          It is deliberately BELOW the outcome card and styled as a tonal
+          secondary action, not a filled one. The primary next step for most
+          rejections is still the one the copy names (retake the photo, scan
+          from the right store page); this is the remedy for when that advice
+          does not apply, and shouting it would push people into spending their
+          one escalation on a receipt they could simply rescan. */}
+      {escalation === "offered" && onEscalate !== undefined ? (
+        <div className="flex w-full flex-col items-center gap-3">
+          {confirming ? (
+            <div className="flex w-full flex-col gap-3 rounded-md3-md border border-outline bg-surface-container p-4 text-left">
+              <p className="text-title-m text-on-surface">{offer.confirmTitle}</p>
+              <p className="text-body-m text-on-surface-variant">{offer.confirmBody}</p>
+              <div className="flex flex-wrap gap-2">
+                <PendingButton
+                  type="button"
+                  variant="filled"
+                  size="md"
+                  pending={escalatePending}
+                  pendingLabel="Sending"
+                  onClick={() => void submitEscalation()}
+                >
+                  {offer.confirmLabel}
+                </PendingButton>
+                <Button
+                  type="button"
+                  variant="text"
+                  size="md"
+                  disabled={escalatePending}
+                  onClick={() => setConfirming(false)}
+                >
+                  {offer.cancelLabel}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => setConfirming(true)}
+                className={cn(ACTION_CLASS, "bg-secondary-container text-on-secondary-container")}
+              >
+                {offer.label}
+              </button>
+              <p className="text-body-s text-on-surface-variant">{offer.body}</p>
+            </>
+          )}
+
+          {escalateError !== null ? (
+            <p
+              role="alert"
+              className="w-full rounded-md3-sm bg-error-container p-3 text-body-m text-on-error-container"
+            >
+              {escalateError}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* The merchant looked again and still said no. Rendered alongside the
+          reason's own copy rather than instead of it, so the rejection matrix
+          stays the single source of those words. */}
+      {escalation === "closed" ? (
+        <div
+          role="note"
+          className="flex w-full flex-col gap-1 rounded-md3-md border border-outline-variant bg-surface-container p-4 text-left"
+        >
+          <p className="text-title-m text-on-surface">{closed.title}</p>
+          <p className="text-body-m text-on-surface-variant">{closed.body}</p>
+        </div>
+      ) : null}
 
       {copy.action ? (
         <Link

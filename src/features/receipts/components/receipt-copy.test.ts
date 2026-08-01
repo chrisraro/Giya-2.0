@@ -2,7 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import type { ReceiptRejectReason, ReceiptStatus } from "../types";
 import {
+  MAX_OPEN_ESCALATIONS,
   approvedCopy,
+  canEscalateRejection,
+  escalationClosedCopy,
+  escalationOfferCopy,
+  escalationOpenCopy,
+  escalationRefusalCopy,
+  escalationState,
   isPendingStatus,
   isSettledStatus,
   pendingCopy,
@@ -11,6 +18,7 @@ import {
   receiptTone,
   rejectionCopy,
   reviewCopy,
+  type EscalationRefusal,
   type ReceiptOutcomeCopy,
 } from "./receipt-copy";
 
@@ -287,6 +295,153 @@ describe("receiptStatusLabel", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Escalation
+// ---------------------------------------------------------------------------
+
+const ALL_REFUSALS: readonly EscalationRefusal[] = [
+  "NOT_FOUND",
+  "NOT_ESCALATABLE",
+  "ALREADY_ESCALATED",
+  "LIMIT_REACHED",
+  "SUPERSEDED",
+  "UNAVAILABLE",
+];
+
+describe("canEscalateRejection", () => {
+  it("CRITICAL - fraud_suspected offers no escalation, so a rejection cannot be iterated against a human", () => {
+    expect(canEscalateRejection("fraud_suspected")).toBe(false);
+  });
+
+  it("CRITICAL - duplicate offers none either: it is fraud family and already advanced the strike ladder", () => {
+    expect(canEscalateRejection("duplicate")).toBe(false);
+  });
+
+  it("offers escalation on every reason that is a quality or matching outcome", () => {
+    expect(canEscalateRejection("unreadable")).toBe(true);
+    expect(canEscalateRejection("wrong_business")).toBe(true);
+    expect(canEscalateRejection("too_old")).toBe(true);
+    expect(canEscalateRejection("manual")).toBe(true);
+  });
+
+  it("treats a reason nobody recorded as escalatable, failing toward the customer", () => {
+    expect(canEscalateRejection(null)).toBe(true);
+  });
+
+  it("excludes exactly the fraud family and nothing else", () => {
+    const blocked = ALL_REJECT_REASONS.filter((reason) => !canEscalateRejection(reason));
+    expect(blocked).toEqual(["duplicate", "fraud_suspected"]);
+  });
+});
+
+describe("escalationState", () => {
+  it("offers the button on a fresh contestable rejection", () => {
+    expect(
+      escalationState({ status: "rejected", rejectReason: "unreadable", escalatedAt: null }),
+    ).toBe("offered");
+  });
+
+  it("offers nothing on a fraud-family rejection, whatever the UI asks it", () => {
+    for (const reason of ["duplicate", "fraud_suspected"] as const) {
+      expect(escalationState({ status: "rejected", rejectReason: reason, escalatedAt: null })).toBe(
+        "unavailable",
+      );
+    }
+  });
+
+  it("offers nothing while the receipt is still moving, or once it is approved", () => {
+    for (const status of ["queued", "processing", "review", "approved"] as const) {
+      expect(escalationState({ status, rejectReason: null, escalatedAt: null })).toBe("unavailable");
+    }
+  });
+
+  it("reads as open while the merchant has it", () => {
+    expect(
+      escalationState({ status: "review", rejectReason: "unreadable", escalatedAt: "2026-08-01T00:00:00.000Z" }),
+    ).toBe("open");
+  });
+
+  it("CRITICAL - a re-rejected escalation is closed, never offered again", () => {
+    // The loop this prevents: after the merchant re-rejects, status and reason
+    // are indistinguishable from a first rejection, so without escalated_at the
+    // screen would offer the button again and the server would refuse it.
+    expect(
+      escalationState({ status: "rejected", rejectReason: "unreadable", escalatedAt: "2026-08-01T00:00:00.000Z" }),
+    ).toBe("closed");
+  });
+
+  it("says nothing at all once an escalation was approved: the points are the answer", () => {
+    expect(
+      escalationState({ status: "approved", rejectReason: null, escalatedAt: "2026-08-01T00:00:00.000Z" }),
+    ).toBe("unavailable");
+  });
+});
+
+describe("escalation copy", () => {
+  it("promises a decision, never an outcome", () => {
+    const copy = escalationOfferCopy();
+    const text = `${copy.label} ${copy.body} ${copy.confirmTitle} ${copy.confirmBody}`;
+    expect(text).toMatch(/decide/i);
+    // Never a promise that points will follow: only the store can make it.
+    expect(text).not.toMatch(/will (get|receive|be given)|guarantee|we will add/i);
+  });
+
+  it("names the honest expectation from doc 36's SLA target rather than an invented number", () => {
+    expect(escalationOfferCopy().confirmBody).toMatch(/within a day/i);
+  });
+
+  it("neither apologises nor accuses", () => {
+    const copy = escalationOfferCopy();
+    const text = `${copy.label} ${copy.body} ${copy.confirmBody}`;
+    expect(text).not.toMatch(/\bsorry\b|\bour mistake\b|\bwe got (it|this) wrong\b/i);
+    expect(text).not.toMatch(/\bif you (really|actually|honestly)\b|\bclaim\b/i);
+  });
+
+  it("says the customer's own action back to them while the store has it", () => {
+    expect(escalationOpenCopy().title).toBe("The store is looking at this again");
+    expect(escalationOpenCopy().body).toMatch(/you asked them/i);
+  });
+
+  it("closes the loop plainly rather than leaving the customer looking for a button", () => {
+    expect(escalationClosedCopy().body).toMatch(/no further look/i);
+  });
+
+  it("quotes the cap it actually enforces", () => {
+    expect(MAX_OPEN_ESCALATIONS).toBe(3);
+    expect(escalationRefusalCopy("LIMIT_REACHED")).toMatch(/three/i);
+  });
+
+  it("gives the same answer for a missing receipt and someone else's, so the action is no id oracle", () => {
+    // The service maps FORBIDDEN and RECEIPT_NOT_FOUND onto this one refusal.
+    expect(escalationRefusalCopy("NOT_FOUND")).toMatch(/could not find that receipt/i);
+  });
+
+  it("SUPERSEDED names no receipt, no number and no person", () => {
+    const text = escalationRefusalCopy("SUPERSEDED");
+    expect(text).not.toMatch(/\bduplicate\b|\bnumber\b|\bsomeone\b|\bthey\b/i);
+    expect(text).toMatch(/another scan from the same store/i);
+  });
+
+  it("gives every refusal a sentence, so a typed error can never render blank", () => {
+    for (const refusal of ALL_REFUSALS) {
+      expect(escalationRefusalCopy(refusal), refusal).toBeTruthy();
+    }
+  });
+});
+
+describe("receiptStatusLabel escalation variant", () => {
+  it("distinguishes an escalated review from a pipeline-routed one", () => {
+    expect(receiptStatusLabel("review", null, true)).toBe("The store is looking at this again");
+    expect(receiptStatusLabel("review", null, false)).toBe("Being reviewed by the store");
+  });
+
+  it("leaves every other status untouched by the flag", () => {
+    for (const status of ALL_STATUSES.filter((s) => s !== "review")) {
+      expect(receiptStatusLabel(status, null, true)).toBe(receiptStatusLabel(status, null, false));
+    }
+  });
+});
+
 describe("receiptTone", () => {
   it("reserves the reward tone (mango) for an approved receipt", () => {
     expect(receiptTone("approved")).toBe("reward");
@@ -330,6 +485,34 @@ function everyCopyString(): { where: string; text: string }[] {
     entries.push({
       where: `label(rejected,${reason})`,
       text: receiptStatusLabel("rejected", reason),
+    });
+  }
+  entries.push({
+    where: "label(review,escalated)",
+    text: receiptStatusLabel("review", null, true),
+  });
+
+  // ESCALATION. Every string the contest path can render goes through the same
+  // sweep as the rest of the matrix, which is the whole reason they were
+  // written in this module instead of beside the button. The refusals matter
+  // most: they are the SERVER's typed error codes rendered for a person, and a
+  // refusal is exactly where someone would be tempted to explain which check
+  // said no.
+  add("escalationOpenCopy", escalationOpenCopy());
+  const offer = escalationOfferCopy();
+  entries.push({ where: "escalationOfferCopy.label", text: offer.label });
+  entries.push({ where: "escalationOfferCopy.body", text: offer.body });
+  entries.push({ where: "escalationOfferCopy.confirmTitle", text: offer.confirmTitle });
+  entries.push({ where: "escalationOfferCopy.confirmBody", text: offer.confirmBody });
+  entries.push({ where: "escalationOfferCopy.confirmLabel", text: offer.confirmLabel });
+  entries.push({ where: "escalationOfferCopy.cancelLabel", text: offer.cancelLabel });
+  const closed = escalationClosedCopy();
+  entries.push({ where: "escalationClosedCopy.title", text: closed.title });
+  entries.push({ where: "escalationClosedCopy.body", text: closed.body });
+  for (const refusal of ALL_REFUSALS) {
+    entries.push({
+      where: `escalationRefusalCopy(${refusal})`,
+      text: escalationRefusalCopy(refusal),
     });
   }
 

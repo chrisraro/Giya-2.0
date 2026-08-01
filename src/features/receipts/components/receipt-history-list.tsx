@@ -167,8 +167,16 @@ export function ReceiptHistoryRow({ receipt }: { receipt: ReceiptListItemDTO }) 
       <div className="min-w-0 flex-1">
         <p className="truncate text-body-l text-on-surface">{receiptTitle(receipt)}</p>
         <p className="truncate text-body-s text-on-surface-variant">
-          {receiptStatusLabel(receipt.status, receipt.rejectReason)} ·{" "}
-          {formatSubmittedAt(receipt.createdAt)}
+          {/* The escalated variant of the review label. In a list of a dozen
+              receipts, "Being reviewed by the store" gives no hint that the
+              reader is the reason this one is there, which is the difference
+              between finding the receipt they appealed and scrolling past it. */}
+          {receiptStatusLabel(
+            receipt.status,
+            receipt.rejectReason,
+            receipt.escalatedAt !== null,
+          )}{" "}
+          · {formatSubmittedAt(receipt.createdAt)}
         </p>
       </div>
 

@@ -42,6 +42,19 @@ export interface ReceiptWire {
   processed_at: string | null;
   /** Null when no `earn` ledger row references this receipt yet. Null is not zero. */
   points_awarded: number | null;
+  /**
+   * When the submitter asked the merchant to look at this rejected receipt
+   * again, or null on every receipt the pipeline routed itself (0036).
+   *
+   * IT HAS TO BE ON THE WIRE, and the reason is a bug rather than a nicety.
+   * This shape is the status screen's poll fallback: `fromReceiptWire` rebuilds
+   * the whole DTO from it, so a field missing here comes back as null on every
+   * poll. The escalation is once per receipt forever, so a null would put the
+   * "ask the store to look at this" button back on a receipt that has already
+   * been sent, and the customer would tap it and be refused by the server.
+   * 0017's column grant is satisfied: 0036 grants exactly this column.
+   */
+  escalated_at: string | null;
 }
 
 export interface ReceiptDetailWire extends ReceiptWire {
@@ -62,6 +75,7 @@ export function toReceiptWire(receipt: ReceiptListItemDTO): ReceiptWire {
     created_at: receipt.createdAt,
     processed_at: receipt.processedAt,
     points_awarded: receipt.pointsAwarded,
+    escalated_at: receipt.escalatedAt,
   };
 }
 
@@ -98,5 +112,10 @@ export function fromReceiptWire(wire: ReceiptWire): ReceiptListItemDTO {
     createdAt: wire.created_at,
     processedAt: wire.processed_at,
     pointsAwarded: wire.points_awarded,
+    // Defaulted rather than assumed present: a poll answered by a deploy that
+    // predates 0036 omits the key, and reading that as "not escalated" would
+    // restore the button on a receipt already with the merchant. Undefined
+    // means "not sent", exactly as it does for the Realtime payload.
+    escalatedAt: wire.escalated_at ?? null,
   };
 }
