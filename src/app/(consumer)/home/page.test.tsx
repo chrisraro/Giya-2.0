@@ -44,7 +44,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 const HomePage = (await import("./page")).default;
-const { HOME_DISCOVER_LIMIT } = await import("./page");
+const { HOME_DISCOVER_LIMIT } = await import("./limits");
 
 /**
  * Every name and place the deleted fixtures used. If any of these ever appears

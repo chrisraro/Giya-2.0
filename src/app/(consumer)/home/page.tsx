@@ -12,19 +12,13 @@ import { NotificationBell } from "@/features/notifications/components/notificati
 import { getMyUnreadNotificationCount } from "@/features/notifications/server/repo";
 import { getMyBalances } from "@/features/rewards/server/repo";
 import { filipinoGreeting, manilaDateCaption } from "@/lib/greeting";
+import { HOME_DISCOVER_FETCH, HOME_DISCOVER_LIMIT } from "./limits";
 
 // Every read on this page is RLS-scoped to the signed-in consumer or is the
 // public business catalog, and the greeting depends on the current Manila hour,
 // so nothing here is cacheable across requests or across people.
 export const dynamic = "force-dynamic";
 
-/** How many shops the discover section lists before deferring to /scan. */
-export const HOME_DISCOVER_LIMIT = 5;
-
-// Shops the consumer already earns points at are dropped from "discover" (they
-// are already in the balance strip above), so the read over-fetches to keep the
-// section from coming back short after that filter.
-const HOME_DISCOVER_FETCH = HOME_DISCOVER_LIMIT * 2;
 
 export default async function HomePage() {
   // Redirect, not a signed-out render. /home is nothing BUT the signed-in
