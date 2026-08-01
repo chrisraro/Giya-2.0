@@ -120,6 +120,18 @@ function QueueRow({ item, now }: { item: ReviewQueueItem; now: Date }) {
         </p>
 
         <div className="flex flex-wrap items-center gap-2 sm:w-72 sm:justify-end">
+          {/* 0036. FIRST in the chip row, and the only one carrying a filled
+              container: the reviewer needs to know they are answering "was our
+              machine wrong?" rather than "is this suspicious?" BEFORE they read
+              the severity chip beside it, because that chip is very often the
+              thing the customer is contesting. Secondary rather than error:
+              this is a question from a customer, not an alarm about one. */}
+          {item.escalated && (
+            <span className="inline-flex items-center rounded-full bg-secondary-container px-2.5 py-0.5 text-label-m text-on-secondary-container">
+              Customer asked you to look again
+            </span>
+          )}
+
           {item.submittedByViewer && (
             <span className="inline-flex items-center rounded-full border border-outline px-2.5 py-0.5 text-label-m text-on-surface-variant">
               You submitted this

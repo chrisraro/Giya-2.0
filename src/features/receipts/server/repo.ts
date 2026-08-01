@@ -58,6 +58,11 @@ export const RECEIPT_CLIENT_COLUMNS = [
   "source",
   "created_at",
   "processed_at",
+  // Added by 0036, which extends 0017's allowlist by exactly one column and
+  // argues the widening there. It is the submitter's own action, on their own
+  // receipt, and the escalation surface cannot tell a first rejection from a
+  // re-rejected escalation without it.
+  "escalated_at",
 ] as const;
 
 /**
@@ -74,7 +79,7 @@ export const RECEIPT_CLIENT_COLUMNS = [
  *     the pos/digital adapters are [SCALE].
  */
 const RECEIPT_READ_COLUMNS =
-  "id, user_id, business_id, status, reject_reason, merchant_name, receipt_number, receipt_date, total_centavos, created_at, processed_at";
+  "id, user_id, business_id, status, reject_reason, merchant_name, receipt_number, receipt_date, total_centavos, created_at, processed_at, escalated_at";
 
 /** Row shape returned by RECEIPT_READ_COLUMNS. */
 interface ReceiptReadRow {
@@ -89,6 +94,7 @@ interface ReceiptReadRow {
   total_centavos: number | null;
   created_at: string;
   processed_at: string | null;
+  escalated_at: string | null;
 }
 
 const RECEIPT_STATUSES: readonly ReceiptStatus[] = [
@@ -139,6 +145,7 @@ function toListItem(row: ReceiptReadRow, businessName: string | null, points: nu
     createdAt: row.created_at,
     processedAt: row.processed_at,
     pointsAwarded: points,
+    escalatedAt: row.escalated_at,
   };
 }
 

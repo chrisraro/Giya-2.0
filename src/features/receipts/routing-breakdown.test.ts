@@ -176,6 +176,8 @@ describe("reasonLabel", () => {
       "fraud_composite",
       "staff_self_scan",
       "ocr_operator_failure",
+      // 0036. The tenth reason, and the only one no rule produced.
+      "consumer_escalation",
       "unattributed",
     ];
 
@@ -185,6 +187,35 @@ describe("reasonLabel", () => {
       expect(label, key).toBe(label.trim());
       expect(label, key).not.toContain("_");
     }
+  });
+
+  it("names a customer escalation as its own reason rather than crediting what rejected it", () => {
+    // 0036. Without its own key the escalation would be counted under whichever
+    // rule rejected the receipt first, inflating a threshold with queue items
+    // that threshold had nothing to do with, and the loosening ladder would be
+    // tuned on a number nobody measured.
+    expect(reasonLabel("consumer_escalation")).toMatch(/customer asked you to look again/i);
+  });
+
+  it("counts an escalation alongside the rule that rejected the receipt originally", () => {
+    // A receipt can carry both, and both are true statements about why a human
+    // is looking at it, so neither is allowed to swallow the other.
+    const breakdown = foldRoutingBreakdown(
+      [
+        status("review", 2),
+        status("approved", 8),
+        reason("parse_confidence_low", 2),
+        reason("consumer_escalation", 1),
+      ],
+      30,
+    );
+
+    const keys = breakdown.reasons.map((entry) => entry.key);
+    expect(keys).toContain("consumer_escalation");
+    expect(keys).toContain("parse_confidence_low");
+    expect(
+      breakdown.reasons.find((entry) => entry.key === "consumer_escalation")?.shareOfReviewed,
+    ).toBeCloseTo(0.5);
   });
 
   it("says plainly that an operator failure was ours", () => {

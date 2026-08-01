@@ -122,6 +122,13 @@ const REASON_LABELS: Record<string, string> = {
   // D7: our failure, and it says so. A merchant seeing a pile of these is
   // seeing something true that the old dead-letter path hid from them.
   ocr_operator_failure: "We could not process it on our side",
+  // The tenth reason, and the only one no rule produced: the customer rejected
+  // our rejection. It is listed here so the breakdown does not credit whatever
+  // rejected the receipt originally, and it is the one row on this panel a
+  // merchant should read as a QUESTION about the other rows: a pile of these
+  // beside a pile of "could not read the receipt confidently" is customers
+  // telling us our threshold is wrong, in the only vocabulary they have.
+  consumer_escalation: "The customer asked you to look again",
 };
 
 /**

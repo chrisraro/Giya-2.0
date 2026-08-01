@@ -125,7 +125,7 @@ export function defaultReviewQueueDeps(): ReviewQueueDeps | null {
  * into a React tree nobody re-reviewed.
  */
 const QUEUE_COLUMNS =
-  "id, user_id, status, merchant_name, receipt_number, receipt_date, total_centavos, created_at, reviewed_at, reject_reason";
+  "id, user_id, status, merchant_name, receipt_number, receipt_date, total_centavos, created_at, reviewed_at, reject_reason, escalated_at";
 
 const DECISION_COLUMNS = `${QUEUE_COLUMNS}, business_id, subtotal_centavos, tax_centavos, reject_note, image_path, parse_meta, parse_confidence, match_confidence`;
 
@@ -140,6 +140,7 @@ interface QueueRow {
   created_at: string;
   reviewed_at: string | null;
   reject_reason: string | null;
+  escalated_at: string | null;
 }
 
 interface DecisionRow extends QueueRow {
@@ -389,6 +390,7 @@ export async function listReviewQueue(
       signalCount: signals.length,
       fraudScore: compositeFraudScore(signals),
       submittedByViewer: row.user_id === viewerId,
+      escalated: row.escalated_at !== null,
     } satisfies ReviewQueueItem;
   });
 }
@@ -455,6 +457,7 @@ export async function loadReviewDecisionItem(
     createdAt: data.created_at,
     reviewedAt: data.reviewed_at,
     rejectReason: data.reject_reason,
+    escalated: data.escalated_at !== null,
     fields: {
       merchantName: data.merchant_name,
       receiptNumber: data.receipt_number,

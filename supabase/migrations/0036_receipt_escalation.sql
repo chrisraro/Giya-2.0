@@ -1,0 +1,164 @@
+-- ============================================================================
+-- 0036_receipt_escalation.sql
+-- One tap on a rejected receipt puts it back in front of the merchant.
+--
+-- THE PROBLEM THIS CLOSES. A rejected receipt is a dead end. `receipt-copy.ts`
+-- offers "take another photo" or tells the consumer "the store can take another
+-- look", but neither is a MECHANISM: there is no action a consumer can take
+-- that puts a rejected receipt in a merchant's queue, and `receipts_sha_unique`
+-- (0017) is global and covers rejected rows, so the identical photograph can
+-- never be resubmitted. A customer who spent PHP 500, photographed a folded
+-- receipt and binned the paper before reading the rejection has no path at all.
+-- With nine routes into the review queue and an OCR engine that has misread a
+-- TIN's `009` as `899` in this project's own testing, wrong rejections are a
+-- rate rather than a hypothesis.
+--
+-- WHAT THIS MIGRATION ADDS. Exactly one column and one index. The mechanism
+-- itself is `src/features/receipts/server/escalate.ts`, and the merchant's
+-- decision continues to run through `reviewReceipt` unchanged - there is still
+-- ONE approval path to the ledger (doc 36), and this migration adds nothing
+-- that could become a second one.
+--
+-- Source docs / decisions:
+--   * 0017_receipts.sql: the status check constraint, `receipts_number_unique`,
+--     the write fence and the 13-column read grant this file extends by one.
+--   * 0035_receipt_routing_visibility.sql: `parse_meta.review_reasons`, the
+--     routing attribution an escalation names itself in
+--     (`consumer_escalation`), so the review-rate breakdown does not silently
+--     credit whatever rejected the receipt originally.
+--   * docs/30-modules/37-fraud-detection.md: why the fraud family is excluded.
+-- ============================================================================
+
+-- ============================================================================
+-- The column
+-- ============================================================================
+--
+-- WHY A COLUMN AND NOT A TABLE. An escalation is not an event stream, it is a
+-- FACT ABOUT ONE RECEIPT that is true at most once: this receipt was sent back
+-- by the person who submitted it. A child table would be a second source of
+-- truth for a state the receipt row already has to carry (it is the thing that
+-- decides whether the consumer's screen still offers the button), and it would
+-- disagree with the row the first time a backfill or a support fix moved a
+-- receipt. This is the same argument 0035 made for not adding a routing event
+-- stream, and it lands the same way.
+--
+-- WHY NOT A BOOLEAN. The instant matters. It is the only record of WHEN the
+-- customer pushed back, which is what makes "the store sat on an escalation for
+-- three days" answerable at all, and a timestamp costs the same eight bytes a
+-- boolean would round up to.
+--
+-- WHAT IT DOES NOT DO. It is not a status. `receipts.status` remains the single
+-- state machine 0017 defined, and an escalated receipt sits in 'review' like
+-- every other receipt awaiting a human - which is precisely what lets the
+-- existing queue, the existing decision screen and the existing `reviewReceipt`
+-- service pick it up with no new branch on any of them. This column is the
+-- ANNOTATION that says which question the reviewer is being asked ("was our
+-- machine wrong?" rather than "is this suspicious?").
+alter table public.receipts
+  add column if not exists escalated_at timestamptz;
+
+comment on column public.receipts.escalated_at is
+  'When the submitting consumer asked the merchant to look at this rejected receipt again (0036). Set once and never cleared: it is what stops a rejected escalation being escalated again, so a re-decided receipt cannot become an unbounded loop against a human. Null on every receipt the pipeline routed to review on its own.';
+
+-- ============================================================================
+-- The index behind the per-consumer cap
+-- ============================================================================
+--
+-- The service caps each consumer at a small number of OPEN escalations, and
+-- that cap is a count of exactly the rows this index covers: this consumer's
+-- receipts that are escalated AND still waiting on a merchant. Without it the
+-- count falls back to `receipts_user_idx` and then filters, which is fine today
+-- and stops being fine on the account that makes the cap matter.
+--
+-- PARTIAL, and deliberately so. Escalations are rare by construction - they are
+-- bounded per consumer by the cap and only reachable from a rejection - so an
+-- index over the whole of the hottest table in the schema would be paying write
+-- amplification on every receipt to serve a predicate almost none of them
+-- satisfy. 0017 made the same call for `receipts_review_idx`.
+create index if not exists receipts_open_escalation_idx
+  on public.receipts (user_id)
+  where escalated_at is not null and status = 'review';
+
+-- ============================================================================
+-- The read grant, extended by exactly one column
+-- ============================================================================
+--
+-- 0017 revoked the table-level SELECT from `authenticated` and re-granted 13
+-- named columns, and its comment is emphatic that the allowlist is the fence
+-- and that a future slice needing more should reach for a staff-scoped view
+-- rather than widen it. So widening it here needs an argument, and there is
+-- one; it is also worth saying why it is not the argument 0017 was refusing.
+--
+-- 0017 was refusing to publish `reject_note`, `parse_meta`, the two confidences
+-- and the two hashes. Every one of those is EVIDENCE ABOUT THE DECISION:
+-- reviewer prose that can name another customer, per-field provenance that is a
+-- gradient signal for a forger, and the exact inputs a duplicate-detector oracle
+-- would be built from. `escalated_at` is none of that. It is a record of an
+-- action THE READER THEMSELVES TOOK, holding no information they did not supply,
+-- about no receipt but their own (`receipts_consumer_select` still bounds the
+-- rows). It teaches an abuser nothing: they already know whether they tapped the
+-- button.
+--
+-- AND THE CONSUMER SURFACE CANNOT WORK WITHOUT IT. The escalation is one per
+-- receipt, forever - that is the whole reason a rejected escalation cannot loop.
+-- After a merchant re-rejects, the receipt is back at status='rejected' with a
+-- reason that is still escalatable, so `status` and `reject_reason` alone are
+-- indistinguishable from a first rejection and the screen would offer the button
+-- a second time. The consumer would tap it and be refused by the server, which
+-- is the worst of both: the guard holds, and the one surface this feature exists
+-- to make honest tells them a lie first. Withholding the column would mean
+-- either that, or a second server round trip per rejected receipt to ask a
+-- question the row already answers.
+--
+-- THE STAFF CONSEQUENCE, stated because column privileges are ROLE-wide and
+-- 0017's whole warning is about exactly this: granting `escalated_at` to
+-- `authenticated` also grants it to staff, under `receipts_staff_select`, on
+-- their own tenant's receipts. That is not a leak, it is the same fact the
+-- review queue already renders to them through the service role, and it is
+-- theirs to know: it is the difference between a receipt their pipeline flagged
+-- and a receipt their customer is disputing.
+grant select (escalated_at) on public.receipts to authenticated;
+
+-- ============================================================================
+-- WHAT THIS MIGRATION DELIBERATELY DOES NOT DO
+-- ============================================================================
+--
+-- NO WRITE POLICY, and no widening of the write fence. 0017 revoked INSERT and
+-- UPDATE on `receipts` from `anon` and `authenticated` and gave no client
+-- audience any write policy, precisely so a consumer cannot hand themselves a
+-- status. An escalation is a consumer-initiated write to `receipts.status`,
+-- which sounds like it needs one and must not have one: the consumer submits an
+-- intent to a server action, `escalateReceipt` re-reads the row, proves
+-- `user_id` matches the session, proves the receipt is rejected, proves it has
+-- not been escalated before, proves the reason is escalatable, proves the cap,
+-- and only then writes with the SERVICE ROLE. Every one of those guards is code
+-- the client cannot skip. A policy permissive enough to let a consumer set
+-- status='review' on their own row would also let them set it on a receipt they
+-- had already had rejected as fraudulent, which is the loop doc 37 warns about,
+-- with the database's blessing.
+--
+-- NO CHANGE TO `receipts_number_unique`. The partial index covers
+-- ('approved','review','processing') and deliberately excludes 'rejected' so
+-- honest resubmission after a rejection works (0017, doc 37 S3). An escalation
+-- moves a rejected row INTO 'review', so a receipt whose number has since been
+-- claimed by a live row collides - and that collision is CORRECT. Two live
+-- claims on one receipt number at one business is exactly what the index exists
+-- to prevent, and an escalation is not entitled to an exception: the honest
+-- reading of that state is that the customer already resubmitted and the newer
+-- scan is the live one. `escalateReceipt` therefore checks for the collision
+-- before it writes AND catches 23505 on the write itself, so the consumer gets
+-- a sentence rather than a raw database error. Relaxing the index to admit
+-- escalated rows would trade a rare, explainable refusal for two rows that can
+-- both be approved for one purchase, which is a money bug.
+--
+-- NO CHANGE TO `receipts_sha_unique`. It stays global and stays covering
+-- rejected rows. Escalation is the answer to the problem that index created;
+-- loosening it as well would re-open the exact-bytes replay it exists to stop.
+--
+-- NO NEW NOTIFICATION KIND. The merchant already learns about a waiting receipt
+-- from the queue badge and the dashboard tile, both derived from the live queue
+-- (see the note at the foot of src/features/notifications/kinds.ts on why a
+-- queue is better shown as a count on the door than as a message in a box), and
+-- the consumer is standing on the status screen with their thumb on the button
+-- when the escalation happens. Neither party needs to be told a thing they are
+-- already looking at.

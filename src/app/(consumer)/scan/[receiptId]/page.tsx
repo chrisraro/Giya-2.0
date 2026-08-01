@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 
+import { escalateReceiptAction } from "@/features/receipts/actions";
 import { ReceiptStatus } from "@/features/receipts/components/receipt-status";
 import { getMyReceipt } from "@/features/receipts/server/repo";
 import { createClient } from "@/lib/supabase/server";
@@ -35,5 +36,9 @@ export default async function ReceiptStatusPage({ params }: { params: Promise<Pa
   const receipt = await getMyReceipt(receiptId, user.id);
   if (!receipt) notFound();
 
-  return <ReceiptStatus receipt={receipt} />;
+  // The escalation action is passed down rather than imported by the client
+  // component, which keeps <ReceiptStatus> unit-testable without a server
+  // runtime. It takes a receipt id and nothing else; every guard, including the
+  // one proving the caller submitted this receipt, is re-derived server side.
+  return <ReceiptStatus receipt={receipt} onEscalate={escalateReceiptAction} />;
 }

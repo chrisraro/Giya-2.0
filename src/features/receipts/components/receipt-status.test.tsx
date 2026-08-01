@@ -64,6 +64,7 @@ function baseReceipt(overrides: Partial<ReceiptListItemDTO> = {}): ReceiptListIt
     createdAt: "2026-07-25T03:15:00.000Z",
     processedAt: null,
     pointsAwarded: null,
+    escalatedAt: null,
     ...overrides,
   };
 }
@@ -378,5 +379,167 @@ describe("no fraud detail or reviewer note can reach the DOM", () => {
     );
 
     expect(document.body.textContent).not.toContain("fraud_suspected");
+  });
+});
+
+// ===========================================================================
+// 0036: contesting a rejection
+// ===========================================================================
+//
+// The mechanism the rejection copy has been promising since it was written. A
+// rejected receipt used to be a dead end: "take another photo" is not a
+// mechanism for somebody who has binned the paper, and receipts_sha_unique
+// (0017) means the identical photo can never be resubmitted anyway.
+
+describe("the escalation offer", () => {
+  const OFFER = "Ask the store to look at this";
+
+  function rejected(overrides: Partial<ReceiptListItemDTO> = {}) {
+    return baseReceipt({ status: "rejected", rejectReason: "unreadable", ...overrides });
+  }
+
+  function escalateOk() {
+    return vi.fn(async () => ({ ok: true as const }));
+  }
+
+  it("offers the button on a contestable rejection", () => {
+    render(<ReceiptStatus receipt={rejected()} onEscalate={escalateOk()} />);
+    expect(screen.getByRole("button", { name: OFFER })).toBeInTheDocument();
+  });
+
+  it("CRITICAL - offers nothing on a fraud_suspected rejection", () => {
+    render(
+      <ReceiptStatus
+        receipt={rejected({ rejectReason: "fraud_suspected" })}
+        onEscalate={escalateOk()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: OFFER })).not.toBeInTheDocument();
+  });
+
+  it("CRITICAL - offers nothing on a duplicate rejection either", () => {
+    render(
+      <ReceiptStatus receipt={rejected({ rejectReason: "duplicate" })} onEscalate={escalateOk()} />,
+    );
+    expect(screen.queryByRole("button", { name: OFFER })).not.toBeInTheDocument();
+  });
+
+  it("offers nothing while the receipt is still being processed", () => {
+    render(<ReceiptStatus receipt={baseReceipt({ status: "processing" })} onEscalate={escalateOk()} />);
+    expect(screen.queryByRole("button", { name: OFFER })).not.toBeInTheDocument();
+  });
+
+  it("confirms before spending the one escalation the receipt has", async () => {
+    const onEscalate = escalateOk();
+    render(<ReceiptStatus receipt={rejected()} onEscalate={onEscalate} />);
+
+    act(() => {
+      screen.getByRole("button", { name: OFFER }).click();
+    });
+
+    expect(screen.getByText("Send this to the store?")).toBeInTheDocument();
+    // The first tap must not have sent anything.
+    expect(onEscalate).not.toHaveBeenCalled();
+  });
+
+  it("sends only the receipt id, so nothing the browser holds can widen what it does", async () => {
+    const onEscalate = escalateOk();
+    render(<ReceiptStatus receipt={rejected()} onEscalate={onEscalate} />);
+
+    act(() => {
+      screen.getByRole("button", { name: OFFER }).click();
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: "Yes, send it" }).click();
+    });
+
+    expect(onEscalate).toHaveBeenCalledTimes(1);
+    expect(onEscalate).toHaveBeenCalledWith({ receiptId: RECEIPT_ID });
+  });
+
+  it("moves to the waiting state once sent, so the button cannot be tapped twice", async () => {
+    mocks.fetchReceiptDetail.mockResolvedValue(null);
+    render(<ReceiptStatus receipt={rejected()} onEscalate={escalateOk()} />);
+
+    act(() => {
+      screen.getByRole("button", { name: OFFER }).click();
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: "Yes, send it" }).click();
+    });
+
+    expect(screen.getByText("The store is looking at this again")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: OFFER })).not.toBeInTheDocument();
+  });
+
+  it("shows a refusal as a sentence rather than an error page", async () => {
+    const onEscalate = vi.fn(async () => ({
+      ok: false as const,
+      refusal: "LIMIT_REACHED",
+      message: "You already have three receipts waiting with stores.",
+    }));
+    render(<ReceiptStatus receipt={rejected()} onEscalate={onEscalate} />);
+
+    act(() => {
+      screen.getByRole("button", { name: OFFER }).click();
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: "Yes, send it" }).click();
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/three receipts waiting/);
+    // Still rejected, so the customer can read the reason and try again later.
+    expect(screen.getByText("We could not read this photo")).toBeInTheDocument();
+  });
+
+  it("CRITICAL - never re-offers on a receipt that was already escalated and re-rejected", () => {
+    // The loop this closes: after the merchant re-rejects, the status and the
+    // reason are indistinguishable from a first rejection.
+    render(
+      <ReceiptStatus
+        receipt={rejected({ escalatedAt: "2026-07-25T10:00:00.000Z" })}
+        onEscalate={escalateOk()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: OFFER })).not.toBeInTheDocument();
+    expect(screen.getByText("The store looked at this again")).toBeInTheDocument();
+  });
+
+  it("reads as the customer's own action while the store has it, not as a routed review", () => {
+    render(
+      <ReceiptStatus
+        receipt={baseReceipt({ status: "review", escalatedAt: "2026-07-25T10:00:00.000Z" })}
+      />,
+    );
+
+    expect(screen.getByText("The store is looking at this again")).toBeInTheDocument();
+    expect(screen.queryByText("The store is checking this")).not.toBeInTheDocument();
+  });
+
+  it("keeps the plain review copy for a receipt the pipeline routed itself", () => {
+    render(<ReceiptStatus receipt={baseReceipt({ status: "review" })} />);
+    expect(screen.getByText("The store is checking this")).toBeInTheDocument();
+  });
+
+  it("renders nothing about escalation when no action is wired", () => {
+    render(<ReceiptStatus receipt={rejected()} />);
+    expect(screen.queryByRole("button", { name: OFFER })).not.toBeInTheDocument();
+  });
+
+  it("keeps escalated_at across a partial Realtime payload", () => {
+    // Nothing ever clears the field, so an absent key must not read as one.
+    const current = baseReceipt({ status: "review", escalatedAt: "2026-07-25T10:00:00.000Z" });
+    expect(applyReceiptChange(current, { status: "rejected" }).escalatedAt).toBe(
+      "2026-07-25T10:00:00.000Z",
+    );
+  });
+
+  it("applies an escalated_at that the payload does carry", () => {
+    const next = applyReceiptChange(baseReceipt(), {
+      status: "review",
+      escalated_at: "2026-07-25T11:00:00.000Z",
+    });
+    expect(next.escalatedAt).toBe("2026-07-25T11:00:00.000Z");
   });
 });

@@ -22,6 +22,7 @@ function item(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
     signalCount: 2,
     fraudScore: 0.62,
     submittedByViewer: false,
+    escalated: false,
     ...overrides,
   };
 }
@@ -62,6 +63,27 @@ describe("ReviewQueueScreen", () => {
   it("warns on the item the viewer submitted themselves, before they open it", () => {
     renderQueue("review", [item({ submittedByViewer: true })]);
     expect(screen.getByText("You submitted this")).toBeInTheDocument();
+  });
+
+  // 0036. An escalated receipt asks the reviewer a DIFFERENT question - "was
+  // our machine wrong?" rather than "is this suspicious?" - and which question
+  // they are answering changes how they read the evidence before they open it.
+  it("marks a receipt the customer pushed back, so it is not read as a routed one", () => {
+    renderQueue("review", [item({ escalated: true })]);
+    expect(screen.getByText("Customer asked you to look again")).toBeInTheDocument();
+  });
+
+  it("says nothing about escalation on the receipts the pipeline routed itself", () => {
+    renderQueue("review", [item({ escalated: false })]);
+    expect(screen.queryByText(/asked you to look again/i)).not.toBeInTheDocument();
+  });
+
+  it("shows the escalation mark alongside the fraud severity rather than instead of it", () => {
+    // The customer contesting a receipt does not make its signals go away, and
+    // hiding them would be the reviewer deciding blind.
+    renderQueue("review", [item({ escalated: true, topSeverity: "block", signalCount: 3 })]);
+    expect(screen.getByText("Customer asked you to look again")).toBeInTheDocument();
+    expect(screen.getByText("Blocking · 3")).toBeInTheDocument();
   });
 
   it("marks the active tab and links the other two filters", () => {
