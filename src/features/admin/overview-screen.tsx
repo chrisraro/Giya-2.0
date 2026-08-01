@@ -137,11 +137,21 @@ export function OverviewScreen({ overview, adminName, now }: OverviewScreenProps
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {/*
+          This tile counted `status='pending_verification'` from the day the
+          overview shipped and pointed at `/admin/receipts`, because there was
+          no queue to point at: nothing in the product could put a business into
+          that status and nothing could take it out. Migration 0033 made both
+          possible, so the tile now links to the queue it was always counting.
+          `alarmAbove={0}` because any number here is a merchant who cannot
+          trade.
+        */}
         <Tile
-          label="Awaiting verification"
+          label="Awaiting review"
           value={overview.businessesAwaitingVerification}
-          hint="Businesses that submitted documents and cannot trade yet"
-          href="/admin/receipts"
+          hint="Businesses that asked to go live and cannot trade until someone decides"
+          href="/admin/businesses"
+          alarmAbove={0}
         />
         <Tile
           label="Receipts in review"

@@ -11,6 +11,7 @@ import { TextField } from "@/components/ui/text-field";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { formatPeso, pesoToCentavos } from "@/lib/money";
+import { describeBaseRule } from "@/features/businesses/activation/presenter";
 
 import { roundingSchema } from "../schemas";
 import type { BaseRuleInput } from "../schemas";
@@ -57,14 +58,18 @@ const editFormSchema = z
 
 type EditFormValues = z.infer<typeof editFormSchema>;
 
+/**
+ * Delegated to `describeBaseRule` rather than restated here.
+ *
+ * This card used to own the sentence, and it is now read in three places: here,
+ * the dashboard go-live checklist that embeds this same card, and the admin
+ * verification queue that has to show a reviewer what a merchant's customers
+ * will actually earn. Three copies would drift, and the way they drift is a
+ * merchant and the admin reviewing them reading different words about the same
+ * rule.
+ */
 function summaryText(rule: PointsRuleRow): string {
-  if (rule.rule_type === "amount_rate" && rule.rate_centavos_per_point !== null) {
-    return `1 point per ${formatPeso(rule.rate_centavos_per_point)} spent`;
-  }
-  if (rule.fixed_points !== null) {
-    return `${rule.fixed_points} points per visit`;
-  }
-  return "Custom earning rule";
+  return describeBaseRule(rule) ?? "Custom earning rule";
 }
 
 /**

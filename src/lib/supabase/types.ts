@@ -2485,6 +2485,15 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      activate_business: {
+        Args: {
+          p_actor_id: string
+          p_business_id: string
+          p_reason: string
+          p_request_id?: string
+        }
+        Returns: Json
+      }
       award_receipt_points: {
         Args: {
           p_campaign_id?: string
@@ -2518,6 +2527,24 @@ export type Database = {
           p_type: string
         }
         Returns: string
+      }
+      reject_business_verification: {
+        Args: {
+          p_actor_id: string
+          p_business_id: string
+          p_reason: string
+          p_request_id?: string
+        }
+        Returns: Json
+      }
+      submit_business_for_review: {
+        Args: {
+          p_actor_id: string
+          p_business_id: string
+          p_note?: string
+          p_request_id?: string
+        }
+        Returns: Json
       }
       sweep_job_health: {
         Args: { p_hours?: number }

@@ -4,72 +4,83 @@ import * as React from "react";
 import { cn } from "@/lib/utils";
 
 /**
- * What the banner is allowed to claim, per status.
+ * One honest sentence about where this business stands with Giya.
  *
- * `draft` used to render "Your documents are under review", which was false on
- * both halves. `register_business` (0003_auth_plumbing.sql) creates every
- * business as `draft`, nothing in this codebase moves it off `draft`, and the
- * only document affordance that exists is the onboarding wizard's step 3,
- * which holds the picked files in React state and uploads nothing (see the
- * `TODO(api): replace mock` in src/app/(business)/business/onboarding/page.tsx).
- * `business_documents` and `business_verifications` are both empty in
- * consequence. So a merchant reading that banner was told their submission was
- * being processed when they had never made one and no reviewer existed.
+ * ---------------------------------------------------------------------------
+ * THIS COMPONENT HAS NOW BEEN WRONG TWICE, IN OPPOSITE DIRECTIONS.
+ * ---------------------------------------------------------------------------
+ * It shipped with a `status -> copy` table whose `draft` entry read "Your
+ * documents are under review". That was false on both halves: nothing in the
+ * codebase moved a business off `draft`, the onboarding wizard uploaded
+ * nothing, and `business_documents` and `business_verifications` were both
+ * empty, so a merchant was told their submission was being processed when they
+ * had never made one and no reviewer existed. It was corrected to say that
+ * document submission was not open in this release.
  *
- * The fix is copy, not a KYC pipeline: `draft` now says what is actually true,
- * which is that verification has not started and nothing has been submitted.
+ * That correction is now false in the other direction: submission IS open
+ * (`public.submit_business_for_review`, migration 0033), there IS a reviewer
+ * (the admin queue at /admin/businesses), and a `draft` merchant has something
+ * specific to do about it.
  *
- * `pending_verification` keeps the review copy, and it stays honest, because
- * per docs/30-modules/32-business-portal.md section 2.2 that status is only
- * reachable from the verification submission that writes the
- * `business_verifications` row and links the uploaded `business_documents`.
- * When that flow ships, this branch is already correct and needs no edit.
- */
-const MESSAGES: Record<string, string> = {
-  draft:
-    "Your business is not verified yet. Document submission is not open in this release, so nothing has been submitted and nothing is under review. Set up your store and draft your campaigns in the meantime.",
-  pending_verification: "Your documents are under review. You can explore while you wait.",
-};
-
-/**
- * Informational banner shown while a business's verification status is
- * `draft` or `pending_verification`. `status` is fetched server-side (the
- * dashboard page reads the caller's first active business_staff membership)
- * and passed down as a prop. Dismiss is still a client-only stub: it just
- * hides the banner for the current session.
+ * The fix, both times, is the same one: this component must not own the
+ * sentence. It is a presentational strip. The sentence is computed by
+ * `activationBannerCopy` in
+ * `src/features/businesses/activation/presenter.ts`, from facts read this
+ * request, and a status this component cannot interpret produces no banner
+ * rather than a guess. There is no copy table here to go stale.
+ *
+ * `copy` of null renders nothing, which is the normal state of an active
+ * business: a merchant who is live does not need a strip telling them so on
+ * every page load, and a banner that never goes away is a banner nobody reads.
+ *
+ * Dismiss remains client-only and resets on reload. That is deliberate for as
+ * long as the strip carries a status rather than an announcement: the
+ * undismissible go-live checklist below it is what a merchant must not be able
+ * to hide from themselves.
  * TODO(api): persist dismissal instead of resetting it on every reload
  */
+export interface VerificationBannerCopy {
+  tone: "info" | "warning";
+  message: string;
+}
+
 export function VerificationBanner({
-  status,
+  copy,
   className,
 }: {
-  status: string | null;
+  copy: VerificationBannerCopy | null;
   className?: string;
 }) {
   const [dismissed, setDismissed] = React.useState(false);
-  const message = status ? MESSAGES[status] : undefined;
-  if (dismissed || !message) return null;
+  if (dismissed || copy === null) return null;
+
+  const warning = copy.tone === "warning";
 
   return (
     <div
       role="status"
       className={cn(
-        "flex items-start gap-3 rounded-md3-md bg-secondary-container px-4 py-3 text-on-secondary-container",
+        "flex items-start gap-3 rounded-md3-md px-4 py-3",
+        warning
+          ? "bg-error-container text-on-error-container"
+          : "bg-secondary-container text-on-secondary-container",
         className,
       )}
     >
       <span aria-hidden className="material-symbols-rounded shrink-0 text-[20px]">
-        info
+        {warning ? "error" : "info"}
       </span>
-      <p className="flex-1 text-body-m">{message}</p>
+      <p className="flex-1 text-body-m">{copy.message}</p>
       <button
         type="button"
         aria-label="Dismiss"
         onClick={() => setDismissed(true)}
         className={cn(
           "flex size-8 shrink-0 items-center justify-center rounded-full outline-none",
-          "transition-colors duration-200 ease-standard hover:bg-on-secondary-container/10",
-          "focus-visible:ring-2 focus-visible:ring-secondary",
+          "transition-colors duration-200 ease-standard",
+          warning
+            ? "hover:bg-on-error-container/10 focus-visible:ring-2 focus-visible:ring-error"
+            : "hover:bg-on-secondary-container/10 focus-visible:ring-2 focus-visible:ring-secondary",
         )}
       >
         <span aria-hidden className="material-symbols-rounded text-[18px]">

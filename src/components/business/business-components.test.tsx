@@ -123,42 +123,44 @@ describe("BarChart", () => {
   });
 });
 
-// The banner is the only thing on the dashboard that makes a claim about KYC,
-// and there is no KYC. `register_business` creates every business as `draft`,
-// nothing moves it off `draft`, the onboarding wizard's document step uploads
-// nothing, and `business_documents` / `business_verifications` are both empty.
-// The banner previously told every one of those merchants that their documents
-// were under review. These tests pin the copy to what is actually true, so the
-// claim cannot drift back in ahead of the flow that would justify it.
+// The banner is the only thing on the dashboard that makes a claim about where
+// a merchant stands with Giya, and it has now been wrong twice in opposite
+// directions: first claiming "your documents are under review" when nothing had
+// been submitted and no reviewer existed, then claiming submission was not open
+// after migration 0033 opened it.
+//
+// The fix both times was the same, and these tests are what pins it: this
+// component OWNS NO COPY. It renders the sentence it is handed by
+// `activationBannerCopy` (src/features/businesses/activation/presenter.ts),
+// which is computed from facts read that request and is tested there. There is
+// no status-to-copy table here to go stale, and these tests assert that by
+// passing sentences the component has never heard of.
 describe("VerificationBanner", () => {
-  it("does not claim a review is happening while the business is a draft", () => {
-    render(<VerificationBanner status="draft" />);
+  it("renders the sentence it is given, whatever it is", () => {
+    render(<VerificationBanner copy={{ tone: "info", message: "Anything at all." }} />);
 
-    const banner = screen.getByRole("status");
-    expect(banner).toHaveTextContent(/not verified yet/i);
-    expect(banner).toHaveTextContent(/nothing is under review/i);
-    expect(banner).not.toHaveTextContent(/documents are under review/i);
+    expect(screen.getByRole("status")).toHaveTextContent("Anything at all.");
   });
 
-  // Kept honest for the day the submission flow lands: this status is only
-  // reachable from a real submission that writes business_verifications and
-  // links the uploaded documents (doc 32 section 2.2).
-  it("keeps the review copy once documents really have been submitted", () => {
-    render(<VerificationBanner status="pending_verification" />);
-
-    expect(screen.getByRole("status")).toHaveTextContent(/documents are under review/i);
+  it("renders nothing when there is nothing true to say", () => {
+    const { container } = render(<VerificationBanner copy={null} />);
+    expect(container).toBeEmptyDOMElement();
   });
 
-  it("renders nothing for an active business or a missing status", () => {
-    const { container: active } = render(<VerificationBanner status="active" />);
-    expect(active).toBeEmptyDOMElement();
+  it("uses the error tone for a warning and the secondary tone otherwise", () => {
+    const { container: warn } = render(
+      <VerificationBanner copy={{ tone: "warning", message: "Something is missing." }} />,
+    );
+    expect(warn.firstElementChild?.className).toContain("bg-error-container");
 
-    const { container: none } = render(<VerificationBanner status={null} />);
-    expect(none).toBeEmptyDOMElement();
+    const { container: info } = render(
+      <VerificationBanner copy={{ tone: "info", message: "Under review." }} />,
+    );
+    expect(info.firstElementChild?.className).toContain("bg-secondary-container");
   });
 
   it("hides itself when dismissed", () => {
-    render(<VerificationBanner status="draft" />);
+    render(<VerificationBanner copy={{ tone: "info", message: "Under review." }} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
 
