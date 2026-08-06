@@ -52,8 +52,9 @@ import { estimateMaxGapMinutes } from "./cron-interval";
 //
 // -----------------------------------------------------------------------------
 // DEDUPE: see supabase/migrations/0060_job_health_alerts.sql's header for the
-// full argument (filed as 0059, applied live as 0058_job_health_alerts - see
-// that file's own top note on the ledger-name mismatch). Short version: the
+// full argument (applied live as 0058_job_health_alerts, renamed twice on
+// merge - see that file's own top note on the ledger-name mismatch). Short
+// version: the
 // key is the job's own name, because that is the one part of "this job is
 // currently unhealthy" that stays stable for exactly as long as the SAME
 // incident is open and changes the moment it stops being open - unlike a
@@ -266,8 +267,9 @@ export const EXPECTED_JOBS: readonly string[] = [
 const LOG_PREFIX = "[alerts/job-health]";
 
 export interface JobHealthDeps {
-  /** SERVICE ROLE. sweep_job_health (0028) and job_alert_state (0058/filed as
-   * 0059) are both service_role-only; see either migration's header. */
+  /** SERVICE ROLE. sweep_job_health (0028) and job_alert_state (applied live
+   * as 0058, filed as 0060) are both service_role-only; see either
+   * migration's header. */
   readonly supabase: SupabaseClient<Database>;
   /** Injected in tests; defaults to the real Resend gateway. */
   readonly send?: (input: SendEmailInput) => Promise<SendEmailResult>;
@@ -595,10 +597,22 @@ function classifyKnownJob(
   //    it (`status <> 'succeeded'`) cannot be used here at all: it counts
   //    an in-flight run as a failure, so a job merely caught mid-run by this
   //    check would page. `terminal_failures` counts only `status = 'failed'`.
+  //
+  //    Review fix (E): the error TEXT here must never fall back to
+  //    `wideRow.last_error` either, even though branch 1 above safely does.
+  //    0028's `last_error` is built from the SAME `status <> 'succeeded'`
+  //    filter as `failures` (see 0061's own header), so it can carry an
+  //    in-flight run's message - null in practice today (a 'running' row's
+  //    `return_message` has nothing to report yet), but a value this
+  //    function has no way to verify came from a genuine failure. This
+  //    branch is reached only via `terminalRow`, so its text comes only
+  //    from `terminalRow`, full stop - a `null` reads as "no message", never
+  //    as "borrow one from a column this whole migration exists to not
+  //    trust here."
   const terminalFailures = terminalRow?.terminal_failures ?? 0;
   if (terminalFailures > 0) {
     const terminalRuns = terminalRow?.terminal_runs ?? terminalFailures;
-    const errorText = terminalRow?.last_terminal_error ?? wideRow.last_error;
+    const errorText = terminalRow?.last_terminal_error ?? null;
     const summary = `${terminalFailures} of ${terminalRuns} runs failed in the last ${RECENT_WINDOW_HOURS}h`;
     return {
       reason: "failing",

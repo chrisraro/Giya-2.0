@@ -237,16 +237,38 @@ describe("checkJobHealth", () => {
     // terminal_failures=0 for a job whose only run is 'running'.
     //
     // This fixture is now INTERNALLY CONSISTENT with real sweep_job_health
-    // output (unlike the pass-1 version of this test, which paired
-    // last_status:'running' with failures:0 - a combination the real
-    // function can never produce): `wide.last_status` genuinely is
-    // 'running' AND `terminal.terminal_failures` genuinely is 0, because
-    // the two are independent aggregates from independent functions, one of
-    // which (by construction, per 0061) cannot see the in-flight run as a
-    // failure at all.
+    // output (unlike BOTH prior versions of this test - pass 1 paired
+    // last_status:'running' with a recent-window failures:0 that the real
+    // function cannot produce; pass 2's fixture moved the same impossible
+    // pairing onto the WIDE row instead, patching only `last_status` and
+    // silently keeping `healthyWindows`'s `failures: 0` default. The
+    // reviewer's mutant probe confirmed the real value sweep_job_health
+    // returns for an in-flight-only job is `failures: 1` - the SAME `<>
+    // 'succeeded'` filter that made 0061 necessary in the first place also
+    // means the WIDE row can never show a genuine 0 here). `wide.last_status`
+    // is 'running' AND `wide.failures` is realistically 1 (that column DOES
+    // count the in-flight run - it is `sweep_job_health`'s, not 0061's) AND
+    // `terminal.terminal_failures` is 0, because 0061's aggregate is the one
+    // that, by construction, cannot see an in-flight run as a failure at all.
+    //
+    // MUTANT: restore bd89489's predicate (classifyKnownJob reads
+    // `recentRow.failures`/`recentRow.runs`/`recentRow.last_error` off a
+    // second sweep_job_health call, i.e. rename this test's `terminal_*`
+    // fields back to `failures`/`runs`/`last_error` on a row the OLD code
+    // would read for the recent window) against this exact fixture -> RED,
+    // because the old code reads the wide row's contaminated `failures: 1`
+    // and pages. Verified by mechanically restoring bd89489's
+    // classifyKnownJob and re-running this file: this test and the
+    // 'starting'/'sending' test both fail (false positives), while the
+    // current implementation reads 0061's `terminal_failures: 0` and stays
+    // silent.
     it("C2(i): does NOT page when the most recent run is merely in-flight ('running'), because sweep_job_terminal_failures correctly excludes it", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
-      let windows = withWide(healthyWindows(now), "campaigns.sweep", { last_status: "running" });
+      let windows = withWide(healthyWindows(now), "campaigns.sweep", {
+        last_status: "running",
+        failures: 1,
+        runs: 11,
+      });
       windows = withTerminal(windows, "campaigns.sweep", { terminal_failures: 0, terminal_runs: 0 });
       const fake = createFakeSupabase(windows);
       const { send, calls } = createSendMock();
@@ -262,15 +284,28 @@ describe("checkJobHealth", () => {
       expect(calls).toHaveLength(0);
     });
 
+    // MUTANT: same as above, restored against each of 'starting'/'sending'
+    // in turn -> RED for both (the old code's `recentRow.failures` read off
+    // the contaminated wide-shaped row is 1 regardless of which in-flight
+    // status produced it).
     it("does NOT page on 'starting' or 'sending' either - the same in-flight family", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
       for (const status of ["starting", "sending"]) {
-        let windows = withWide(healthyWindows(now), "campaigns.sweep", { last_status: status });
+        let windows = withWide(healthyWindows(now), "campaigns.sweep", {
+          last_status: status,
+          failures: 1,
+          runs: 11,
+        });
         windows = withTerminal(windows, "campaigns.sweep", { terminal_failures: 0, terminal_runs: 0 });
         const fake = createFakeSupabase(windows);
-        const { calls } = createSendMock();
+        const { send, calls } = createSendMock();
 
-        const result = await checkJobHealth({ supabase: fake.supabase, opsAddress: OPS_ADDRESS, now: () => now });
+        const result = await checkJobHealth({
+          supabase: fake.supabase,
+          send,
+          opsAddress: OPS_ADDRESS,
+          now: () => now,
+        });
 
         expect(result?.unhealthy).toEqual([]);
         expect(calls).toHaveLength(0);
