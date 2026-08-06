@@ -1,11 +1,15 @@
 -- ============================================================================
 -- rpc_balance_check_smoke.sql (pgTAP)
--- Smoke tests for 0056-0058: public.balance_check, public.balance_check_
+-- Smoke tests for 0056-0059: public.balance_check, public.balance_check_
 -- findings, public.balance_check_summary, private.balance_check_coverage_
--- days, private.balance_check_priority_count, task 2.2 + two review-fix
--- passes. Runs entirely inside one transaction and rolls back. Execute as a
--- privileged role (postgres) against a database with migrations 0001-0058
--- applied.
+-- days, private.balance_check_priority_count, private.balance_check_is_
+-- priority, private.balance_check_findings_pair_cleanup, task 2.2 + three
+-- review-fix passes. Runs entirely inside one transaction and rolls back.
+-- Execute as a privileged role (postgres) against a database with
+-- migrations 0001-0059 applied. The suite runs as `postgres` throughout
+-- EXCEPT one deliberate `set local role service_role` block (review fix
+-- C2) - see that section for why running everything as a privileged role
+-- would otherwise hide exactly the class of bug it exists to catch.
 --
 -- Fixture strategy: mirror rpc_campaigns_sweep_smoke.sql / rpc_points_expiry_
 -- smoke.sql. Two businesses (owners register via register_business under
@@ -20,10 +24,11 @@
 --
 -- Consumer ids f2-f7 sort in a KNOWN, deterministic order (f2 < f3 < f4 < f5
 -- < f6 < f7) so the rotating-cursor assertions below can name the EXACT pair
--- each call touches. e1-e4 are a second, visually distinct id family for the
+-- each call touches. e1-e5 are a second, visually distinct id family for the
 -- review-fix additions (I2's two-business consumer, I3b's fresh pair and
--- priority target, M2's cascade fixture) so they never collide with or
--- shadow the original f-family ordering.
+-- priority target, M2's cascade fixture, C2's service_role-specific cascade
+-- fixture) so they never collide with or shadow the original f-family
+-- ordering.
 --
 -- ON pair F ("rich ledger") - review fix I1. This is NOT a concurrent-write
 -- safety proxy and is not called one anywhere below: it would pass
@@ -57,14 +62,34 @@
 -- would produce) and calls to both `balance_check_priority_count` and
 -- `balance_check_coverage_days`. A migration that recreates a function is
 -- only as trustworthy as the thing that checks it landed; this is that
--- check, permanently.
+-- check, permanently. Review fix I9 (0059) strengthens it further: those
+-- three markers only catch a regression to an EARLIER body or comment-
+-- stripping specifically - the two things that actually happened - so a
+-- monotonic revision comment inside the body (`balance_check body
+-- revision: <migration>`) is now pinned exactly, forcing whoever next
+-- recreates this function to bump both the comment and this assertion's
+-- expected value together.
+--
+-- ON THE C2 FIX (0059, third review-fix pass). 0058's pair-cleanup trigger
+-- function was plain plpgsql, so its internal DELETE on balance_check_
+-- findings ran with the INVOKER's privileges - and service_role (the role
+-- every internal application code path runs as) has DELETE revoked on that
+-- table. The result: service_role could not delete ANY business_customers
+-- row at all, unconditionally, worse than the FOR KEY SHARE lock I7 had
+-- just removed. This suite could not have caught it on its own, because it
+-- runs entirely as postgres, which owns balance_check_findings and was
+-- never subject to that revoke - see the dedicated `set local role
+-- service_role` block below, the fix (private.balance_check_findings_pair_
+-- cleanup is now `security definer`), and I10 (private.balance_check_is_
+-- priority, the one shared implementation the tier-0 predicate now has
+-- instead of two independent copies that could silently disagree).
 -- ============================================================================
 
 begin;
 
 set local search_path = public, extensions;
 
-select plan(68);
+select plan(73);
 
 -- ---------------------------------------------------------------- fixtures
 insert into auth.users (id, aud, role, email, raw_user_meta_data)
@@ -232,6 +257,18 @@ select ok(
   and not has_function_privilege('authenticated', 'private.balance_check_priority_count(integer)', 'EXECUTE')
   and not has_function_privilege('service_role', 'private.balance_check_priority_count(integer)', 'EXECUTE'),
   'private.balance_check_priority_count is reachable by no client or service role');
+
+select ok(
+  not has_function_privilege('anon', 'private.balance_check_is_priority(uuid,uuid,timestamptz)', 'EXECUTE')
+  and not has_function_privilege('authenticated', 'private.balance_check_is_priority(uuid,uuid,timestamptz)', 'EXECUTE')
+  and not has_function_privilege('service_role', 'private.balance_check_is_priority(uuid,uuid,timestamptz)', 'EXECUTE'),
+  'review fix I10: private.balance_check_is_priority (the one shared tier-0 predicate) is reachable by no client or service role');
+
+select ok(
+  not has_function_privilege('anon', 'private.balance_check_findings_pair_cleanup()', 'EXECUTE')
+  and not has_function_privilege('authenticated', 'private.balance_check_findings_pair_cleanup()', 'EXECUTE')
+  and not has_function_privilege('service_role', 'private.balance_check_findings_pair_cleanup()', 'EXECUTE'),
+  'review fix M17: private.balance_check_findings_pair_cleanup is reachable by no client or service role directly (trigger firing does not need it)');
 
 -- ------------------------------------------------------------ never touches the money path
 select set_config('test.pt_count_before',
@@ -456,6 +493,21 @@ select ok(
   current_setting('test.balchk_def') ~ 'balance_check_priority_count\('
   and current_setting('test.balchk_def') ~ 'balance_check_coverage_days\(',
   'the live balance_check body calls both private.balance_check_priority_count and private.balance_check_coverage_days by name - not merely words that could appear in an unrelated comment');
+
+-- Review fix I9: the three markers above catch a regression to an EARLIER
+-- body or comment-stripping specifically - the two things that actually
+-- happened - but any FUTURE body that happens to be a superset of those
+-- three words/calls passes regardless of what else changed, so an unrelated
+-- deployment gap on a later migration touching this function would go
+-- undetected the same way 0057's did. A monotonic revision marker inside
+-- the body closes that: whoever next recreates public.balance_check must
+-- bump BOTH this comment and this assertion's expected value, or the two
+-- go out of sync in an obviously wrong way rather than staying silently
+-- plausible.
+select is(
+  (regexp_match(current_setting('test.balchk_def'), 'balance_check body revision:\s*(\d+)'))[1],
+  '0059',
+  'review fix I9: the live balance_check body carries the current revision marker exactly - a future migration that recreates this function without bumping it fails here');
 
 -- ============================================================================
 -- M5: LIMIT NULL is unbounded in Postgres. Structural pin that p_limit is
@@ -696,6 +748,41 @@ select ok(
        and consumer_id = 'e4444444-4444-4444-8444-444444444444'
   ),
   'deleting the business_customers row cleans up balance_check_findings via the AFTER DELETE trigger - no stale, unclearable finding survives it (review fix M2, mechanism changed by I7)');
+
+-- ============================================================================
+-- C2 (Critical, 0059): the SAME cleanup, exercised as service_role
+-- specifically - the role every internal application code path actually
+-- runs as, and the ONE role for which the ORIGINAL (non-`security definer`)
+-- trigger failed outright. Every assertion above ran as `postgres`
+-- (privileged, bypasses every grant check), which is exactly why this suite
+-- could not have caught the bug on its own: `postgres` owns `balance_check_
+-- findings` and was never subject to its DELETE revoke in the first place.
+-- Live-reproduced before this fix landed: as `service_role`, deleting a
+-- `business_customers` row raised `permission denied for table balance_
+-- check_findings` - the trigger's internal DELETE ran with the INVOKER's
+-- (service_role's) privileges, which 0056 revokes, and the privilege check
+-- fires against the RELATION regardless of whether that pair had a finding
+-- at all. Pair M below never had a finding checked in by anyone - the
+-- delete must still succeed cleanly.
+-- ============================================================================
+insert into public.business_customers (business_id, consumer_id, points_balance)
+values (current_setting('test.biz')::uuid, 'e5555555-5555-4555-8555-555555555555', 175);
+
+set local role service_role;
+select lives_ok(
+  $$ delete from public.business_customers
+      where business_id = current_setting('test.biz')::uuid
+        and consumer_id = 'e5555555-5555-4555-8555-555555555555' $$,
+  'review fix C2: service_role can delete a business_customers row without error - the pair-cleanup trigger now runs SECURITY DEFINER, so its internal DELETE on balance_check_findings no longer hits service_role''s own revoke');
+reset role;
+
+select ok(
+  not exists (
+    select 1 from public.balance_check_findings
+     where business_id = current_setting('test.biz')::uuid
+       and consumer_id = 'e5555555-5555-4555-8555-555555555555'
+  ),
+  'pair M (never checked, no finding row ever existed) confirms the delete truly went through as service_role, not merely that no error surfaced');
 
 -- ------------------------------------------------------------ the schedule
 select is(

@@ -129,7 +129,7 @@ Twenty-four suites, one per domain (review fix, task 2.1: the prior count of "Ni
 | `rpc_campaign_budget_guard_smoke.sql` | the campaign budget race guard in `award_receipt_points` (0040/0041, task 1.2 + review fix C1), 34 assertions: CORRECT PER-CAMPAIGN ATTRIBUTION from each earn row's own `rule_snapshot` entries - never a naive `sum(points) where campaign_id = X`, which is wrong in both directions the moment a campaign stacks as a non-primary contributor (review C1); `max_total_points` as a running cap shared across every consumer, closed race-safely by locking the campaigns row before re-checking the total (the same cross-consumer race 0015 hardened for `claim_reward`); `per_customer_limit` armed at award time on its own, not only when `max_total_points` is also set (review I1); a budget with room for exactly one more contribution and two sequential awards - the second raises `CAMPAIGN_BUDGET_RACE`, and a corrected retry (the value `award.ts`'s own recovery sends) succeeds; a clawed-back contribution stops counting against the budget; a vanished/unknown campaign id in the array is skipped, not fatal; and omitting `p_campaign_budget_checks` entirely (every caller before task 1.2) enforces nothing, byte-identical to 0038's prior behaviour |
 | `rpc_points_expiry_smoke.sql` | Task 1.3 points expiry enforcement (0042-0048, both review-fix passes), 67 assertions: doc 35 section 7's FIFO remainder formula ordered by EXPIRY not creation (I1) - a partially-consumed lot, a later untouched lot, a lot fully drained to 0, a clawback-only consumption, and the counter-example where a never-expiring `adjust` must be drained LAST rather than first (a null expiry sorting as `+∞`, not first); the aggregate at two `asof` values and the public wrapper agreeing with it; `public.points_next_expiry` correctly excluding an already-past-due lot; `public.expire_points` (the sweep) - SELF-CLEARING proven with a small `p_limit` (I2: a third pair is reached only once the first two clear a slot, not starved forever), the right `expire` row with the restored `x_expired_sum`/`d_drained_sum` audit fields (I5), the cached balance equal to the ledger sum, nothing for a zero-balance pair, a backfilled-already-past-due lot swept correctly (M5), and idempotency across every pair including the self-clearing trio; `public.points_expiry_warn` (the warn job) using the PROJECTED remainder at both horizons rather than the soonest lot (original I3: a shadowed larger lot fires its own combined total on the first run), ordered by URGENCY - soonest in-window expiry, not UUID - so a p_limit of 1 notifies a 2-days-out pair over a UUID-earlier 25-days-out one (re-review N2), deduped on the WINDOW-STABLE soonest-lot date rather than the moving projected figure, proven by literally aging the ledger between runs to simulate a day passing: a growing aggregate (300->500) produces no duplicate, only a genuine change of the soonest lot does (re-review N3), the restored date in both the copy ("expire by...") and the `data.expires_on` payload (re-review N4), the in_app/email channel split, a backfilled-already-past-due lot never warned (M5), and idempotency; both `cron.job` rows with their exact schedule and command; the append-only fence's one permanent exception (now correctly homed in 0047, not rewriting 0042's history) proven both ways (I4: the null-to-value transition succeeds and lands, every other column and every other `expires_at` transition and DELETE still raise), with its column allowlist pinned exactly (re-review N7); and the full I-A grant matrix including `public.points_expirable_remainder`, missed by the first pass (C1) |
 | `rpc_campaigns_sweep_smoke.sql` | Task 2.1 `campaigns.sweep` (0053, review-fixed twice by 0054 and 0055), 33 assertions: doc 34's T3 (`scheduled -> active` at `starts_at`) and T7 (`active|paused -> ended` at `ends_at`) as ONE `public.sweep_campaigns` function with two independent candidate scans; a due scheduled campaign on an ACTIVE business activates with a `campaign.activated` audit row (`actor_kind='system'`, `after.trigger='sweep'` - the app's own vocabulary from `src/features/campaigns/server/audit.ts`, never a parallel verb); a not-yet-due scheduled campaign and both an already-`ended` and an already-`archived` campaign are left completely untouched with no audit row; an `active` campaign AND a `paused` campaign both past `ends_at` are ended with `campaign.ended` recording the correct source status in `before`, PROVEN AGAIN on a business the T3 skip case has already made suspended (T7 is unconditional and a fixture now pins that rather than leaving it asserted only by construction); G1 (business standing) gates T3 alone - a due scheduled campaign on a SUSPENDED business is SKIPPED (stays `scheduled`, no audit row, no error) and then genuinely activates once the business is set back to `active`, proving the skip re-checks live standing rather than caching a verdict; GENUINE SELF-CLEARING under a TIGHT `p_limit=1` (0054 review fix I1/I2, the actual 0045-shaped bug 0053 shipped with: a `p_limit=200`/8-fixture "second run is 0" check cannot distinguish "left candidacy" from "still occupying a slot doing no work" the way a small-limit starvation probe can - a permanently-ineligible `'closed'`-business campaign sorted first by `starts_at` no longer starves a later, gate-passing one out of the budget); `private.campaigns_sweep_ineligible_count()` (0055 review fix I1: 0054's own I1+I3 interaction silently dropped skip visibility to zero for the ordinary case) returning exactly the one due-but-ineligible campaign in play, fully revoked from every role including `service_role`; the widened `campaigns_active_window_idx` (now covering `paused`, which 0012's original predicate excluded); the `cron.job` row's exact schedule (`*/5 * * * *`) and command; no `points_transactions` row written by any of it; and the service_role-only grant |
-| `rpc_balance_check_smoke.sql` | Task 2.2 `integrity.balance_check` (0056, review-fixed twice by 0057 and 0058), 68 assertions: the three-layer fence on `balance_check_findings` including its pair-level cleanup (0058 replaced 0057's composite FK with an `after delete` trigger - review fix I7, the FK's implicit `FOR KEY SHARE` lock conflicted with every money-path writer's `FOR UPDATE`); the I-A grant matrix across `public.balance_check`, `public.balance_check_summary`, `private.balance_check_coverage_days` and `private.balance_check_priority_count`; a genuinely drifted pair (a cached balance set to 650 against a 500 ledger sum, constructed directly since no real writer produces this) correctly flagged `drifted=true` with both numbers recorded, alongside clean pairs including a SIX-type ledger (review fix M3 added `reversal`) and a consumer with real activity at TWO businesses (review fix I2 - the ledger-sum business-scoping fixture 0056 shipped without, red-verified live against a reintroduced business_id-less mutant); the drifted pair's cached balance and the ledger's row count both UNCHANGED after the check (detection only, never auto-corrected); a STRUCTURAL pin (via `pg_get_functiondef`, comments stripped before checking for a statement-boundary `;` - review fix C1) that the candidate read and the upsert are one unbroken statement, that `p_limit` is clamped before reaching any `limit` clause (review fix M5), AND - the 0058 "defense" - that the live body actually contains the word "tier" and calls both `balance_check_priority_count` and `balance_check_coverage_days` by name, a pin proven live to fail against a comment-stripped mutant (the exact class of drift 0057 shipped with undetected); `p_limit=0` and `p_limit=null` as no-ops; GENUINE ROTATION under a TIGHT `p_limit=1` across four successive calls; the `private.balance_check_coverage_days` tripwire primitive proven budget-corrected (review fix I5 - at `p_limit=200`, exactly `points.expiry_sweep`'s own live cron limit, the effective rotation budget collapses to a floor of 1, so `coverage_days` equals the full pair count rather than the naive `ceil(n/200)`); a fresh clawback out-ranking a never-checked bystander pair for the next `p_limit=1` slot, with `private.balance_check_priority_count` asserted directly both before (1) and after (0) that run resolves it (review fix I3b/I6); `balance_check_summary().drifted_count` asserted as a baseline-plus-one delta rather than a hardcoded literal (review fix I8); a pair-level cleanup proof (delete `business_customers`, the finding disappears with it); and the `cron.job` row's exact schedule (`40 18 * * *`) and command |
+| `rpc_balance_check_smoke.sql` | Task 2.2 `integrity.balance_check` (0056, review-fixed three times by 0057, 0058 and 0059), 73 assertions: the three-layer fence on `balance_check_findings` including its pair-level cleanup (0058 replaced 0057's composite FK with an `after delete` trigger - review fix I7, the FK's implicit `FOR KEY SHARE` lock conflicted with every money-path writer's `FOR UPDATE` - then 0059 made that trigger function `security definer`, review fix C2: plain plpgsql meant its internal DELETE ran with the INVOKER's privileges, and `service_role` has DELETE revoked on `balance_check_findings`, so `service_role` could not delete ANY `business_customers` row at all until this fix); the I-A grant matrix across all six callables, including two new in 0059, `private.balance_check_is_priority` (I10, the one shared tier-0 predicate implementation) and `private.balance_check_findings_pair_cleanup` itself (M17); a genuinely drifted pair (a cached balance set to 650 against a 500 ledger sum, constructed directly since no real writer produces this) correctly flagged `drifted=true` with both numbers recorded, alongside clean pairs including a SIX-type ledger (review fix M3 added `reversal`) and a consumer with real activity at TWO businesses (review fix I2 - the ledger-sum business-scoping fixture 0056 shipped without, red-verified live against a reintroduced business_id-less mutant); the drifted pair's cached balance and the ledger's row count both UNCHANGED after the check (detection only, never auto-corrected); a STRUCTURAL pin (via `pg_get_functiondef`, comments stripped before checking for a statement-boundary `;` - review fix C1) that the candidate read and the upsert are one unbroken statement, that `p_limit` is clamped before reaching any `limit` clause (review fix M5), that the live body actually contains the word "tier" and calls both `balance_check_priority_count` and `balance_check_coverage_days` by name (the 0058 "defense"), PLUS an exact `balance_check body revision: 0059` marker pin (review fix I9, closing the gap that a future body satisfying only the older markers would still pass); `p_limit=0` and `p_limit=null` as no-ops; GENUINE ROTATION under a TIGHT `p_limit=1` across four successive calls; the `private.balance_check_coverage_days` tripwire primitive proven budget-corrected (review fix I5 - at `p_limit=200`, exactly `points.expiry_sweep`'s own live cron limit, the effective rotation budget collapses to a floor of 1, so `coverage_days` equals the full pair count rather than the naive `ceil(n/200)`); a fresh clawback out-ranking a never-checked bystander pair for the next `p_limit=1` slot, with `private.balance_check_priority_count` asserted directly both before (1) and after (0) that run resolves it (review fix I3b/I6); `balance_check_summary().drifted_count` asserted as a baseline-plus-one delta rather than a hardcoded literal (review fix I8); a pair-level cleanup proof (delete `business_customers`, the finding disappears with it); a SECOND, SERVICE_ROLE-SPECIFIC cleanup proof (review fix C2) - the only assertion in the file that runs under `set local role service_role` rather than as `postgres`, `lives_ok`-asserting the identical delete no longer errors; and the `cron.job` row's exact schedule (`40 18 * * *`) and command |
 
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
@@ -433,7 +433,7 @@ only a comment" is how the 0047 incident below began. No revert was needed
 0053 or 0054 from here on goes in a companion migration - 0055 is that
 migration for 0054's own I1/I3 interaction.
 
-### Balance check (0056-0058, task 2.2 + two review-fix passes)
+### Balance check (0056-0059, task 2.2 + three review-fix passes)
 
 `public.balance_check(p_limit integer default 500)` proves the invariant six
 SECURITY DEFINER writers (`award_receipt_points`, `claim_reward`,
@@ -481,6 +481,81 @@ ledger's narrative about its own past; this one was in behaviour - an
 integrity job policing the money path was, for a time, recorded as running
 a body it was not actually running.
 
+**0059: the I7 fix traded a rare lock for an unconditional error, on the
+money path (C2, Critical).** 0058's `private.balance_check_findings_pair_
+cleanup()` - the `after delete on business_customers` trigger that replaced
+0057's composite FK - was plain plpgsql, not `security definer`. Its
+internal `delete from public.balance_check_findings` therefore ran with the
+firing role's own privileges, and 0056 revokes DELETE on that table from
+`service_role` - the role every internal application code path actually
+runs as. The privilege check is against the relation, not per matching row,
+so `service_role` could not delete ANY `business_customers` row after 0058,
+including a never-checked pair with no finding at all: `ERROR: permission
+denied for table balance_check_findings`, reproduced live in a rolled-back
+transaction before the fix and confirmed against the same assertion after
+it. This is worse than the lock I7 removed - a rare wait became an
+unconditional error on the table every money-path writer touches - and the
+FK version 0058 replaced never had this problem, because Postgres runs
+referential actions in the constrained table's owner context, not the
+invoker's. `rpc_balance_check_smoke.sql` runs entirely as `postgres`
+everywhere else in the file, so nothing in the suite could have caught a
+role-specific privilege bug; a new assertion (pair M) now runs the identical
+delete under `set local role service_role` specifically, red-verified
+against the original trigger and green against the fix. FIX: add `security
+definer` to the trigger function, the same shape this repo already uses for
+`private.handle_new_user()` (0003), a trigger fired as `supabase_auth_admin`
+that writes RLS-protected tables.
+
+**The 0058 "defense" only caught the ONE incident that already happened
+(I9).** Checking the live body for the word "tier" and for calls to
+`coverage_days`/`priority_count` by name catches a regression to an earlier
+body and catches comment-stripping specifically - the two things that
+actually happened - but any future body that happens to be a superset of
+those three markers passes silently, so an unrelated deployment gap on a
+later migration touching this function would go undetected the same way
+0057's did. FIX: a monotonic marker the next migration touching this
+function is forced to bump - `-- balance_check body revision: 0059` inside
+the body itself, pinned exactly by the suite - the same forcing-function
+shape a version number gives a public API, now applied to a function whose
+deployed bytes have twice failed to match its file.
+
+**"Never a second implementation" was false as written (I10).** 0058's
+header claimed the tier-0 predicate had one implementation because
+`coverage_days`/`priority_count` share a primitive - true for
+`coverage_days`, false for the tier-0 CHECK itself: `public.balance_check`'s
+own candidate `ORDER BY` carried its own inline five-condition `case when
+exists (...)`, and `private.balance_check_priority_count` reimplemented the
+identical five conditions independently. They agreed today, but a future
+change to one and not the other would make the tier-0 warning report a
+number the sort no longer actually uses - exactly the class of divergence
+this task exists to make structurally impossible. FIX:
+`private.balance_check_is_priority(p_business_id, p_consumer_id,
+p_checked_at)`, the one implementation of the predicate; both
+`public.balance_check`'s `ORDER BY` and `private.balance_check_priority_
+count`'s scoring CTE now call it, neither restates the conditions. Denied to
+every role including `service_role`, matching its sibling private helpers.
+
+**Minors (0059).** M15: 0058's header claimed "no writer ever takes `FOR
+UPDATE` on `businesses`" as the reason restoring the two single-column FKs
+was safe - false as stated, `submit_business_for_review`,
+`activate_business` and `reject_business_verification` (0033) all take a
+plain `for update` on `businesses`. The conclusion still holds, for a
+different reason: those three RPCs are rare, once-per-business-lifecycle
+administrative transitions, not continuous per-transaction money-path
+activity, unlike `business_customers`, which every single award/redeem/
+expire/clawback locks `FOR UPDATE`. M16: `private.balance_check_coverage_
+days`'s scalar subquery against `cron.job` had no `limit 1` - a genuine
+duplicate `points.expiry_sweep` row should not occur, but a scalar subquery
+returning more than one row raises, and this function runs inside
+`public.balance_check`'s own execution, so a future duplicate would take
+the entire nightly integrity check down rather than merely degrade the
+tripwire's accuracy; `limit 1` added. M17: `private.balance_check_findings_
+pair_cleanup` was left ungranted while its sibling private helpers were
+explicitly revoked from every role including `service_role` - a table
+trigger's invocation is never gated by `EXECUTE` on the trigger function for
+any role, so revoking it costs nothing and now matches every other private
+helper's posture in this file.
+
 **Persistence.** A table, `public.balance_check_findings`, one row per
 `(business_id, consumer_id)` pair, upserted - not an append-only log, by
 deliberate analogy to `business_customers` itself, since the useful fact is
@@ -496,32 +571,46 @@ to `businesses`/`consumers` alone left a stale finding behind forever if the
 pair row was ever deleted without its business or consumer going with it;
 DELETE stays revoked from every role, so SOME mechanism was needed to make
 such a row clearable) is now an `after delete` TRIGGER on `business_
-customers` (0058, review fix I7), not the composite foreign key 0057
-originally added. That FK looked right but cost something real: Postgres
-enforces a foreign key by taking `FOR KEY SHARE` on the referenced parent row
-for every first-time INSERT, and `FOR KEY SHARE` conflicts with the `FOR
-UPDATE` every money-path writer takes on that same `business_customers` row -
-bounded (only first sightings; `ON CONFLICT DO UPDATE` skips the RI recheck
-when the FK columns are unchanged) but real, and it contradicted both this
-task's binding "read-only against the money path" constraint and this
-section's own "zero false positives" paragraph below. The trigger achieves
-the identical cleanup outcome - `after delete on business_customers` removes
-the matching finding - while taking no referential-integrity lock at all,
-because a trigger is not a constraint. The original two single-column FKs
-(0056) are restored alongside it; `businesses`/`consumers` are never locked
-`FOR UPDATE` by any writer, so their own first-sighting locks were never part
-of the problem.
+customers` (0058, review fix I7; made `security definer` in 0059, review fix
+C2 - see below), not the composite foreign key 0057 originally added. That FK
+looked right but cost something real: Postgres enforces a foreign key by
+taking `FOR KEY SHARE` on the referenced parent row for every first-time
+INSERT, and `FOR KEY SHARE` conflicts with the `FOR UPDATE` every money-path
+writer takes on that same `business_customers` row - bounded (only first
+sightings; `ON CONFLICT DO UPDATE` skips the RI recheck when the FK columns
+are unchanged) but real, and it contradicted both this task's binding
+"read-only against the money path" constraint and this section's own "zero
+false positives" paragraph below. The trigger achieves the identical cleanup
+outcome - `after delete on business_customers` removes the matching finding
+- while taking no referential-integrity lock at all, because a trigger is
+not a constraint. The original two single-column FKs (0056) are restored
+alongside it; a first-sighting `FOR KEY SHARE` on `businesses(id)` can in
+principle still collide with one of `submit_business_for_review`,
+`activate_business` or `reject_business_verification` (0033), which do take
+`FOR UPDATE` on `businesses` - corrected from an earlier, false claim that no
+writer ever does (0059, review fix M15) - but that collision window is one
+rare, once-per-business-lifecycle administrative action against a whole
+business's lifetime, not the continuous per-transaction hot path
+`business_customers` itself sees from every award/redeem/expire/clawback,
+which is the distinction that actually makes restoring these FKs safe.
 
-Noted, not further mitigated (M10): the trigger still means a `drifted=true`
-finding can be erased by deleting the `business_customers` row it describes,
-which service-role code can do even though `balance_check_findings`'
-own DELETE stays revoked from every role - that revoke only ever protected
-this table directly, never the parent row. Accepted: nothing in this
-codebase currently deletes a `business_customers` row at all (0012 creates
-it "on first interaction" and nothing removes it), so this is a defence
-against a hypothetical future path, and the finding surviving "no matter
-what" was never M2's actual guarantee - only "survives as long as the pair
-it describes still exists."
+Because the trigger function runs as `security definer` (0059), its
+internal DELETE always succeeds regardless of which role's DELETE on
+`business_customers` fired it - fixing a Critical bug (C2) where the
+original, plain-plpgsql version ran that DELETE with the INVOKER's
+privileges, and `service_role` (the role every internal application code
+path runs as) has DELETE revoked on `balance_check_findings`, so
+`service_role` could not delete ANY `business_customers` row at all until
+this fix, not just ones with a finding. Noted, not further mitigated (M10):
+the trigger still means a `drifted=true` finding can be erased by deleting
+the `business_customers` row it describes, which service-role code can now
+do (again) even though `balance_check_findings`' own DELETE stays revoked
+from every role - that revoke only ever protected this table directly,
+never the parent row. Accepted: nothing in this codebase currently deletes a
+`business_customers` row at all (0012 creates it "on first interaction" and
+nothing removes it), so this is a defence against a hypothetical future
+path, and the finding surviving "no matter what" was never M2's actual
+guarantee - only "survives as long as the pair it describes still exists."
 
 **Detection only.** The function never writes `points_transactions` or
 `business_customers` - an automatic "fix" would destroy the evidence a human
@@ -660,45 +749,57 @@ status and, on failure, its error string; a drifted-but-successful run
 leaves no trace there at all - 0057 review fix M1, correcting 0056's header
 claim to the contrary) was the only in-band signal a drift finding produced.
 
-Covered by `rpc_balance_check_smoke.sql`, 68 assertions (0056's original 35,
-27 from the first review-fix pass, 6 net new from the second): the table's
-fence including the pair-level cleanup trigger; the I-A grant matrix across
-all four new callables (`public.balance_check`, `public.balance_check_
-summary`, `private.balance_check_coverage_days`, `private.balance_check_
-priority_count`); a genuinely drifted pair detected and clean pairs correctly
-left clean, including a consumer with real activity at TWO businesses (review
-fix I2 - the ledger-sum-scoping fixture 0056 shipped without, red-verified
-live against a reintroduced business_id-less mutant before being run against
-the real function) and a six-type ledger pair; the drifted pair's cached
-balance and the ledger row count both unchanged after the run; the structural
-single-statement pin (comments stripped first, review fix C1) and the
-p_limit-clamp pin; the "DEFENSE" markers proving the live body actually
-carries 0058's own logic, RED-verified live against a reintroduced
-comment-stripped mutant of `balance_check` before being run against the
-corrected function; `p_limit=0` and `p_limit=null` as no-ops; the four-call
-rotation proof; the coverage-days primitive's budget-corrected value (review
-fix I5); the priority-count primitive asserted directly on both sides of the
-run that resolves it (review fix I6); a fresh clawback out-ranking a
-never-checked bystander; `balance_check_summary().drifted_count` as a
-baseline-plus-one delta rather than a hardcoded literal (review fix I8); and
-the pair-level cleanup proof. Verified live on 2026-08-06 against a SHARED,
-already-populated `business_customers` table: assertions read the
-pre-existing candidate count dynamically rather than asserting a hardcoded
-literal, and the rotation proof only asserts "outside the just-rotated
-trio", not a specific pair - both were review findings against the first
-draft of this suite, caught by running it against real live data rather than
-an assumed-empty table. Two separate, unrelated bugs were caught the same way
-mid-review-fix-pass: `points_transactions.created_at`'s own `default now()`
-is transaction-frozen exactly like `checked_at` would have been under
-`statement_timestamp()`, so a fixture simulating "a clawback landed after the
-first check" needed its `created_at` stamped explicitly with
-`clock_timestamp()` to be genuinely later in wall-clock terms than an
-already-recorded `checked_at` - a testing-only wrinkle (production writers
-each run in their own separate transaction, where `now()` already means what
-it should) rather than anything wrong with the schema or the function; and,
-in the second pass, the deployment incident this section opens with, caught
-only by a direct `pg_proc` query rather than by this suite itself running
-green.
+Covered by `rpc_balance_check_smoke.sql`, 73 assertions (0056's original 35,
+27 from the first review-fix pass, 6 net new from the second, 5 net new from
+the third): the table's fence including the pair-level cleanup trigger; the
+I-A grant matrix across all six new callables (`public.balance_check`,
+`public.balance_check_summary`, `private.balance_check_coverage_days`,
+`private.balance_check_priority_count`, and, new in the third pass,
+`private.balance_check_is_priority` and `private.balance_check_findings_
+pair_cleanup` themselves - I10 and M17); a genuinely drifted pair detected
+and clean pairs correctly left clean, including a consumer with real
+activity at TWO businesses (review fix I2 - the ledger-sum-scoping fixture
+0056 shipped without, red-verified live against a reintroduced
+business_id-less mutant before being run against the real function) and a
+six-type ledger pair; the drifted pair's cached balance and the ledger row
+count both unchanged after the run; the structural single-statement pin
+(comments stripped first, review fix C1) and the p_limit-clamp pin; the
+"DEFENSE" markers proving the live body actually carries 0058's own logic,
+RED-verified live against a reintroduced comment-stripped mutant of
+`balance_check` before being run against the corrected function, PLUS
+(review fix I9) the exact `balance_check body revision: 0059` marker pinned
+to that literal string; `p_limit=0` and `p_limit=null` as no-ops; the
+four-call rotation proof; the coverage-days primitive's budget-corrected
+value (review fix I5); the priority-count primitive asserted directly on
+both sides of the run that resolves it (review fix I6); a fresh clawback
+out-ranking a never-checked bystander; `balance_check_summary().drifted_
+count` as a baseline-plus-one delta rather than a hardcoded literal (review
+fix I8); the pair-level cleanup proof; and, new in the third pass, a pair
+(M) deleted from `business_customers` under `set local role service_role`
+specifically via `lives_ok` (review fix C2) - the one assertion in the whole
+file that runs as anything other than `postgres`, closing the exact blind
+spot that let the Critical privilege bug ship undetected in 0058. Verified
+live on 2026-08-06 against a SHARED, already-populated `business_customers`
+table: assertions read the pre-existing candidate count dynamically rather
+than asserting a hardcoded literal, and the rotation proof only asserts
+"outside the just-rotated trio", not a specific pair - both were review
+findings against the first draft of this suite, caught by running it against
+real live data rather than an assumed-empty table. Two separate, unrelated
+bugs were caught the same way mid-review-fix-pass: `points_transactions.
+created_at`'s own `default now()` is transaction-frozen exactly like
+`checked_at` would have been under `statement_timestamp()`, so a fixture
+simulating "a clawback landed after the first check" needed its `created_at`
+stamped explicitly with `clock_timestamp()` to be genuinely later in
+wall-clock terms than an already-recorded `checked_at` - a testing-only
+wrinkle (production writers each run in their own separate transaction,
+where `now()` already means what it should) rather than anything wrong with
+the schema or the function; and, in the second pass, the deployment incident
+this section opens with, caught only by a direct `pg_proc` query rather than
+by this suite itself running green. The third pass's own Critical bug (C2)
+was likewise caught only by direct, role-scoped live reproduction, not by
+this suite running green - the suite's `set local role service_role`
+assertion (pair M) exists now specifically so the NEXT role-privilege bug in
+this function family cannot ship the same way.
 
 ### What the receipts sweep does and does not do
 
@@ -964,6 +1065,28 @@ outcome is visible; the push is owed to the notifications slice.
   check` keeps its `service_role`-only grant across the `create or replace`,
   now with a body confirmed identical to the file rather than merely
   behaviourally similar.
+- Migration 0059 (task 2.2 third review-fix pass: adds `security definer` to
+  `private.balance_check_findings_pair_cleanup` - the Critical C2 fix, see
+  this file's "Balance check" section above - adds the new shared primitive
+  `private.balance_check_is_priority`, re-creates `private.balance_check_
+  priority_count` and `public.balance_check` to call it instead of
+  restating its conditions, adds a `limit 1` to `private.balance_check_
+  coverage_days`'s `cron.job` subquery, and adds the explicit revoke on
+  `private.balance_check_findings_pair_cleanup` itself) added no new advisor
+  of any level beyond 0056's own already-accepted INFO lint. Verified live
+  on 2026-08-06: still 0 ERROR, same WARN set. All five function bodies
+  0059 deploys were verified byte-for-byte against the committed file via
+  `md5(btrim(prosrc, E'\n'))` immediately after applying, on the first
+  attempt this time. `private.balance_check_is_priority` is plain (not
+  `SECURITY DEFINER`) and revoked from every role including `service_role`,
+  so it never appears in the definer-callable warnings; `private.balance_
+  check_findings_pair_cleanup` IS now `SECURITY DEFINER` (the fix itself)
+  but is a trigger function, never directly callable via `/rest/v1/rpc/...`,
+  so it does not appear in the `authenticated_security_definer_function_
+  executable` lint either - that lint only flags functions reachable through
+  PostgREST's RPC surface, which a trigger function, EXECUTE-revoked from
+  every role, is not; `public.balance_check` keeps its `service_role`-only
+  grant across the `create or replace`.
 
 ### `cancel_claim` (0050-0051, task 1.4 + review-fix pass)
 
@@ -1088,6 +1211,7 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0056_balance_check.sql | 20260806095729 | 0056_balance_check |
 | 0057_balance_check_review_fixes.sql | 20260806104108 | 0057_balance_check_review_fixes |
 | 0058_balance_check_deployment_correction.sql | 20260806111225 | 0058_balance_check_deployment_correction |
+| 0059_balance_check_trigger_privilege_fix.sql | 20260806114840 | 0059_balance_check_trigger_privilege_fix |
 
 **Rows 0001-0035 are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`; rows 0036-0049 were applied later, and 0042-0049 on 2026-08-06.** The
 sentence below describes the replay only. It does NOT describe 0042-0049: one
