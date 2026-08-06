@@ -625,7 +625,7 @@ describe("actions: resumeCampaign", () => {
   it("refuses to resume with the activate-path's BUSINESS_NOT_VERIFIED error when the business lost active status while paused", async () => {
     table("campaigns").__result = { data: pausedPromotionRow(), error: null };
     table("promotions").__result = { data: { id: "promo-1" }, error: null };
-    table("businesses").__result = { data: { status: "suspended" }, error: null };
+    table("businesses").__result = { data: { ...BUSINESS_ROW, status: "suspended" }, error: null };
 
     const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
 
@@ -716,7 +716,7 @@ describe("campaign lifecycle transitions write an audit_logs row", () => {
     return mocks.auditInsert.mock.calls[0]?.[0] as Record<string, unknown>;
   }
 
-  it("writes a campaign.activated row carrying the acting staff member and the from/to status", async () => {
+  it("writes a campaign.activated row carrying the acting staff member, the from/to status, the manual trigger, and a request_id", async () => {
     table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "draft" }, error: null };
 
     const result = await actions.activateCampaign({ campaignId: CAMPAIGN_ID });
@@ -732,7 +732,12 @@ describe("campaign lifecycle transitions write an audit_logs row", () => {
     expect(row.actor_kind).toBe("user");
     expect(row.actor_role).toBe("owner");
     expect(row.before).toEqual({ status: "draft" });
-    expect(row.after).toEqual({ status: "active" });
+    // M5: trigger discriminator (doc 34) plus a request_id correlating this
+    // row with the request, the same fields admin/consequences.ts and
+    // receipts/server/alias.ts populate on their own audit writes.
+    expect(row.after).toEqual({ status: "active", trigger: "manual" });
+    expect(typeof row.request_id).toBe("string");
+    expect((row.request_id as string).length).toBeGreaterThan(0);
   });
 
   it("writes a campaign.paused row on pause", async () => {
@@ -744,7 +749,7 @@ describe("campaign lifecycle transitions write an audit_logs row", () => {
     const row = auditRow();
     expect(row.action).toBe("campaign.paused");
     expect(row.before).toEqual({ status: "active" });
-    expect(row.after).toEqual({ status: "paused" });
+    expect(row.after).toEqual({ status: "paused", trigger: "manual" });
   });
 
   it("writes a campaign.resumed row on resume", async () => {
@@ -756,7 +761,7 @@ describe("campaign lifecycle transitions write an audit_logs row", () => {
     const row = auditRow();
     expect(row.action).toBe("campaign.resumed");
     expect(row.before).toEqual({ status: "paused" });
-    expect(row.after).toEqual({ status: "active" });
+    expect(row.after).toEqual({ status: "active", trigger: "manual" });
   });
 
   it("writes a campaign.ended row on end", async () => {
@@ -768,7 +773,7 @@ describe("campaign lifecycle transitions write an audit_logs row", () => {
     const row = auditRow();
     expect(row.action).toBe("campaign.ended");
     expect(row.before).toEqual({ status: "active" });
-    expect(row.after).toEqual({ status: "ended" });
+    expect(row.after).toEqual({ status: "ended", trigger: "manual" });
   });
 
   it("writes a campaign.archived row on archive", async () => {
@@ -780,19 +785,30 @@ describe("campaign lifecycle transitions write an audit_logs row", () => {
     const row = auditRow();
     expect(row.action).toBe("campaign.archived");
     expect(row.before).toEqual({ status: "ended" });
-    expect(row.after).toEqual({ status: "archived" });
+    expect(row.after).toEqual({ status: "archived", trigger: "manual" });
   });
 
-  // ---- audit is evidence, not a gate --------------------------------------
+  // ---- audit is evidence the transition needs to be TOLD about, not a
+  // rollback gate (review I1): the state change already committed and is
+  // NEVER reverted, but a genuine insert failure IS surfaced to the caller
+  // as ok:false - matching customers/server/service.ts's changeSegment,
+  // since campaigns.updated_by is never written by setCampaignStatus, so a
+  // lost audit row would be the only record of who ran the transition. -----
 
-  it("does not fail the transition when the audit insert itself fails", async () => {
+  it("surfaces ok:false (state NOT reverted) when the audit insert itself fails", async () => {
     table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "active" }, error: null };
     mocks.auditInsert.mockResolvedValue({ error: { message: "denied" } });
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const result = await actions.pauseCampaign({ campaignId: CAMPAIGN_ID });
 
-    expect(result.ok).toBe(true);
+    expect(result).toEqual({
+      ok: false,
+      message:
+        "The campaign was paused, but it could not be written to your activity log. Tell the owner.",
+    });
+    // The transition itself was NOT reverted: the status update already
+    // committed before the audit write ran, and stays.
     expect(table("campaigns").update).toHaveBeenCalledWith(
       expect.objectContaining({ status: "paused" }),
     );
@@ -801,7 +817,7 @@ describe("campaign lifecycle transitions write an audit_logs row", () => {
     errorSpy.mockRestore();
   });
 
-  it("still applies the transition when no service-role key is configured, and says nothing broke", async () => {
+  it("still applies the transition and reports ok:true when no service-role key is configured (documented degraded path)", async () => {
     table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "active" }, error: null };
     mocks.serviceClient.mockReturnValue(null);
 

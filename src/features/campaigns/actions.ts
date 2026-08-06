@@ -1,5 +1,7 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
+
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
@@ -55,6 +57,11 @@ function firstIssueMessage(error: z.ZodError): string {
  * actions (activate/pause/resume/end/archive) need it to write a real
  * actor_id/actor_role on their `audit_logs` row (task 1.7) instead of a null
  * "system" one; every other action ignores the field.
+ *
+ * `requestId` is NOT part of `actor` here - it is generated per call
+ * (`randomUUID()`, same pattern as `receipts/review/actions.ts`), one fresh
+ * id per lifecycle action invocation rather than one shared across every
+ * action a caller happens to trigger in the same request.
  */
 async function requireOwnerBusiness(): Promise<
   | { ok: true; businessId: string; actor: { userId: string; role: string } }
@@ -132,7 +139,10 @@ export async function activateCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.activateCampaign(auth.businessId, parsed.data.campaignId, auth.actor);
+  const result = await service.activateCampaign(auth.businessId, parsed.data.campaignId, {
+    ...auth.actor,
+    requestId: randomUUID(),
+  });
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
@@ -146,7 +156,10 @@ export async function pauseCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.pauseCampaign(auth.businessId, parsed.data.campaignId, auth.actor);
+  const result = await service.pauseCampaign(auth.businessId, parsed.data.campaignId, {
+    ...auth.actor,
+    requestId: randomUUID(),
+  });
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
@@ -160,7 +173,10 @@ export async function archiveCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.archiveCampaign(auth.businessId, parsed.data.campaignId, auth.actor);
+  const result = await service.archiveCampaign(auth.businessId, parsed.data.campaignId, {
+    ...auth.actor,
+    requestId: randomUUID(),
+  });
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
@@ -174,7 +190,10 @@ export async function resumeCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.resumeCampaign(auth.businessId, parsed.data.campaignId, auth.actor);
+  const result = await service.resumeCampaign(auth.businessId, parsed.data.campaignId, {
+    ...auth.actor,
+    requestId: randomUUID(),
+  });
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
@@ -188,7 +207,10 @@ export async function endCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.endCampaign(auth.businessId, parsed.data.campaignId, auth.actor);
+  const result = await service.endCampaign(auth.businessId, parsed.data.campaignId, {
+    ...auth.actor,
+    requestId: randomUUID(),
+  });
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }

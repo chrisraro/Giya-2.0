@@ -6,10 +6,18 @@ import type { Database, Json } from "@/lib/supabase/types";
 
 // ===========================================================================
 // The one place that knows the shape of a campaign lifecycle `audit_logs`
-// row and the `campaign.<transition>` verb vocabulary (doc 25's
-// `campaign.activated` example, doc 34 section 10's full list:
-// `campaign.activated` / `campaign.paused` / `campaign.resumed` /
-// `campaign.ended` / `campaign.archived`). Two callers share it:
+// row and the `campaign.<transition>` verb vocabulary. The REQUIREMENT is
+// doc 34 section 2 line 23 ("write an `audit_logs` row (`action` =
+// `campaign.<transition>`)") plus doc 25's `campaign.activated` example and
+// 0022's action-shape constraint - NOT doc 34 section 10, which review
+// caught this file misciting: section 10 is the *analytics event*
+// taxonomy, a different sink entirely, and it lists `campaign.created` /
+// `campaign.updated` alongside the five below even though those two are
+// correctly NOT audit verbs (no lifecycle lands on either). Citing section
+// 10 as "the registry" told a reader two verbs were missing that were never
+// meant to exist here.
+//
+// Two callers share this module:
 //
 //   * ./exhaustion.ts - the system actor's post-commit `campaign.paused` on
 //     budget exhaustion (task 1.2), which already has a service-role client
@@ -22,8 +30,7 @@ import type { Database, Json } from "@/lib/supabase/types";
 //
 // Sharing this module is the point: without it, a second lifecycle audit
 // writer would have to reinvent the entity_type, the verb strings and the
-// before/after shape, and the two would drift the moment one changed. See
-// docs/30-modules/34-campaign-engine.md section 10's registry table.
+// before/after shape, and the two would drift the moment one changed.
 //
 // Deliberately NO dependency on @/lib/supabase/service here: that module
 // loads @/lib/env, which throws when Supabase env vars are unset, and
@@ -36,8 +43,9 @@ import type { Database, Json } from "@/lib/supabase/types";
 
 export const AUDIT_ENTITY_TYPE = "campaign";
 
-/** Doc 34 section 10's registry, restated as code so no caller can typo a
- * verb into a parallel string that never matches the doc's registered set. */
+/** Doc 34 section 2 line 23's `campaign.<transition>` requirement, restated
+ * as code so no caller can typo a verb into a parallel string that never
+ * matches the registered set. */
 export const CAMPAIGN_LIFECYCLE_ACTIONS = {
   activate: "campaign.activated",
   pause: "campaign.paused",
@@ -51,11 +59,13 @@ export type CampaignLifecycleTransition = keyof typeof CAMPAIGN_LIFECYCLE_ACTION
 export interface CampaignLifecycleAuditRow {
   businessId: string;
   campaignId: string;
-  /** One of CAMPAIGN_LIFECYCLE_ACTIONS's values; typed as `string` (not the
-   * union) so exhaustion.ts's system pause - which is not itself a
-   * CampaignLifecycleTransition value on the actor's action set but the
-   * same `campaign.paused` verb - can share this writer too. */
-  action: string;
+  /** Typed as the REGISTRY'S OWN value union (not `string`) so a typo'd verb
+   * is a compile error, not a silent drift caught only by reading rows back.
+   * Both callers already pass a registry value: exhaustion.ts passes
+   * `CAMPAIGN_LIFECYCLE_ACTIONS.pause` directly, and service.ts passes
+   * `CAMPAIGN_LIFECYCLE_ACTIONS[transition]` for whichever transition it is
+   * running - neither ever had a reason to pass an arbitrary string. */
+  action: (typeof CAMPAIGN_LIFECYCLE_ACTIONS)[CampaignLifecycleTransition];
   actorKind: "user" | "system";
   /** null for the system actor (0022/0012's documented meaning of
    * "system/worker"); the acting profile id for a staff-initiated one. */
@@ -66,25 +76,31 @@ export interface CampaignLifecycleAuditRow {
   before: Json;
   after: Json;
   reason: string | null;
+  /** Correlates this row with the request log line (doc 25), the same field
+   * `admin/consequences.ts` and `receipts/server/alias.ts` populate. null
+   * for the system actor's post-commit pause, which runs outside any single
+   * inbound request. */
+  requestId: string | null;
 }
+
+export type AuditWriteOutcome = { ok: true } | { ok: false; message: string };
 
 /**
  * Low-level writer: takes an ALREADY-RESOLVED SERVICE ROLE client. 0022
  * revokes `audit_logs` INSERT from every client role and keeps it for
  * `service_role` alone, so there is no session-scoped path to this table.
  *
- * NEVER THROWS. The state transition this records has already committed by
- * the time either caller reaches this function (see each caller's own
- * ordering note), so a failed insert is logged and swallowed rather than
- * surfaced as an exception - an unaudited transition (logged loudly) is a
- * smaller loss than one this function pretends never happened by throwing
- * mid-request. Same reasoning as ./exhaustion.ts's original inline writer,
- * which this replaces.
+ * NEVER THROWS - a failed insert is logged and returned as `{ ok: false }`
+ * rather than surfaced as an exception, so a caller that cannot afford to
+ * lose the failure (service.ts, since I1) can still act on it without this
+ * writer itself needing to know what "acting on it" means for either caller.
+ * A caller that treats the write as pure best-effort (exhaustion.ts) is free
+ * to discard the resolved value, exactly as it did when this returned void.
  */
 export async function writeCampaignLifecycleAuditRow(
   supabase: SupabaseClient<Database>,
   row: CampaignLifecycleAuditRow,
-): Promise<void> {
+): Promise<AuditWriteOutcome> {
   const { error } = await supabase.from("audit_logs").insert({
     actor_id: row.actorId,
     actor_kind: row.actorKind,
@@ -96,6 +112,7 @@ export async function writeCampaignLifecycleAuditRow(
     before: row.before,
     after: row.after,
     reason: row.reason,
+    request_id: row.requestId,
   });
 
   if (error !== null) {
@@ -103,5 +120,8 @@ export async function writeCampaignLifecycleAuditRow(
       `[campaigns/audit] could not write the audit row for campaign ${row.campaignId}'s ${row.action}`,
       error,
     );
+    return { ok: false, message: error.message };
   }
+
+  return { ok: true };
 }

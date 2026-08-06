@@ -3,7 +3,13 @@ import {
   CampaignTransitionError,
   nextStatus,
 } from "../lifecycle";
-import type { Campaign, CampaignBudget, CampaignStatus, CampaignType } from "../types";
+import type {
+  Campaign,
+  CampaignBudget,
+  CampaignStatus,
+  CampaignType,
+  PayloadPresence,
+} from "../types";
 import type {
   BaseRuleInput,
   CreateLoyaltyCampaignInput,
@@ -15,6 +21,7 @@ import * as repo from "./repo";
 import {
   CAMPAIGN_LIFECYCLE_ACTIONS,
   writeCampaignLifecycleAuditRow,
+  type AuditWriteOutcome,
   type CampaignLifecycleTransition,
 } from "./audit";
 import { createServiceRoleClient } from "@/lib/supabase/service";
@@ -100,23 +107,91 @@ function toEngineCampaign(row: CampaignRow, evaluatedStatus: CampaignStatus): Ca
 }
 
 /**
- * Writes the `audit_logs` row for a staff-initiated lifecycle transition
- * (task 1.7; doc 34 section 10's `campaign.<transition>` registry). Resolves
- * its own service-role client - 0022 revokes `audit_logs` INSERT from every
- * client role, and repo.ts's session-scoped client (the one every other
- * function in this file reads/writes campaigns through) cannot write it -
- * exactly the way src/features/customers/server/audit.ts's
- * recordSegmentChange resolves its own.
+ * G1-G4 (`../lifecycle.ts:activationGates`), shared by `activateCampaign` and
+ * `resumeCampaign` (task 1.7 review M6) so the two can never drift back apart
+ * the way the original resume skip happened in the first place - resume
+ * re-running gates activate already ran was the entire point of this task,
+ * so the two call sites now share one implementation rather than two
+ * hand-kept-identical copies of it.
  *
- * BEST-EFFORT, NOT A GATE: called only AFTER repo.setCampaignStatus has
- * already returned success, and never rolls that transition back or turns
- * the caller's ActionResult into a failure if the write itself fails
- * (missing service-role key, or a genuine insert error) - audit is evidence
- * of a transition that happened, not a precondition for letting it happen.
- * Both failure modes are logged loudly so a missing/incomplete trail is
- * never silent. Same contract as ./exhaustion.ts's system-actor pause, which
- * shares ./audit.ts's row writer with this function so the two paths can
- * never drift into different shapes for the same `campaign.paused` verb.
+ * CALLER-CONTRACT: both callers evaluate with `status: 'active'` (see each
+ * one's own note on why) - never the row's actual draft/scheduled/paused
+ * status - so this always builds the Campaign shape that way too. Returns
+ * `null` when every gate passes; otherwise the `ActionResult` failure the
+ * caller should return as-is (first failure only, matching
+ * `activationGates`' own "all gates run, failures collected" contract - this
+ * layer still only ever surfaces the first).
+ */
+function runActivationGates(
+  row: CampaignRow,
+  presence: PayloadPresence,
+  business: { status: string },
+  now: Date,
+): { ok: false; message: string; code?: string } | null {
+  const evaluatedCampaign = toEngineCampaign(row, "active");
+  const gateResult = activationGates(evaluatedCampaign, presence, business, now);
+  if (gateResult.ok) return null;
+
+  // Inlined rather than routed through `failResult` (per exactOptionalPropertyTypes,
+  // same reason `failResult` itself omits `code` entirely rather than setting it
+  // to `undefined`): `failResult`'s own return type is `ActionResult<T>`, whose
+  // `{ ok: true }` branch is not assignable to this function's narrower
+  // `{ ok: false } | null` return type no matter what T is instantiated to.
+  const first = gateResult.failures[0];
+  if (first) {
+    return first.code !== undefined
+      ? { ok: false, message: first.message, code: first.code }
+      : { ok: false, message: first.message };
+  }
+  return { ok: false, message: "Campaign is not ready to activate." };
+}
+
+/**
+ * ATOMICITY DEBT (task 1.7 review I2): doc 34 section 2 line 23 says
+ * transitions "execute in the service layer inside one DB transaction,
+ * write an audit_logs row" - that is the normative target, not what runs
+ * today. `repo.setCampaignStatus` and this function are two separate
+ * PostgREST statements, not one transaction, for the same structural reason
+ * every other multi-statement writer in this codebase is (menu/rewards/
+ * loyalty inserts in ./repo.ts, admin/consequences.ts's toggles): a Postgres
+ * transaction needs a single round trip, which means a SECURITY DEFINER RPC,
+ * and this task's migration sequence is frozen - no RPC ships from here.
+ *
+ * THE LONG-TERM ANSWER, recorded rather than built: a `set_campaign_status`
+ * RPC holding the status update and this audit insert in one transaction,
+ * `service_role`-only, with the pgTAP privilege assertions the standing
+ * constraints require (anon/authenticated denied, service_role allowed).
+ * Doc 34 section 2 line 23 already mandates this normatively; once it ships,
+ * `writeLifecycleAuditRow` and the five call sites below collapse into one
+ * RPC call and the "surface ok:false, do not revert" policy two paragraphs
+ * down becomes moot - the transaction makes an unaudited transition
+ * impossible rather than merely reported.
+ *
+ * GIVEN THAT IT IS NOT ATOMIC, WHAT HAPPENS WHEN THE AUDIT INSERT FAILS?
+ * (task 1.7 review I1) Surface `ok: false` to the caller; never revert the
+ * status write already committed. The criterion this codebase already states
+ * (`receipts/server/review.ts`'s ordering note vs `receipts/server/
+ * escalate.ts`'s): abort/report when continuing would mint something
+ * unaudited, stay best-effort when nothing is minted and no privilege
+ * changes. Activating or resuming a campaign switches on a points-minting
+ * rule for every subsequent receipt, which is `review.ts`'s side of that
+ * line - and the decisive fact is `campaigns.updated_by` is never written by
+ * `repo.setCampaignStatus` (it patches only status/starts_at/archived_at),
+ * so a lost audit row would be the ONLY record anywhere of who ran this
+ * transition. That is `review.ts`'s "unrecoverable", not `escalate.ts`'s
+ * "nothing minted" - hence `ok: false`, matching `src/features/customers/
+ * server/audit.ts`'s `recordSegmentChange` convention (state stands, the
+ * caller is told plainly that it did, and that the log entry did not).
+ * A REVERT (the `admin/consequences.ts` pattern) was considered and
+ * rejected: campaign status has other readers between the write and any
+ * revert (list/detail pages, the live-window check the award path reads)
+ * that a toggled-back column cannot un-show, unlike consequences.ts's
+ * columns which nothing reads mid-request.
+ *
+ * A MISSING SERVICE-ROLE KEY is the separate, already-documented degraded
+ * path (`customers/server/audit.ts`'s same distinction): the credential
+ * simply is not deployed yet, which is not evidence anything is wrong with
+ * this write, so it does not fail the transition - logged loudly instead.
  */
 async function writeLifecycleAuditRow(
   businessId: string,
@@ -125,16 +200,16 @@ async function writeLifecycleAuditRow(
   actor: LifecycleActor,
   fromStatus: CampaignStatus,
   toStatus: CampaignStatus,
-): Promise<void> {
+): Promise<AuditWriteOutcome> {
   const supabase = createServiceRoleClient();
   if (supabase === null) {
     console.warn(
       `[campaigns] no service-role key: campaign ${campaignId}'s ${transition} was applied but not audited`,
     );
-    return;
+    return { ok: true };
   }
 
-  await writeCampaignLifecycleAuditRow(supabase, {
+  return writeCampaignLifecycleAuditRow(supabase, {
     businessId,
     campaignId,
     action: CAMPAIGN_LIFECYCLE_ACTIONS[transition],
@@ -142,9 +217,26 @@ async function writeLifecycleAuditRow(
     actorId: actor.userId,
     actorRole: actor.role,
     before: { status: fromStatus },
-    after: { status: toStatus },
+    // `trigger: "manual"` (doc 34's transition-row discriminator, task 1.7
+    // review M5): every transition through this file is staff-initiated, so
+    // it is always "manual" here - "budget"/"sweep"/"admin_policy" belong to
+    // ./exhaustion.ts's system actor and a future sweep worker, neither of
+    // which calls this function.
+    after: { status: toStatus, trigger: "manual" },
     reason: null,
+    requestId: actor.requestId,
   });
+}
+
+/** The friendly message `activateCampaign`/`transitionCampaign`/
+ * `resumeCampaign` return when the state change committed but its audit row
+ * did not (I1 above) - same shape as `customers/server/service.ts`'s
+ * `changeSegment` ("The segment was changed, but it could not be written to
+ * your activity log. Tell the owner."), so the two staff-initiated audit
+ * failures in this codebase read as one convention rather than two. */
+function auditFailureMessage(transition: CampaignLifecycleTransition): string {
+  const verb = CAMPAIGN_LIFECYCLE_ACTIONS[transition].slice("campaign.".length);
+  return `The campaign was ${verb}, but it could not be written to your activity log. Tell the owner.`;
 }
 
 /**
@@ -174,14 +266,8 @@ export async function activateCampaign(
   if (!business) return { ok: false, message: "Business not found." };
 
   const presence = await repo.getCampaignPayloadPresence(businessId, campaignId);
-  const evaluatedCampaign = toEngineCampaign(row, "active");
-
-  const gateResult = activationGates(evaluatedCampaign, presence, business, new Date());
-  if (!gateResult.ok) {
-    const first = gateResult.failures[0];
-    if (first) return failResult(first.message, first.code);
-    return failResult("Campaign is not ready to activate.");
-  }
+  const gateFailure = runActivationGates(row, presence, business, new Date());
+  if (gateFailure) return gateFailure;
 
   const fromStatus = row.status as CampaignStatus;
   let target: CampaignStatus;
@@ -202,7 +288,9 @@ export async function activateCampaign(
   const { data, error } = await repo.setCampaignStatus(businessId, campaignId, fromStatus, patch);
   if (error) return failResult(error.message, error.code);
 
-  await writeLifecycleAuditRow(businessId, campaignId, "activate", actor, fromStatus, target);
+  const audit = await writeLifecycleAuditRow(businessId, campaignId, "activate", actor, fromStatus, target);
+  if (!audit.ok) return failResult(auditFailureMessage("activate"));
+
   emitLifecycleEvent(businessId, campaignId, "activate");
   return okResult(data);
 }
@@ -236,7 +324,9 @@ async function transitionCampaign(
   const { data, error } = await repo.setCampaignStatus(businessId, campaignId, expectedFrom, patch);
   if (error) return failResult(error.message, error.code);
 
-  await writeLifecycleAuditRow(businessId, campaignId, action, actor, expectedFrom, target);
+  const audit = await writeLifecycleAuditRow(businessId, campaignId, action, actor, expectedFrom, target);
+  if (!audit.ok) return failResult(auditFailureMessage(action));
+
   emitLifecycleEvent(businessId, campaignId, action);
   return okResult(data);
 }
@@ -299,21 +389,17 @@ export async function resumeCampaign(
   if (!business) return { ok: false, message: "Business not found." };
 
   const presence = await repo.getCampaignPayloadPresence(businessId, campaignId);
-  const evaluatedCampaign = toEngineCampaign(row, "active");
-
-  const gateResult = activationGates(evaluatedCampaign, presence, business, new Date());
-  if (!gateResult.ok) {
-    const first = gateResult.failures[0];
-    if (first) return failResult(first.message, first.code);
-    return failResult("Campaign is not ready to resume.");
-  }
+  const gateFailure = runActivationGates(row, presence, business, new Date());
+  if (gateFailure) return gateFailure;
 
   const { data, error } = await repo.setCampaignStatus(businessId, campaignId, expectedFrom, {
     status: target,
   });
   if (error) return failResult(error.message, error.code);
 
-  await writeLifecycleAuditRow(businessId, campaignId, "resume", actor, expectedFrom, target);
+  const audit = await writeLifecycleAuditRow(businessId, campaignId, "resume", actor, expectedFrom, target);
+  if (!audit.ok) return failResult(auditFailureMessage("resume"));
+
   emitLifecycleEvent(businessId, campaignId, "resume");
   return okResult(data);
 }

@@ -188,6 +188,9 @@ async function writeAuditRow(deps: ExhaustionDeps, campaign: CampaignRow): Promi
     before: { status: "active" },
     after: { status: "paused", reason: "budget_exhausted" },
     reason: "Campaign auto-paused: its max_total_points budget is fully spent.",
+    // No inbound request: this runs post-commit, off the award pipeline's own
+    // call stack, not inside a request this action could correlate to.
+    requestId: null,
   });
 }
 
