@@ -47,6 +47,7 @@ this file, only names.
 | `META_APP_SECRET` | Meta | Same | The old Giya codebase held only placeholders, so these must be created fresh |
 | `NEXT_PUBLIC_MAPS_BROWSER_KEY` | Maps provider | Store locator, browser side | |
 | `MAPS_SERVER_KEY` | Maps provider | Geocoding, server side | |
+| `METRICS_TOKEN` | self-generated | Bearer-guards `GET /api/internal/metrics` (doc 52's per-minute probe) | Optional and safe to leave unset - the route answers 404 rather than running open. Generate a random value ≥16 characters when the probe is wired into the alert router; shorter values are treated as not configured (`src/app/api/internal/metrics/route.ts`). |
 | `INTEGRATION_TOKEN_AES_KEY` | self-generated | Encrypting stored third-party integration tokens (doc 42) | |
 | `PAYMONGO_SECRET_KEY` | PayMongo | Billing | Later phase, not MVP |
 | `PAYMONGO_WEBHOOK_SECRET` | PayMongo | Billing webhooks | Later phase, not MVP |

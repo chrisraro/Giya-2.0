@@ -206,6 +206,57 @@ describe("getServerEnv", () => {
     expect(getServerEnv().SUPABASE_SERVICE_ROLE_KEY).toBeUndefined();
   });
 
+  it("parses with METRICS_TOKEN unset (optional; the route itself answers 404)", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    stubRequiredServerEnv();
+    vi.stubEnv("METRICS_TOKEN", undefined);
+
+    const { getServerEnv } = await import("./env");
+
+    expect(getServerEnv().METRICS_TOKEN).toBeUndefined();
+  });
+
+  it("reads a blank METRICS_TOKEN as absent rather than as an invalid value", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    stubRequiredServerEnv();
+    vi.stubEnv("METRICS_TOKEN", "   ");
+
+    const { getServerEnv } = await import("./env");
+
+    expect(getServerEnv().METRICS_TOKEN).toBeUndefined();
+  });
+
+  it("parses METRICS_TOKEN when set", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    stubRequiredServerEnv();
+    vi.stubEnv("METRICS_TOKEN", "a".repeat(24));
+
+    const { getServerEnv } = await import("./env");
+
+    expect(getServerEnv().METRICS_TOKEN).toBe("a".repeat(24));
+  });
+
+  it("does NOT reject a short METRICS_TOKEN - the strength floor lives in the route, not this schema", async () => {
+    // I1: a `.min()` here would make getServerEnv() throw for a truncated
+    // METRICS_TOKEN, and getServerEnv() is called by unrelated code
+    // (src/lib/redis.ts, src/lib/queue/publish.ts,
+    // src/features/rewards/server/token.ts) that has nothing to do with
+    // metrics. readMetricsToken() in
+    // src/app/api/internal/metrics/route.ts.test.ts pins the actual floor.
+    vi.resetModules();
+    stubClientEnv();
+    stubRequiredServerEnv();
+    vi.stubEnv("METRICS_TOKEN", "short");
+
+    const { getServerEnv } = await import("./env");
+
+    expect(() => getServerEnv()).not.toThrow();
+    expect(getServerEnv().METRICS_TOKEN).toBe("short");
+  });
+
   it("memoizes: a second call returns the same object without re-parsing", async () => {
     vi.resetModules();
     stubClientEnv();
