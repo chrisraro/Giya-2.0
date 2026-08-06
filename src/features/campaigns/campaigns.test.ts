@@ -29,14 +29,25 @@ const mocks = vi.hoisted(() => {
     makeBuilder,
     getUser: vi.fn(),
     from: vi.fn(),
+    auditInsert: vi.fn(),
+    serviceClient: vi.fn(),
   };
 });
+
+vi.mock("server-only", () => ({}));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
     auth: { getUser: mocks.getUser },
     from: mocks.from,
   })),
+}));
+
+// The lifecycle audit write (task 1.7) goes through a service-role client
+// (0022 revokes audit_logs INSERT from every client role), resolved by
+// service.ts itself - never the session-scoped one above.
+vi.mock("@/lib/supabase/service", () => ({
+  createServiceRoleClient: mocks.serviceClient,
 }));
 
 vi.mock("next/cache", () => ({
@@ -49,7 +60,7 @@ const { revalidatePath } = await import("next/cache");
 type Builder = ReturnType<typeof mocks.makeBuilder>;
 
 const AUTH_USER = { id: "user-1" };
-const BUSINESS_STAFF_ROW = { business_id: "biz-1" };
+const BUSINESS_STAFF_ROW = { business_id: "biz-1", role: "owner" };
 const BUSINESS_ROW = { id: "biz-1", slug: "kape-diaria", name: "Kape Diaria", status: "active" };
 const CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -91,6 +102,9 @@ beforeEach(() => {
   mocks.from.mockImplementation((name: string) => table(name));
 
   mockAuthed();
+
+  mocks.auditInsert.mockResolvedValue({ error: null });
+  mocks.serviceClient.mockReturnValue({ from: vi.fn(() => ({ insert: mocks.auditInsert })) });
 });
 
 // -------------------------------------------------------------- auth gating
@@ -556,9 +570,29 @@ describe("actions: pauseCampaign / archiveCampaign", () => {
 
 // ------------------------------------------------------------ resumeCampaign
 
+// A fully payload-complete, gate-passing promotion campaign, paused. Resume
+// now re-runs activationGates (task 1.7, doc 34 T6), so - unlike the old
+// bare `{ id, status }` fixture - every field the gates read has to be
+// present for the happy path to actually clear them.
+function pausedPromotionRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: CAMPAIGN_ID,
+    business_id: "biz-1",
+    type: "promotion",
+    status: "paused",
+    starts_at: "2026-01-01T00:00:00Z",
+    ends_at: null,
+    timezone: "Asia/Manila",
+    budget: {},
+    deleted_at: null,
+    ...overrides,
+  };
+}
+
 describe("actions: resumeCampaign", () => {
-  it("resumes a paused campaign", async () => {
-    table("campaigns").__result = { data: { id: CAMPAIGN_ID, status: "paused" }, error: null };
+  it("resumes a paused campaign whose gates still pass", async () => {
+    table("campaigns").__result = { data: pausedPromotionRow(), error: null };
+    table("promotions").__result = { data: { id: "promo-1" }, error: null };
 
     const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
 
@@ -583,6 +617,44 @@ describe("actions: resumeCampaign", () => {
     const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
 
     expect(result).toEqual(expect.objectContaining({ ok: false, code: "CAMPAIGN_INVALID_STATE" }));
+    expect(table("campaigns").update).not.toHaveBeenCalled();
+  });
+
+  // ---- task 1.7: resume re-runs activationGates (doc 34 T6) --------------
+
+  it("refuses to resume with the activate-path's BUSINESS_NOT_VERIFIED error when the business lost active status while paused", async () => {
+    table("campaigns").__result = { data: pausedPromotionRow(), error: null };
+    table("promotions").__result = { data: { id: "promo-1" }, error: null };
+    table("businesses").__result = { data: { ...BUSINESS_ROW, status: "suspended" }, error: null };
+
+    const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "BUSINESS_NOT_VERIFIED" }));
+    expect(table("campaigns").update).not.toHaveBeenCalled();
+  });
+
+  it("refuses to resume a paused campaign whose ends_at has already passed (schedule gate) - it can only be ended", async () => {
+    table("campaigns").__result = {
+      data: pausedPromotionRow({ ends_at: "2020-01-01T00:00:00Z" }),
+      error: null,
+    };
+    table("promotions").__result = { data: { id: "promo-1" }, error: null };
+
+    const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "CAMPAIGN_SCHEDULE_INVALID" }));
+    expect(table("campaigns").update).not.toHaveBeenCalled();
+  });
+
+  it("refuses to resume a paused campaign whose payload went incomplete while paused", async () => {
+    table("campaigns").__result = { data: pausedPromotionRow(), error: null };
+    table("promotions").__result = { data: null, error: null };
+
+    const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, code: "CAMPAIGN_PAYLOAD_INCOMPLETE" }),
+    );
     expect(table("campaigns").update).not.toHaveBeenCalled();
   });
 });
@@ -622,6 +694,190 @@ describe("actions: endCampaign", () => {
   });
 });
 
+// -------------------------------------------- lifecycle audit_logs rows (1.7)
+
+describe("campaign lifecycle transitions write an audit_logs row", () => {
+  const FULL_PROMOTION_ROW = {
+    id: CAMPAIGN_ID,
+    business_id: "biz-1",
+    type: "promotion",
+    starts_at: "2026-01-01T00:00:00Z",
+    ends_at: null,
+    timezone: "Asia/Manila",
+    budget: {},
+    deleted_at: null,
+  };
+
+  beforeEach(() => {
+    table("promotions").__result = { data: { id: "promo-1" }, error: null };
+  });
+
+  function auditRow(): Record<string, unknown> {
+    return mocks.auditInsert.mock.calls[0]?.[0] as Record<string, unknown>;
+  }
+
+  it("writes a campaign.activated row carrying the acting staff member, the from/to status, the manual trigger, and a request_id", async () => {
+    table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "draft" }, error: null };
+
+    const result = await actions.activateCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result.ok).toBe(true);
+    expect(mocks.auditInsert).toHaveBeenCalledTimes(1);
+    const row = auditRow();
+    expect(row.action).toBe("campaign.activated");
+    expect(row.entity_type).toBe("campaign");
+    expect(row.entity_id).toBe(CAMPAIGN_ID);
+    expect(row.business_id).toBe("biz-1");
+    expect(row.actor_id).toBe(AUTH_USER.id);
+    expect(row.actor_kind).toBe("user");
+    expect(row.actor_role).toBe("owner");
+    expect(row.before).toEqual({ status: "draft" });
+    // M5: trigger discriminator (doc 34) plus a request_id correlating this
+    // row with the request, the same fields admin/consequences.ts and
+    // receipts/server/alias.ts populate on their own audit writes.
+    expect(row.after).toEqual({ status: "active", trigger: "manual" });
+    expect(typeof row.request_id).toBe("string");
+    expect((row.request_id as string).length).toBeGreaterThan(0);
+  });
+
+  it("writes a campaign.paused row on pause", async () => {
+    table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "active" }, error: null };
+
+    const result = await actions.pauseCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result.ok).toBe(true);
+    const row = auditRow();
+    expect(row.action).toBe("campaign.paused");
+    expect(row.before).toEqual({ status: "active" });
+    expect(row.after).toEqual({ status: "paused", trigger: "manual" });
+  });
+
+  it("writes a campaign.resumed row on resume", async () => {
+    table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "paused" }, error: null };
+
+    const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result.ok).toBe(true);
+    const row = auditRow();
+    expect(row.action).toBe("campaign.resumed");
+    expect(row.before).toEqual({ status: "paused" });
+    expect(row.after).toEqual({ status: "active", trigger: "manual" });
+  });
+
+  it("writes a campaign.ended row on end", async () => {
+    table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "active" }, error: null };
+
+    const result = await actions.endCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result.ok).toBe(true);
+    const row = auditRow();
+    expect(row.action).toBe("campaign.ended");
+    expect(row.before).toEqual({ status: "active" });
+    expect(row.after).toEqual({ status: "ended", trigger: "manual" });
+  });
+
+  it("writes a campaign.archived row on archive", async () => {
+    table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "ended" }, error: null };
+
+    const result = await actions.archiveCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result.ok).toBe(true);
+    const row = auditRow();
+    expect(row.action).toBe("campaign.archived");
+    expect(row.before).toEqual({ status: "ended" });
+    expect(row.after).toEqual({ status: "archived", trigger: "manual" });
+  });
+
+  // ---- audit is evidence the transition needs to be TOLD about, not a
+  // rollback gate (review I1): the state change already committed and is
+  // NEVER reverted, but a genuine insert failure IS surfaced to the caller
+  // as ok:false - matching customers/server/service.ts's changeSegment,
+  // since campaigns.updated_by is never written by setCampaignStatus, so a
+  // lost audit row would be the only record of who ran the transition. -----
+
+  it("surfaces ok:false (state NOT reverted) when the audit insert itself fails", async () => {
+    table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "active" }, error: null };
+    mocks.auditInsert.mockResolvedValue({ error: { message: "denied" } });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await actions.pauseCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual({
+      ok: false,
+      message:
+        "The campaign was paused, but it could not be written to your activity log. Tell the owner.",
+    });
+    // The transition itself was NOT reverted: the status update already
+    // committed before the audit write ran, and stays.
+    expect(table("campaigns").update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "paused" }),
+    );
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+
+  // Review round 2, item 3: the pause case above only covers
+  // `transitionCampaign`'s shared audit-failure path. `activateCampaign` and
+  // `resumeCampaign` are separate physical code paths (resume is
+  // deliberately NOT routed through `transitionCampaign`, precisely so it
+  // can re-run activationGates - task 1.7's whole point), so each needs its
+  // own coverage rather than inheriting pause's.
+
+  it("surfaces ok:false (state NOT reverted) when the audit insert fails on activate", async () => {
+    table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "draft" }, error: null };
+    mocks.auditInsert.mockResolvedValue({ error: { message: "denied" } });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await actions.activateCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual({
+      ok: false,
+      message:
+        "The campaign was activated, but it could not be written to your activity log. Tell the owner.",
+    });
+    expect(table("campaigns").update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "active" }),
+    );
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+
+  it("surfaces ok:false (state NOT reverted) when the audit insert fails on resume", async () => {
+    table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "paused" }, error: null };
+    mocks.auditInsert.mockResolvedValue({ error: { message: "denied" } });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual({
+      ok: false,
+      message:
+        "The campaign was resumed, but it could not be written to your activity log. Tell the owner.",
+    });
+    expect(table("campaigns").update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "active" }),
+    );
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+
+  it("still applies the transition and reports ok:true when no service-role key is configured (documented degraded path)", async () => {
+    table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "active" }, error: null };
+    mocks.serviceClient.mockReturnValue(null);
+
+    const result = await actions.pauseCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result.ok).toBe(true);
+    expect(table("campaigns").update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "paused" }),
+    );
+    expect(mocks.auditInsert).not.toHaveBeenCalled();
+  });
+});
+
 // --------------------------------------------- setCampaignStatus concurrency
 
 describe("setCampaignStatus optimistic concurrency guard", () => {
@@ -648,7 +904,8 @@ describe("setCampaignStatus optimistic concurrency guard", () => {
   });
 
   it("passes the loaded row's own status as the expected-from predicate for every transition", async () => {
-    table("campaigns").__result = { data: { id: CAMPAIGN_ID, status: "paused" }, error: null };
+    table("campaigns").__result = { data: pausedPromotionRow(), error: null };
+    table("promotions").__result = { data: { id: "promo-1" }, error: null };
 
     await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
 
@@ -767,12 +1024,23 @@ describe("repo.getCampaignPayloadPresence", () => {
 });
 
 describe("service.emitLifecycleEvent", () => {
-  it("logs without throwing", async () => {
+  it("logs without throwing, including the request_id (review round 2, item 4)", async () => {
     const { emitLifecycleEvent } = await import("./server/service");
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
 
-    expect(() => emitLifecycleEvent("biz-1", "camp-1", "activate")).not.toThrow();
+    expect(() => emitLifecycleEvent("biz-1", "camp-1", "activate", "req-1")).not.toThrow();
     expect(spy).toHaveBeenCalledWith(expect.stringContaining("biz-1"));
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining("req-1"));
+
+    spy.mockRestore();
+  });
+
+  it("logs request=null when called with no request id", async () => {
+    const { emitLifecycleEvent } = await import("./server/service");
+    const spy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    emitLifecycleEvent("biz-1", "camp-1", "activate", null);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining("request=null"));
 
     spy.mockRestore();
   });

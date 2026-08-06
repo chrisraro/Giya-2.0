@@ -23,3 +23,16 @@ export type CampaignSummary = CampaignRow & {
 export type ActionResult<T = undefined> =
   | { ok: true; data?: T }
   | { ok: false; message: string; code?: string };
+
+/** The staff member driving a lifecycle transition (activate/pause/resume/
+ * end/archive), resolved server-side from the session by actions.ts and
+ * threaded through service.ts so the resulting `audit_logs` row carries a
+ * real actor_id/actor_role rather than a null "system" one. `requestId` is
+ * generated once per action call (actions.ts, `randomUUID()`) and correlates
+ * the row with the request log line, the same field `admin/consequences.ts`'s
+ * `LadderActor` and `receipts/server/alias.ts` populate. */
+export interface LifecycleActor {
+  userId: string;
+  role: string;
+  requestId: string;
+}
