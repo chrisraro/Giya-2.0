@@ -15,6 +15,14 @@ import { getServerEnv } from "@/lib/env";
 // endpoint, the request is four fields, and a dependency would buy nothing but
 // a supply-chain surface on the path that talks to our users' inboxes.
 //
+// A second caller: src/lib/alerts/job-health.ts (task 2.5) calls this
+// function directly, bypassing the notify.email queue entirely - its
+// recipient is an operator address with no `profiles` row behind it, so the
+// queue's `notifications`-table plumbing (addressed to a `profiles.id`) has
+// nothing to attach to. See that module's own header for the full argument.
+// Still exactly one Resend integration, one send, one contract - a second
+// CALLER of this function, never a second implementation of "send an email".
+//
 // -----------------------------------------------------------------------------
 // THE SENDER IS A PLACEHOLDER, AND THE CODE SAYS SO
 // -----------------------------------------------------------------------------
