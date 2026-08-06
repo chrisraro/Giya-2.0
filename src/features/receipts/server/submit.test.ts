@@ -113,6 +113,8 @@ interface StorageUploadCall {
 interface FakeOptions {
   consumer?: { gps_fraud_opt_in: boolean; scan_blocked_until: string | null } | null;
   consumerError?: PostgrestError | null;
+  profile?: { is_suspended: boolean } | null;
+  profileError?: PostgrestError | null;
   download?: Uint8Array | null;
   downloadError?: { statusCode?: number } | null;
   uploadError?: { statusCode?: number } | null;
@@ -125,6 +127,7 @@ interface Fake {
   uploads: StorageUploadCall[];
   downloads: string[];
   consumerReads: number;
+  profileReads: number;
 }
 
 /**
@@ -147,6 +150,7 @@ function createFakeSupabase(options: FakeOptions = {}): Fake {
     options.consumer === undefined
       ? { gps_fraud_opt_in: false, scan_blocked_until: null }
       : options.consumer;
+  const profile = options.profile === undefined ? { is_suspended: false } : options.profile;
 
   const fake: Fake = {
     client: undefined as unknown as SupabaseClient<Database>,
@@ -154,10 +158,25 @@ function createFakeSupabase(options: FakeOptions = {}): Fake {
     uploads: [],
     downloads: [],
     consumerReads: 0,
+    profileReads: 0,
   };
 
   const client = {
     from(table: string) {
+      if (table === "profiles") {
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => {
+                fake.profileReads += 1;
+                return options.profileError
+                  ? { data: null, error: options.profileError }
+                  : { data: profile, error: null };
+              },
+            }),
+          }),
+        };
+      }
       if (table === "consumers") {
         return {
           select: () => ({
@@ -387,6 +406,41 @@ describe("submitReceipt - image path ownership (doc 36 Stage 1 step 2)", () => {
     const error = await expectApiError(submit(fake, { image_path: `${IMAGE_UUID}.jpg` }));
 
     expect(error.status).toBe(403);
+  });
+});
+
+describe("submitReceipt - account suspension (doc 30 section 2.8)", () => {
+  // The brief's requirement 3: a suspended consumer must be refused even when
+  // calling this money path directly, before any image work or IO runs. This
+  // is doc 37's MORE severe ladder step (full lockout) than the cooldown
+  // block below, so it is checked first.
+  it("CRITICAL: refuses a suspended consumer's scan with 403 ACCOUNT_SUSPENDED, touching nothing downstream", async () => {
+    const fake = createFakeSupabase({ profile: { is_suspended: true } });
+
+    const error = await expectApiError(submit(fake));
+
+    expect(error.status).toBe(403);
+    expect(error.code).toBe("ACCOUNT_SUSPENDED");
+    expect(fake.consumerReads).toBe(0);
+    expect(fake.downloads).toEqual([]);
+    expect(fake.inserts).toEqual([]);
+  });
+
+  it("does not affect an unsuspended consumer (the negative case)", async () => {
+    const fake = createFakeSupabase({ profile: { is_suspended: false } });
+
+    await expect(submit(fake)).resolves.toMatchObject({ status: "queued" });
+  });
+
+  it("fails CLOSED (503, refuses the scan) when suspension state cannot be read", async () => {
+    const fake = createFakeSupabase({
+      profileError: postgrestError("500", "connection reset"),
+    });
+
+    const error = await expectApiError(submit(fake));
+
+    expect(error.status).toBe(503);
+    expect(fake.inserts).toEqual([]);
   });
 });
 

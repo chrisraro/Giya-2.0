@@ -58,7 +58,7 @@ export async function claimReward(
     return { ok: false, message: firstIssueMessage(parsed.error) };
   }
 
-  const result = await service.claimReward(parsed.data.rewardId);
+  const result = await service.claimReward(parsed.data.rewardId, user.id);
   if (result.ok) {
     revalidatePath("/rewards");
     revalidatePath("/wallet");

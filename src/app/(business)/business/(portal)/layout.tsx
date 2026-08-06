@@ -45,6 +45,19 @@ export default async function PortalLayout({ children }: { children: ReactNode }
     redirect("/business/onboarding");
   }
 
+  // Doc 30 section 2.8: a suspended business (`businesses.status='suspended'`)
+  // blocks its whole portal, for every staff role. `portal.business.status` is
+  // already resolved above via `resolveOwnerBusiness` (0004's staff-scoped
+  // read), so this is a comparison, not a second query - the same table-truth
+  // read the dashboard's verification banner already relies on, just acted on
+  // here too. Like the consumer layout's equivalent gate, this redirect is a
+  // courtesy: the actual control is `validateRedemption`'s BUSINESS_SUSPENDED
+  // refusal (src/lib/auth/suspension.ts), which does not depend on this
+  // layout ever rendering.
+  if (portal.business.status === "suspended") {
+    redirect("/suspended?type=business");
+  }
+
   // The sidebar's Receipts badge (doc 36 Stage 9: the queue-age and backlog
   // are surfaced portal-wide, not just on the queue screen).
   //

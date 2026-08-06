@@ -10,13 +10,42 @@ const mocks = vi.hoisted(() => ({
   getUser: vi.fn(),
   rpc: vi.fn(),
   consumeRedemptionToken: vi.fn(),
+  profileMaybeSingle: vi.fn(),
+  businessMaybeSingle: vi.fn(),
+  claimRowMaybeSingle: vi.fn(),
+  createServiceRoleClient: vi.fn(),
 }));
+
+// Session-scoped client dispatch, shared by both the "profiles" read
+// (claimReward's own suspension gate) and the "reward_claims"/"businesses"/
+// "profiles" reads used by validateRedemption's suspension gate below - the
+// LATTER go through the service-role client instead (staff cannot read
+// another user's `profiles.is_suspended` under RLS), which is why this same
+// table-dispatch shape is reused for `createServiceRoleClient`'s return
+// value too.
+function tableDispatch(table: string) {
+  if (table === "profiles") {
+    return { select: () => ({ eq: () => ({ maybeSingle: mocks.profileMaybeSingle }) }) };
+  }
+  if (table === "businesses") {
+    return { select: () => ({ eq: () => ({ maybeSingle: mocks.businessMaybeSingle }) }) };
+  }
+  if (table === "reward_claims") {
+    return { select: () => ({ eq: () => ({ maybeSingle: mocks.claimRowMaybeSingle }) }) };
+  }
+  throw new Error(`unexpected table read: ${table}`);
+}
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
     auth: { getUser: mocks.getUser },
     rpc: mocks.rpc,
+    from: tableDispatch,
   })),
+}));
+
+vi.mock("@/lib/supabase/service", () => ({
+  createServiceRoleClient: mocks.createServiceRoleClient,
 }));
 
 class MockRedemptionTokenError extends Error {
@@ -54,7 +83,25 @@ function mockUnauthenticated() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `clearAllMocks` clears call history but NOT a previously-set
+  // `mockResolvedValue` implementation (that needs `mockReset`/
+  // `resetAllMocks`, and the latter would also wipe `createClient`'s own
+  // factory implementation, breaking every test). `rpc` and
+  // `consumeRedemptionToken` are reset explicitly here so a test that
+  // expects the RPC never to be called cannot accidentally observe a
+  // PREVIOUS test's leftover resolved value if a mutant makes the guard
+  // above it fall through - every test either sets its own value or gets a
+  // clean vi.fn() that resolves to `undefined`.
+  mocks.rpc.mockReset();
+  mocks.consumeRedemptionToken.mockReset();
   mockAuthed();
+  mocks.profileMaybeSingle.mockResolvedValue({ data: { is_suspended: false }, error: null });
+  mocks.businessMaybeSingle.mockResolvedValue({ data: { status: "active" }, error: null });
+  mocks.claimRowMaybeSingle.mockResolvedValue({
+    data: { business_id: "biz-1", consumer_id: "consumer-1" },
+    error: null,
+  });
+  mocks.createServiceRoleClient.mockReturnValue({ from: tableDispatch });
 });
 
 // ------------------------------------------------------------ mapClaimError
@@ -127,7 +174,7 @@ describe("service.claimReward", () => {
   it("returns ok:true with the claim id on success", async () => {
     mocks.rpc.mockResolvedValue({ data: CLAIM_ID, error: null });
 
-    const result = await service.claimReward(REWARD_ID);
+    const result = await service.claimReward(REWARD_ID, AUTH_USER.id);
 
     expect(result).toEqual({ ok: true, data: { claimId: CLAIM_ID } });
     expect(mocks.rpc).toHaveBeenCalledWith("claim_reward", { p_reward_id: REWARD_ID });
@@ -136,7 +183,7 @@ describe("service.claimReward", () => {
   it("maps a REWARD_OUT_OF_STOCK RPC error to the friendly message", async () => {
     mocks.rpc.mockResolvedValue({ data: null, error: { message: "REWARD_OUT_OF_STOCK" } });
 
-    const result = await service.claimReward(REWARD_ID);
+    const result = await service.claimReward(REWARD_ID, AUTH_USER.id);
 
     expect(result).toEqual({
       ok: false,
@@ -148,13 +195,77 @@ describe("service.claimReward", () => {
   it("maps a POINTS_INSUFFICIENT RPC error to the friendly message", async () => {
     mocks.rpc.mockResolvedValue({ data: null, error: { message: "POINTS_INSUFFICIENT" } });
 
-    const result = await service.claimReward(REWARD_ID);
+    const result = await service.claimReward(REWARD_ID, AUTH_USER.id);
 
     expect(result).toEqual({
       ok: false,
       message: "You do not have enough points for this reward yet.",
       code: "POINTS_INSUFFICIENT",
     });
+  });
+});
+
+// ------------------------------------------------- service.claimReward: suspension
+//
+// Doc 30 section 2.8 + the brief's requirement 3: a suspended consumer must be
+// refused even if the UI screen that would normally redirect them never runs.
+// claim_reward's own SQL guards segment='blacklisted', a DIFFERENT mechanism
+// (business_customers.segment, per-tenant) from profiles.is_suspended
+// (platform-wide) - this gate is the one that closes THAT gap, in TypeScript,
+// before the RPC is ever called.
+describe("service.claimReward: suspension gate (doc 30 section 2.8)", () => {
+  it("CRITICAL: refuses a suspended consumer without ever calling claim_reward", async () => {
+    mocks.profileMaybeSingle.mockResolvedValue({ data: { is_suspended: true }, error: null });
+
+    const result = await service.claimReward(REWARD_ID, AUTH_USER.id);
+
+    expect(result).toEqual({
+      ok: false,
+      message: "Your account is suspended. Contact us if you think this is a mistake.",
+      code: "ACCOUNT_SUSPENDED",
+    });
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("does not affect an unsuspended consumer (the negative case)", async () => {
+    mocks.profileMaybeSingle.mockResolvedValue({ data: { is_suspended: false }, error: null });
+    mocks.rpc.mockResolvedValue({ data: CLAIM_ID, error: null });
+
+    const result = await service.claimReward(REWARD_ID, AUTH_USER.id);
+
+    expect(result).toEqual({ ok: true, data: { claimId: CLAIM_ID } });
+    expect(mocks.rpc).toHaveBeenCalledWith("claim_reward", { p_reward_id: REWARD_ID });
+  });
+
+  it("fails CLOSED (refuses, does not call the RPC) when suspension state cannot be read", async () => {
+    mocks.profileMaybeSingle.mockResolvedValue({ data: null, error: { message: "boom" } });
+
+    const result = await service.claimReward(REWARD_ID, AUTH_USER.id);
+
+    expect(result.ok).toBe(false);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  // Regression for a review finding: this function used to re-derive the
+  // caller via its OWN supabase.auth.getUser() call and wrap the whole
+  // suspension check in `if (user)`. A transient GoTrue failure on THAT call
+  // (distinct from the RPC's own local JWT verification of auth.uid()) made
+  // `user` null, which SKIPPED the suspension check entirely while the RPC
+  // still succeeded off the same valid cookie. Taking `userId` as a required
+  // parameter removed the conditional; this test proves the suspension check
+  // runs regardless of what auth.getUser() would have answered.
+  it("CRITICAL: checks suspension unconditionally, not gated on its own auth.getUser() call", async () => {
+    mocks.getUser.mockResolvedValue({ data: { user: null } }); // simulates the transient failure
+    mocks.profileMaybeSingle.mockResolvedValue({ data: { is_suspended: true }, error: null });
+
+    const result = await service.claimReward(REWARD_ID, AUTH_USER.id);
+
+    expect(result).toEqual({
+      ok: false,
+      message: "Your account is suspended. Contact us if you think this is a mistake.",
+      code: "ACCOUNT_SUSPENDED",
+    });
+    expect(mocks.rpc).not.toHaveBeenCalled();
   });
 });
 
@@ -232,6 +343,146 @@ describe("service.validateRedemption", () => {
   });
 });
 
+// --------------------------------------------- service.validateRedemption: suspension
+//
+// Doc 30 section 2.8 + the brief's requirement 3: a suspended party - either
+// the BUSINESS or the CLAIMING CONSUMER - must not be able to complete a
+// redemption by calling this service function directly. validate_redemption's
+// own SQL guards the claim's segment='blacklisted' (a different, per-customer
+// mechanism); this gate reads the claim's business_id/consumer_id fresh via
+// the service-role client (repo comment: a staff session cannot see another
+// user's `profiles.is_suspended` under RLS) and checks both, in TypeScript,
+// before the RPC runs.
+function mockToken() {
+  mocks.consumeRedemptionToken.mockResolvedValue({
+    claimId: CLAIM_ID,
+    businessId: "biz-1",
+    jti: "jti-1",
+  });
+}
+
+const SUCCESSFUL_RPC_PAYLOAD = {
+  data: {
+    claim_id: CLAIM_ID,
+    reward_name: "Free Coffee",
+    consumer_name: "Juan Dela Cruz",
+    redeemed_at: "2026-07-25T12:00:00.000Z",
+  },
+  error: null,
+};
+
+describe("service.validateRedemption: suspension gate (doc 30 section 2.8)", () => {
+  it("CRITICAL: refuses when the claim's business is suspended, without calling validate_redemption", async () => {
+    mockToken();
+    mocks.businessMaybeSingle.mockResolvedValue({ data: { status: "suspended" }, error: null });
+
+    const result = await service.validateRedemption("signed.jwt.token");
+
+    expect(result).toEqual({
+      ok: false,
+      code: "BUSINESS_SUSPENDED",
+      message: "Redemptions are paused for this business account.",
+    });
+    // The token is already burned by this point (see the ordering comment on
+    // validateRedemption) - that is intended, not a bug this test is guarding
+    // against.
+    expect(mocks.consumeRedemptionToken).toHaveBeenCalledTimes(1);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  // C1 fix: the claiming consumer's OWN suspension must also refuse the
+  // redemption, independent of the business. Without this, a consumer could
+  // pre-claim rewards, get suspended, and still have every held claim
+  // redeemed by walking into any (unsuspended) store - points already moved
+  // at claim time, but the goods had not yet changed hands.
+  it("CRITICAL: refuses when the claiming consumer is suspended, without calling validate_redemption", async () => {
+    mockToken();
+    mocks.claimRowMaybeSingle.mockResolvedValue({
+      data: { business_id: "biz-1", consumer_id: "suspended-consumer" },
+      error: null,
+    });
+    mocks.profileMaybeSingle.mockResolvedValue({ data: { is_suspended: true }, error: null });
+
+    const result = await service.validateRedemption("signed.jwt.token");
+
+    expect(result).toEqual({
+      ok: false,
+      code: "ACCOUNT_SUSPENDED",
+      message: "This customer's account is suspended and cannot redeem rewards.",
+    });
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("does not affect an active business's redemption by an unsuspended consumer (the negative case)", async () => {
+    mockToken();
+    mocks.rpc.mockResolvedValue(SUCCESSFUL_RPC_PAYLOAD);
+
+    const result = await service.validateRedemption("signed.jwt.token");
+
+    expect(result.ok).toBe(true);
+    expect(mocks.rpc).toHaveBeenCalledWith("validate_redemption", {
+      p_claim_id: CLAIM_ID,
+      p_token_jti: "jti-1",
+      p_method: "qr",
+    });
+  });
+
+  it("fails CLOSED (refuses, does not call the RPC) when the business's status cannot be read", async () => {
+    mockToken();
+    mocks.businessMaybeSingle.mockResolvedValue({ data: null, error: { message: "boom" } });
+
+    const result = await service.validateRedemption("signed.jwt.token");
+
+    expect(result.ok).toBe(false);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("fails CLOSED (refuses, does not call the RPC) when the consumer's suspension state cannot be read", async () => {
+    mockToken();
+    mocks.profileMaybeSingle.mockResolvedValue({ data: null, error: { message: "boom" } });
+
+    const result = await service.validateRedemption("signed.jwt.token");
+
+    expect(result.ok).toBe(false);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("fails CLOSED (refuses, does not call the RPC) when the claim itself cannot be read", async () => {
+    mockToken();
+    mocks.claimRowMaybeSingle.mockResolvedValue({ data: null, error: { message: "boom" } });
+
+    const result = await service.validateRedemption("signed.jwt.token");
+
+    expect(result.ok).toBe(false);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("skips straight to the RPC (which answers FORBIDDEN) when the claim genuinely does not exist", async () => {
+    mockToken();
+    mocks.claimRowMaybeSingle.mockResolvedValue({ data: null, error: null });
+    mocks.rpc.mockResolvedValue({ data: null, error: { message: "FORBIDDEN" } });
+
+    const result = await service.validateRedemption("signed.jwt.token");
+
+    expect(result).toEqual({
+      ok: false,
+      code: "FORBIDDEN",
+      message: "You do not have permission to validate for this business.",
+    });
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails CLOSED when the service-role client is unavailable", async () => {
+    mockToken();
+    mocks.createServiceRoleClient.mockReturnValue(null);
+
+    const result = await service.validateRedemption("signed.jwt.token");
+
+    expect(result.ok).toBe(false);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+});
+
 // -------------------------------------------------------------- actions: auth
 
 describe("actions.claimReward: auth and validation gating", () => {
@@ -280,6 +531,24 @@ describe("actions.claimReward", () => {
       message: "This promo has reached its limit.",
       code: "CAMPAIGN_BUDGET_EXHAUSTED",
     });
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  // THE ASSERTION THAT MATTERS MOST (brief requirement 3): a suspended
+  // consumer must be refused by calling this "use server" action directly,
+  // with no screen, no redirect, and no UI in the loop at all - the screen at
+  // /suspended is a courtesy the consumer layout adds; this is the control.
+  it("CRITICAL: refuses a suspended consumer calling the server action directly, with no revalidation", async () => {
+    mocks.profileMaybeSingle.mockResolvedValue({ data: { is_suspended: true }, error: null });
+
+    const result = await actions.claimReward({ rewardId: REWARD_ID });
+
+    expect(result).toEqual({
+      ok: false,
+      message: "Your account is suspended. Contact us if you think this is a mistake.",
+      code: "ACCOUNT_SUSPENDED",
+    });
+    expect(mocks.rpc).not.toHaveBeenCalled();
     expect(revalidatePath).not.toHaveBeenCalled();
   });
 });

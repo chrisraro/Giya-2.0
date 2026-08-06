@@ -58,9 +58,25 @@ export default async function ConsumerLayout({ children }: { children: React.Rea
     // ever added.
     const { data: profile } = await supabase
       .from("profiles")
-      .select("onboarded_at")
+      .select("onboarded_at, is_suspended")
       .eq("id", user.id)
       .maybeSingle();
+
+    // Doc 30 section 2.8: a suspended consumer is redirected to a terminal
+    // screen for every authenticated route under this layout. Checked BEFORE
+    // onboarding and with no read-failure escape hatch of its own (a `null`
+    // profile just skips this branch and falls through to the onboarding
+    // check below, whose own transient-error reasoning already covers it) -
+    // unlike onboarding, this redirect is a courtesy, not the control: the
+    // money paths (claimReward, submitReceipt, validateRedemption) refuse
+    // independently via src/lib/auth/suspension.ts's fail-CLOSED readers, so
+    // a missed redirect here from a transient blip cannot let a suspended
+    // consumer actually transact - it would just see one more screen before
+    // hitting a real refusal. See src/middleware.ts's header for why this
+    // lives in a layout at all rather than middleware.
+    if (profile && profile.is_suspended) {
+      redirect("/suspended?type=account");
+    }
 
     // A read failure yields `profile === null`, which is treated as "not
     // onboarded" only when a row genuinely came back without a stamp. A null
