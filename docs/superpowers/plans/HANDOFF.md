@@ -1,7 +1,7 @@
 # Giya 2.0 — Build Handoff
 
-**Written:** 2026-08-06 · **Repo state:** `main` @ `e90b94c`, pushed, clean
-**Suite:** 202 files / 4,216 tests green · **Types:** 3 known pre-existing errors · **Migrations:** 0037–0061 live
+**Written:** 2026-08-06 · **Repo state:** `main` @ `447c43c`, pushed, clean
+**Suite:** 205 files / 4,289 tests green · **Types:** 3 known pre-existing errors · **Migrations:** 0037–0061 live
 
 You are picking up a multi-wave build-out of every module the docs specify and the code lacked. This document is the whole context. Read it top to bottom once; you should not need the prior conversation.
 
@@ -10,7 +10,7 @@ You are picking up a multi-wave build-out of every module the docs specify and t
 ## 1. Verify you're starting from a good state
 
 ```bash
-npx vitest run                    # expect 202 files / 4216 tests, all green
+npx vitest run                    # expect 205 files / 4289 tests, all green
 npx tsc --noEmit                  # expect EXACTLY 3 errors (see below)
 scripts/sdd/check-grants.sh 090bc96   # expect "OK"
 git status --porcelain            # expect empty
@@ -56,7 +56,7 @@ write brief → dispatch implementer (TDD, isolated) → adversarial review
 
 ---
 
-## 4. What is DONE (12 tasks, merged and pushed)
+## 4. What is DONE (13 tasks, merged and pushed)
 
 ### Wave 1 — money correctness (7/7 complete)
 
@@ -71,7 +71,7 @@ write brief → dispatch implementer (TDD, isolated) → adversarial review
 | T1.7 | Lifecycle transitions left no audit trail; resume skipped its gates |
 | *(0052)* | Unplanned: service role could reach three session-only RPCs |
 
-### Wave 2 — ops floor (6/8)
+### Wave 2 — ops floor (7/8)
 
 | Task | What it closed |
 |---|---|
@@ -81,31 +81,23 @@ write brief → dispatch implementer (TDD, isolated) → adversarial review
 | T2.5 | Seven cron jobs reported failure where nobody reads |
 | T2.6 | `heartbeat_at` written once at claim, never refreshed |
 | T2.8 | `finishJob` had no lease guard *(debt T2.6's own fix created)* |
+| T2.4 | Dead-lettered jobs were invisible and unrecoverable through any interface |
 
 ---
 
-## 5. IN FLIGHT — pick this up first
+## 5. IN FLIGHT — nothing
 
-### T2.4 — Admin queue status + dead-letter replay
+T2.4 was mid-fix when this document was first written; it has since been
+reviewed, approved and merged. **There is no unfinished work in a worktree.**
+Start at §8 with T2.7.
 
-**Status:** implemented, reviewed, **NOT approved**, fix pass incomplete.
-**Location:** worktree `.claude/worktrees/agent-a287bdb3368d4965a` @ `925fa56`, branch `worktree-agent-a287bdb3368d4965a`. **`main` is unaffected.**
-**Brief:** `.superpowers/sdd/briefs/t2-4-brief.md` · **Report:** same dir, `t2-4-report.md`
-
-What's good and must be kept: the replay is proved claimable against the **real** `claimJob` (not a shaped fake); the `attempts=0` reset is doc-39-mandated (`39-background-jobs.md:177`) and its DB constraints hold; the audit-gate choice correctly follows `consequences.ts`'s admin-actor precedent.
-
-**Blocking findings:**
-
-1. **I1 — ~10 assertions unverified.** The report admits they were confirmed "by construction" rather than by running a mutant. That is precisely what the seven prior failures believed (§6). Run them, extend the table.
-2. **I2 — the republish drifts from `publish.ts`.** It never writes back `qstash_message_id` on success (`publish.ts:289-303` does), and `0029_jobs.sql:138-141` says null means "not published" and is load-bearing — so a replayed row asserts a falsehood and a future reconciler double-publishes it. It also returns `true` on any 2xx, where `publish.ts:415-421` validates the body and treats an HTML error page served with 200 as failure.
-3. **I3 — a failed republish makes a dead job invisible.** The row is already `queued`, so it leaves the dead-letter list, and the success copy promises "the next delivery or sweep" — neither exists in this build. Either leave the row `dead` on publish failure, or say plainly on screen that it is queued with no delivery.
-4. **I4 — dedupe conflict misclassified.** Replay re-enters `jobs_dedupe_idx` without clearing `dedupe_key`; the resulting 23505 maps to "Try again", a permanent conflict reported as transient. Reachable via `receipts/server/submit.ts:592` (OCR dedupe key = image sha256).
-5. **I5** — the 100-row cap truncates silently while the tile shows an exact count, and the hidden rows are the *oldest*.
-6. **I6** — replay history is invisible: because `attempts` resets, a job on its fifth replay looks identical to its first.
-
-Also worth one sentence somewhere: the reset makes `attempts` non-monotonic, so the lease tuple `(id, attempts, status='running')` is reusable across a replay boundary. `claim.ts:364-407` and `heartbeat.ts:20-44` both treat it as unique. Bounded by the platform's `maxDuration` kill; don't change the design, but don't let the assumption weaken silently.
-
----
+Four Minor follow-ups were recorded against T2.4 rather than fixed, none
+blocking: `revertReplay` filters on `id` alone and could clobber a row a
+worker claimed in a narrow window (add `.eq("status","queued")`); a revert
+whose own write fails leaves the row queued and logged as `UNAUDITED CHANGE`;
+the replay-count read caps at 1,000 rows without notice; and the revert
+overwrites `last_error`, so the DLQ row shows the replay failure rather than
+why the job originally died (the original is preserved in the audit `before`).
 
 ## 6. STANDING RULES — read before writing any task
 
