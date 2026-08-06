@@ -2,11 +2,14 @@ import { Skeleton, SkeletonScreen, SkeletonText } from "@/components/ui/skeleton
 
 // Route skeleton for /b/[slug], the public shop page.
 //
-// This page is ISR (`revalidate = 60`), not force-dynamic, so this skeleton is
-// seen less often than the others: a warm cache serves the real page straight
-// away. It still matters on a cold slug, and it is the page an unauthenticated
+// This page declares `revalidate = 60`, but is not actually served from an
+// ISR cache: every read goes through `createClient()`, which calls
+// `cookies()` (task 5 added a second one, the viewer's own session for the
+// balance lookup) - a dynamic API that forces per-request rendering
+// regardless of the export. So this skeleton is seen on every navigation
+// here, not just a cold slug, and it is also the page an unauthenticated
 // visitor is most likely to land on first, which makes it the app's first
-// impression.
+// impression either way.
 //
 // The signature detail is the avatar overlapping the cover image: an 80px
 // circle pulled up 40px with a 4px surface ring. Reproducing that overlap is
@@ -40,9 +43,15 @@ export default function Loading() {
         </div>
       </div>
 
-      {/* Rewards: 56px list items at gap-3. */}
+      {/* Rewards: an optional progress rail (label + 4px bar, shown for a
+          signed-in viewer who already has a balance here - task 5), then
+          56px list items at gap-3. */}
       <div className="mt-6 px-4">
         <SkeletonText size="title-l" className="w-28" />
+        <div className="mt-2 flex flex-col gap-1">
+          <SkeletonText size="label-m" className="w-48" />
+          <Skeleton className="h-1 w-full rounded-full" />
+        </div>
         <div className="mt-3 flex flex-col gap-3">
           {[0, 1].map((i) => (
             <div key={i} className="rounded-md3-md border border-outline-variant p-4">

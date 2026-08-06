@@ -36,6 +36,8 @@ Full MD3 role set generated into `src/styles/md3-tokens.css` (light on `:root`, 
 
 Geist Sans on the full MD3 scale (`text-display-l` ... `text-label-s`, defined in `globals.css`). Geist Mono only for money/points figures, codes, and receipt raw text. Loaded via `next/font` (`geist` package).
 
+The full scale is registered in `cn()`'s `tailwind-merge` config (`src/lib/utils.ts`) as an extension of the built-in `font-size` class group. Without this, `tailwind-merge` does not recognize these custom `@utility` classes and falls back to treating them as unrecognized `text-*` classes, which land in its `text-color` group — the same group as `text-on-surface` and friends — so composing a type-scale class with a color class through `cn()` silently deletes the size class and keeps only the color. `src/lib/utils.test.ts` pins that every scale step survives alongside a color class.
+
 ## Shape, elevation, motion, spacing
 
 - Shape: buttons/chips `rounded-full`; cards `rounded-md3-md` (12px); sheets/dialogs `rounded-md3-xl` (28px); text fields `rounded-md3-xs` (4px).

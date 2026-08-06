@@ -90,6 +90,71 @@ describe("wallet balance rows", () => {
     render(await WalletPage());
 
     expect(screen.getByText("No balances yet")).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load your balances/i)).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getMyBalances() now THROWS on a genuine query error (task-5 review, I1's
+// split applied here too), rather than the [] it used to return for any
+// failure. `[]` and "the read failed" must never render the same screen: a
+// user with 5,000 points seeing "No balances yet" because of a transient
+// error is the single most alarming lie this app could tell - precisely the
+// trust failure doc 03's loyalty research flags as what makes users call a
+// program a scam. So the failure gets its own honest, non-alarming state,
+// distinct from the genuine empty state, and the rest of the page (which
+// reads from its own independent, still-successful queries) must not go
+// down with it.
+// ---------------------------------------------------------------------------
+
+describe("wallet balances failure state", () => {
+  it("shows a distinct, reassuring error state - not the 'No balances yet' empty state - when the read fails", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.getMyBalances.mockRejectedValue(new Error("connection reset"));
+
+    render(await WalletPage());
+
+    expect(screen.getByText("We couldn't load your balances")).toBeInTheDocument();
+    expect(screen.getByText(/your points are safe/i)).toBeInTheDocument();
+    expect(screen.queryByText("No balances yet")).not.toBeInTheDocument();
+    expect(consoleError).toHaveBeenCalled();
+
+    consoleError.mockRestore();
+  });
+
+  it("never shows the failure copy for a genuinely empty (successful) balances read", async () => {
+    mocks.getMyBalances.mockResolvedValue([]);
+
+    render(await WalletPage());
+
+    expect(screen.getByText("No balances yet")).toBeInTheDocument();
+    expect(screen.queryByText("We couldn't load your balances")).not.toBeInTheDocument();
+  });
+
+  it("still renders the ledger/activity section from its own successful read when balances fails", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.getMyBalances.mockRejectedValue(new Error("connection reset"));
+    mocks.listMyLedger.mockResolvedValue([]);
+
+    render(await WalletPage());
+
+    // The Activity section's OWN empty state still renders - ledger reads
+    // are independent of the balances read and never depended on it.
+    expect(screen.getByText("No activity yet")).toBeInTheDocument();
+    expect(screen.getByText("Activity")).toBeInTheDocument();
+
+    consoleError.mockRestore();
+  });
+
+  it("omits the expiry copy in the failure state - there is no confirmed balance to qualify", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.getMyBalances.mockRejectedValue(new Error("connection reset"));
+
+    render(await WalletPage());
+
+    expect(screen.queryByText(/points expire/i)).not.toBeInTheDocument();
+
+    consoleError.mockRestore();
   });
 });
 

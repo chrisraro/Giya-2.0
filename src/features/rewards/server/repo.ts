@@ -177,6 +177,16 @@ export async function getClaim(claimId: string): Promise<ClaimDetailDTO | null> 
 /**
  * The caller's business_customers rows (their balance at every business
  * they have a relationship with), with business name/slug resolved.
+ *
+ * Throws on a genuine query error rather than returning `[]` for it - same
+ * split as `getMyBalanceForBusiness` below, and for the same reason, made
+ * sharper by that fix: `groupRewardsByBusiness` now gates affordability on
+ * whether a business appears in this list AT ALL, so `[]` on a transient DB
+ * error would silently render the WHOLE `/rewards` catalogue plain with
+ * every Claim button enabled - the exact tap-then-POINTS_INSUFFICIENT defect
+ * this feature exists to remove, just reached through a different door.
+ * Failing open here is not a safe default; failing loud is the caller's
+ * signal to degrade deliberately (see `/rewards/page.tsx`'s `.catch()`).
  */
 export async function getMyBalances(): Promise<BalanceDTO[]> {
   const supabase = await createClient();
@@ -185,7 +195,10 @@ export async function getMyBalances(): Promise<BalanceDTO[]> {
     .from("business_customers")
     .select("business_id, points_balance, lifetime_points");
 
-  if (error || !balances || balances.length === 0) return [];
+  if (error) {
+    throw new Error(`getMyBalances: failed to load balances: ${error.message}`);
+  }
+  if (!balances || balances.length === 0) return [];
 
   const businessIds = Array.from(new Set(balances.map((b) => b.business_id)));
   const { data: businesses } = await supabase
@@ -204,6 +217,56 @@ export async function getMyBalances(): Promise<BalanceDTO[]> {
       lifetimePoints: b.lifetime_points,
     };
   });
+}
+
+/**
+ * The caller's points balance at ONE business, or null when they have no
+ * `business_customers` row there (never earned/visited). Scoped to a single
+ * business_id rather than reusing getMyBalances(): `/b/[slug]` is a public
+ * page a signed-out visitor can load too, so this only ever costs one narrow
+ * query for one business's worth of use, never a wallet-wide read.
+ *
+ * `consumerId` MUST be passed and filtered on explicitly - RLS alone is not
+ * enough here. `business_customers_staff_select` (0011:57) grants
+ * owner/manager/marketing staff SELECT over EVERY customer row at their own
+ * business, not just their own; without this filter, an owner viewing their
+ * own `/b/[slug]` with exactly one customer row would get THAT CUSTOMER's
+ * balance back as if it were their own (and `.maybeSingle()` would error
+ * outright with several rows). Same defense-in-depth convention documented at
+ * the top of `public-repo.ts`: RLS is the real gate, this filter is not the
+ * only one.
+ *
+ * Throws on a genuine query failure rather than returning null for it - null
+ * means "no relationship row" (a common, real state), not "something went
+ * wrong". Conflating the two would render a transient DB error as a
+ * confidently wrong "0 points" to a consumer who may have thousands. Same
+ * split as `getClaim` above.
+ *
+ * Callers on a page a signed-out visitor can reach (like `/b/[slug]`) should
+ * still only call this when a user is actually signed in: skipping the call
+ * entirely for a signed-out visitor avoids a query that could only ever
+ * answer null (RLS scopes business_customers_consumer_select to
+ * `authenticated`).
+ */
+export async function getMyBalanceForBusiness(
+  businessId: string,
+  consumerId: string,
+): Promise<number | null> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("business_customers")
+    .select("points_balance")
+    .eq("business_id", businessId)
+    .eq("consumer_id", consumerId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `getMyBalanceForBusiness: failed to load balance for business ${businessId}: ${error.message}`,
+    );
+  }
+  return data ? data.points_balance : null;
 }
 
 /**
