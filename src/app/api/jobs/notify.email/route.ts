@@ -149,7 +149,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       `${LOG_PREFIX} payload does not match the schema for job ${jobId ?? "(unreadable)"}`,
     );
     if (jobId !== null) {
-      await finishJob(supabase, jobId, { kind: "dead", error: "payload failed schema validation" });
+      // No claim was made - this invocation never reached step 3 - so there
+      // is no lease to guard on. `attempts: null` is finishJob's explicit
+      // escape hatch for exactly that; see its doc comment.
+      await finishJob(supabase, jobId, null, { kind: "dead", error: "payload failed schema validation" });
     }
     return NextResponse.json({ ok: false }, { status: 200 });
   }
@@ -189,14 +192,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       // predicate (`status in ('queued','failed')`) lets the next delivery pick
       // the job up, and the rows that already sent stay 'sent' so it will not
       // re-send them.
-      await finishJob(supabase, jobId, {
+      await finishJob(supabase, jobId, claim.job.attempts, {
         kind: "failed",
         error: `${result.failedRetryable} of ${payload.data.notification_ids.length} sends failed and can be retried`,
       });
       return new NextResponse(null, { status: 503 });
     }
 
-    await finishJob(supabase, jobId, { kind: "succeeded" });
+    await finishJob(supabase, jobId, claim.job.attempts, { kind: "succeeded" });
     return NextResponse.json({ ok: true, ...result }, { status: 200 });
   } catch (error) {
     // runNotifyEmail is written not to throw, so this is a genuine fault.
@@ -204,7 +207,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // per-row `status='pending'` gate makes a retry safe even if some of the
     // batch already went out.
     console.error(`${LOG_PREFIX} unexpected failure running job ${jobId}`, error);
-    await finishJob(supabase, jobId, { kind: "failed", error: "unexpected worker failure" });
+    await finishJob(supabase, jobId, claim.job.attempts, { kind: "failed", error: "unexpected worker failure" });
     return new NextResponse(null, { status: 503 });
   }
 }

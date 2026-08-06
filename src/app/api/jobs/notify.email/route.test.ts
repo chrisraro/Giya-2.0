@@ -33,8 +33,10 @@ vi.mock("@/lib/supabase/service", () => ({
   createServiceRoleClient: () => createServiceRoleClient(),
 }));
 
+type FinishResult = { kind: "recorded" } | { kind: "lease-lost" } | { kind: "error"; reason: string };
+
 const claimJob = vi.fn();
-const finishJob = vi.fn(async () => undefined);
+const finishJob = vi.fn(async (): Promise<FinishResult> => ({ kind: "recorded" }));
 vi.mock("@/lib/queue/claim", () => ({
   claimJob: (args: unknown) => claimJob(args),
   finishJob: (...args: unknown[]) => finishJob(...(args as [])),
@@ -182,7 +184,7 @@ describe("a verified request", () => {
       { job_id: JOB_ID, notification_ids: [NOTIFICATION_ID] },
       expect.objectContaining({ supabase: serviceClient }),
     );
-    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, { kind: "succeeded" });
+    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, 1, { kind: "succeeded" });
   });
 
   // Doc 39's taxonomy: a Zod failure is TERMINAL. The fifth delivery carries
@@ -193,7 +195,9 @@ describe("a verified request", () => {
 
     expect(response.status).toBe(200);
     expect(runNotifyEmail).not.toHaveBeenCalled();
-    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, {
+    // No claim was made for this delivery - it never got past payload
+    // parsing - so there is no lease to guard the write on.
+    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, null, {
       kind: "dead",
       error: "payload failed schema validation",
     });
@@ -204,7 +208,12 @@ describe("a verified request", () => {
     const response = await post(empty, sign(empty));
     expect(response.status).toBe(200);
     expect(runNotifyEmail).not.toHaveBeenCalled();
-    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, expect.objectContaining({ kind: "dead" }));
+    expect(finishJob).toHaveBeenCalledWith(
+      serviceClient,
+      JOB_ID,
+      null,
+      expect.objectContaining({ kind: "dead" }),
+    );
   });
 
   it("answers 200 to a body that is not JSON at all", async () => {
@@ -247,6 +256,21 @@ describe("duplicate delivery", () => {
   });
 });
 
+describe("a lost lease", () => {
+  // t2-8: notify.email has no heartbeat wiring, so it always takes isStale's
+  // `2 * maxDuration` fallback arm - a reclaim there provably cannot race a
+  // live worker. The lease guard is still exercised on every finishJob call,
+  // though, and must remain a no-op that never turns into a retry even if it
+  // somehow reported "lease-lost".
+  it("does not turn a lease-lost outcome into a retryable response", async () => {
+    finishJob.mockResolvedValueOnce({ kind: "lease-lost" });
+    const response = await post(VALID_BODY, sign(VALID_BODY));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true });
+  });
+});
+
 describe("retryable outcomes", () => {
   // The rows are still pending, so the next delivery finds them and the ones
   // already sent stay 'sent'. `failed` rather than `dead` so the claim
@@ -259,6 +283,7 @@ describe("retryable outcomes", () => {
     expect(finishJob).toHaveBeenCalledWith(
       serviceClient,
       JOB_ID,
+      1,
       expect.objectContaining({ kind: "failed" }),
     );
   });
@@ -269,7 +294,7 @@ describe("retryable outcomes", () => {
     runNotifyEmail.mockResolvedValue({ sent: 0, skipped: 0, failedTerminal: 1, failedRetryable: 0 });
     const response = await post(VALID_BODY, sign(VALID_BODY));
     expect(response.status).toBe(200);
-    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, { kind: "succeeded" });
+    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, 1, { kind: "succeeded" });
   });
 
   it("asks for a retry when the claim itself could not conclude", async () => {
@@ -286,6 +311,7 @@ describe("retryable outcomes", () => {
     expect(finishJob).toHaveBeenCalledWith(
       serviceClient,
       JOB_ID,
+      1,
       expect.objectContaining({ kind: "failed" }),
     );
   });
