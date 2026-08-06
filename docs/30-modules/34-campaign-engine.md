@@ -90,13 +90,26 @@ export function isCampaignLive(c: CampaignRow, at: Date): boolean {
 QStash schedule, every 5 minutes (`39-background-jobs.md` registry). One idempotent job per tick (`jobs.dedupe_key = window_ts` per the registry):
 
 ```sql
--- driven by campaigns_active_window_idx (partial: status in ('scheduled','active'))
+-- driven by campaigns_active_window_idx (partial: status in ('scheduled','active','paused'))
 update campaigns set status='active'  where status='scheduled' and starts_at <= now() and deleted_at is null;
 update campaigns set status='ended'   where status='active'    and ends_at   <= now() and deleted_at is null;
 -- (paused campaigns past ends_at are ended too, second statement variant)
 ```
 
 In practice the service selects candidate ids first, then runs each transition through the same state-machine function as the API (so gates on T3 and side effects fire per campaign, chunked 100/job). Latency contract: state visible within one sweep interval (≤ ~6 minutes) of the boundary; consumer-facing "live" checks additionally use `isCampaignLive` so sweep lag never shows an expired promo as claimable.
+
+**As shipped (task 2.1, `supabase/migrations/0053_campaigns_sweep.sql` +
+`0054_campaigns_sweep_review_fixes.sql`), this is a single SQL `security
+definer` function (`public.sweep_campaigns`), not a TypeScript service loop
+through the shared state-machine function** — `pg_cron` can only call SQL. It
+re-checks G1 (business standing) alone for T3, not the full gate set this
+paragraph implies (see the migration's own header for why G2/G3 are
+out of scope for a sweep), and T7 is unconditional. It does **not** fire the
+cache-invalidation / `ai.embed_refresh` / marketing-send side effects listed
+under "Side effects per transition" above — those live in
+`src/features/campaigns/server/service.ts`'s `emitLifecycleEvent`, which a
+plpgsql function cannot call. Recorded as a known gap in
+`supabase/README.md`'s "Known limitations".
 
 ## 4. Targeting / audience [V1]
 

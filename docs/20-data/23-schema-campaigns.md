@@ -38,7 +38,10 @@ create table public.campaigns (
 create index campaigns_biz_status_idx on public.campaigns (business_id, status, type)
   where deleted_at is null;
 create index campaigns_active_window_idx on public.campaigns (status, starts_at, ends_at)
-  where status in ('scheduled','active') and deleted_at is null;   -- scheduler sweep (39)
+  where status in ('scheduled','active','paused') and deleted_at is null;   -- scheduler sweep (39)
+  -- 'paused' added by task 2.1 (supabase/migrations/0053_campaigns_sweep.sql):
+  -- the sweep's T7 (`active|paused -> ended`) needs paused rows indexed too,
+  -- which the original two-status predicate excluded.
 
 -- ============================================================ promotions
 -- Display/offer payload for promotion-family campaigns (promotion, discount, seasonal, holiday, event).

@@ -20,15 +20,16 @@
 -- same instant the function itself will read.
 --
 -- Runs entirely inside one transaction and rolls back. Execute as a
--- privileged role (postgres) against a database with migrations 0001-0053
--- applied.
+-- privileged role (postgres) against a database with migrations 0001-0054
+-- applied (0054 is the review-fix pass: I1's self-clearing WHERE clause and
+-- I3's raise warning, both proven below).
 -- ============================================================================
 
 begin;
 
 set local search_path = public, extensions;
 
-select plan(24);
+select plan(31);
 
 -- ---------------------------------------------------------------- fixtures
 insert into auth.users (id, aud, role, email, raw_user_meta_data)
@@ -60,14 +61,17 @@ reset role;
 update public.businesses set status = 'active'    where id = current_setting('test.biz_active')::uuid;
 update public.businesses set status = 'suspended' where id = current_setting('test.biz_suspended')::uuid;
 
--- Seven campaigns, each proving exactly one fact:
---   1. due scheduled, active business      -> activated
+-- Eight campaigns in this batch, each proving exactly one fact (a ninth and
+-- tenth pair - 'poison'/'good' - follow much further down for the I1 tight-
+-- p_limit starvation proof, in their own isolated businesses):
+--   1. due scheduled, active business       -> activated
 --   2. future scheduled, active business    -> untouched (not due yet)
 --   3. active, ends_at past                 -> ended
 --   4. paused, ends_at past                 -> ended
 --   5. already ended, ends_at past          -> untouched (not a candidate)
 --   6. archived, ends_at past               -> untouched (not a candidate)
 --   7. due scheduled, SUSPENDED business    -> SKIPPED (stays scheduled)
+--   8. active, ends_at past, SUSPENDED business -> ended (T7 unconditional)
 with c as (
   insert into public.campaigns (business_id, type, status, name, starts_at, ends_at)
   values (current_setting('test.biz_active')::uuid, 'promotion', 'scheduled',
@@ -117,6 +121,17 @@ with c as (
   returning id)
 select set_config('test.due_suspended', (select id::text from c), true);
 
+-- Review fix (I1 minor): T7 unconditionality is correct by construction but
+-- was pinned by no fixture. An active campaign PAST ends_at on the SAME
+-- suspended business as the T3 skip case above - if a G1 check ever slipped
+-- into T7, this is what would catch it.
+with c as (
+  insert into public.campaigns (business_id, type, status, name, starts_at, ends_at)
+  values (current_setting('test.biz_suspended')::uuid, 'promotion', 'active',
+          'Active Past End On Suspended Business', now() - interval '2 days', now() - interval '1 hour')
+  returning id)
+select set_config('test.active_past_end_suspended', (select id::text from c), true);
+
 -- ------------------------------------------------------------ preconditions
 -- 1. the widened partial index exists and covers 'paused' (0012's original
 --    predicate excluded it; the sweep's T7 scan needs it for paused rows)
@@ -129,11 +144,11 @@ select ok(
 -- ------------------------------------------------------------ the sweep
 select set_config('test.processed', public.sweep_campaigns(200)::text, true);
 
--- 2. exactly three rows genuinely transitioned (skip does not count)
+-- 2. exactly four rows genuinely transitioned (skip does not count)
 select is(
   current_setting('test.processed'),
-  '3',
-  'the sweep transitioned exactly 3 campaigns (1 activated, 2 ended); the suspended-business one is skipped, not counted');
+  '4',
+  'the sweep transitioned exactly 4 campaigns (1 activated, 3 ended); the suspended-business SCHEDULED one is skipped, not counted');
 
 -- 3-4. T3: due + active business -> activated
 select is(
@@ -203,7 +218,25 @@ select ok(
   ),
   'the audit row correctly records before.status=paused for the paused source');
 
--- 11-14. terminal statuses are never candidates in the first place
+-- 11-12. T7 is unconditional: ends regardless of business standing, proven
+-- against the SAME suspended business the T3 skip case uses
+select is(
+  (select status from public.campaigns where id = current_setting('test.active_past_end_suspended')::uuid),
+  'ended',
+  'an active campaign past ends_at is ended even though its business is suspended (T7 has no G1 gate)');
+
+select ok(
+  exists (
+    select 1 from public.audit_logs
+     where entity_type = 'campaign'
+       and entity_id = current_setting('test.active_past_end_suspended')::uuid
+       and action = 'campaign.ended'
+       and before = '{"status": "active"}'::jsonb
+       and after  = '{"status": "ended", "trigger": "sweep"}'::jsonb
+  ),
+  'the audit row lands for the suspended-business T7 case exactly like any other');
+
+-- 13-16. terminal statuses are never candidates in the first place
 select is(
   (select status from public.campaigns where id = current_setting('test.already_ended')::uuid),
   'ended',
@@ -276,9 +309,108 @@ select is(
     where campaign_id in (current_setting('test.due_scheduled')::uuid,
                           current_setting('test.active_past_end')::uuid,
                           current_setting('test.paused_past_end')::uuid,
-                          current_setting('test.due_suspended')::uuid)),
+                          current_setting('test.due_suspended')::uuid,
+                          current_setting('test.active_past_end_suspended')::uuid)),
   '0',
   'the sweep writes no points ledger rows');
+
+-- ------------------------------------------------------------ I1 review fix:
+-- genuine self-clearing under a TIGHT p_limit, not just "second run is 0"
+-- ------------------------------------------------------------------------
+-- Review finding: with p_limit=200 and 8 fixtures, assertion 17 above cannot
+-- tell "the transitioned rows left candidacy" from "a skipped row is still
+-- occupying a slot doing no work" - both produce a second-run count of 0.
+-- 0045's own suite proves its self-clearing fix with a SMALL p_limit so a
+-- later pair is reached only once an earlier one clears a slot; this is the
+-- same proof for T3. Two fresh, isolated businesses/campaigns (never touched
+-- by anything above) so this block cannot be affected by the earlier
+-- reactivation of test.biz_suspended:
+--   * 'poison': business status='closed' (0002's terminal value - never
+--     coming back), scheduled, starts_at 2 hours ago (SORTS FIRST).
+--   * 'good': business status='active', scheduled, starts_at 1 hour ago
+--     (sorts second - due, gate-passing, and would starve behind poison
+--     under the pre-fix ordering-in-the-loop-body design).
+-- Before the I1 fix, sweep_campaigns(1) would repeatedly select ONLY
+-- 'poison' (it sorts first and the cursor's LIMIT 1 exhausts the whole
+-- budget on it before 'good' is ever looked at), skip it forever, and never
+-- reach 'good' - starvation, unbounded, exactly 0045's own failure shape.
+-- After the fix (0054's exists() moved into the WHERE clause), 'poison'
+-- never enters candidacy at all, so the single slot goes straight to 'good'.
+insert into auth.users (id, aud, role, email, raw_user_meta_data)
+values
+  ('c3333333-3333-4333-8333-333333333333', 'authenticated', 'authenticated',
+   'giya-sweep-closed-owner@example.com', '{"full_name": "Closed Biz Owner"}'::jsonb),
+  ('c4444444-4444-4444-8444-444444444444', 'authenticated', 'authenticated',
+   'giya-sweep-good-owner@example.com', '{"full_name": "Good Biz Owner"}'::jsonb);
+
+select set_config('request.jwt.claims',
+  '{"sub": "c3333333-3333-4333-8333-333333333333", "role": "authenticated"}', true);
+set local role authenticated;
+select set_config('test.biz_closed',
+  (select public.register_business('Sweep Closed Shop', 'cafe', 'cebu', '3 Dead Row')::text),
+  true);
+reset role;
+
+select set_config('request.jwt.claims',
+  '{"sub": "c4444444-4444-4444-8444-444444444444", "role": "authenticated"}', true);
+set local role authenticated;
+select set_config('test.biz_good',
+  (select public.register_business('Sweep Good Bistro', 'restaurant', 'cebu', '4 Bright Row')::text),
+  true);
+reset role;
+
+update public.businesses set status = 'closed' where id = current_setting('test.biz_closed')::uuid;
+update public.businesses set status = 'active' where id = current_setting('test.biz_good')::uuid;
+
+with c as (
+  insert into public.campaigns (business_id, type, status, name, starts_at, ends_at)
+  values (current_setting('test.biz_closed')::uuid, 'promotion', 'scheduled',
+          'Poison (Closed Business, Sorts First)', now() - interval '2 hours', null)
+  returning id)
+select set_config('test.poison', (select id::text from c), true);
+
+with c as (
+  insert into public.campaigns (business_id, type, status, name, starts_at, ends_at)
+  values (current_setting('test.biz_good')::uuid, 'promotion', 'scheduled',
+          'Good (Active Business, Sorts Second)', now() - interval '1 hour', null)
+  returning id)
+select set_config('test.good', (select id::text from c), true);
+
+-- 20. one call, p_limit=1: the fixed scan excludes 'poison' from candidacy
+-- entirely (exists() false), so the single slot goes straight to 'good'.
+select is(
+  public.sweep_campaigns(1)::text,
+  '1',
+  'p_limit=1 activates the gate-passing campaign directly - the closed-business one never occupies the slot');
+
+-- 21. 'good' is now active
+select is(
+  (select status from public.campaigns where id = current_setting('test.good')::uuid),
+  'active',
+  'the gate-passing campaign activated even though a permanently-ineligible one sorts earlier');
+
+-- 22. 'poison' was never touched - still scheduled, business still closed
+select is(
+  (select status from public.campaigns where id = current_setting('test.poison')::uuid),
+  'scheduled',
+  'the closed-business campaign is left scheduled - excluded from candidacy, not skipped-and-reselected');
+
+-- 23. the audit row landed for 'good'
+select ok(
+  exists (
+    select 1 from public.audit_logs
+     where entity_type = 'campaign'
+       and entity_id = current_setting('test.good')::uuid
+       and action = 'campaign.activated'
+       and after = '{"status": "active", "trigger": "sweep"}'::jsonb
+  ),
+  'the audit row for the formerly-starved campaign is correct');
+
+-- 24. no audit row was ever written for 'poison'
+select ok(
+  not exists (select 1 from public.audit_logs
+    where entity_type = 'campaign' and entity_id = current_setting('test.poison')::uuid),
+  'no audit row for the closed-business campaign - it was never a candidate');
 
 -- ------------------------------------------------------------ grants
 select ok(
