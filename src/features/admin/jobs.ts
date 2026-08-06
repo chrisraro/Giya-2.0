@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { z } from "zod";
 
 import { getServerEnv } from "@/lib/env";
 import { loadMetrics } from "@/lib/observability/metrics";
@@ -78,15 +79,100 @@ import type { DeadJobItem, QueueStatusView } from "./types";
 // narrow near-duplicate of that call, built ONLY from `publish.ts`'s already-
 // PUBLIC surface (`queuePath`, `flowControlKey`, `QUEUE_REGISTRY`) so the
 // destination URL, the retries header and the flow-control key can never
-// disagree with what a normal enqueue computes. It is best effort, exactly as
-// `enqueue()`'s own publish step is: doc 39's "Postgres is the truth" applies
-// here unchanged, so a publish failure is logged and the ROW - already reset
-// and already audited - is left as the durable, recoverable truth. A future
-// task that is allowed to touch `queue/publish.ts` should replace this with a
-// shared `republish()` export; noted rather than silently accepted.
+// disagree with what a normal enqueue computes - including validating the
+// response body against the same shape `publish.ts`'s own
+// `publishResponseSchema` checks, so an HTML error page served with a 200
+// (a real failure mode `publish.ts` guards against) is not read as success
+// here either.
+//
+// ---------------------------------------------------------------------------
+// A REPLAY IS NOT SUCCESSFUL UNTIL IT IS ACTUALLY DELIVERABLE - review finding I3
+// ---------------------------------------------------------------------------
+// A NORMAL enqueue can afford "row first, publish best-effort" (`publish.ts`'s
+// own header) because doc 39 gives an unpublished `queued` row a second
+// chance: the hourly reconciler re-publishes any `queued` row with no
+// `qstash_message_id`. THIS BUILD HAS NO RECONCILER - `src/lib/queue/queues.ts`
+// registers exactly two workers, and every "reconciler" reference in `src/` is
+// a comment about future work, not a running job. So a replay that resets a
+// dead row to `queued` and then merely LOGS a publish failure would not leave
+// a recoverable row; it would leave an INVISIBLE one - off the dead-letter
+// list (doc 39's own DLQ view), showing only as +1 on the harmless-looking
+// `queued` tile, and claimed by nobody, ever. That is the exact failure this
+// task exists to end, recreated one layer up.
+//
+// So replay treats delivery as part of the operation, not an afterthought:
+// if `republishDeadJob` cannot confirm a message id, the reset is REVERTED -
+// the row goes back to `dead`, visibly, in the list an operator is already
+// watching - and `replayJob` reports `REPUBLISH_FAILED` rather than `ok:
+// true`. This is safe to do even after the row briefly went `queued` and a
+// message was already accepted by QStash in the rare split-second race: doc
+// 39's own words are "idempotency guarantees make replay always safe - that
+// is the design bar for every worker", and `claimJob`'s first branch (`status
+// === 'dead' -> done`) is exactly that guarantee - a stray delivery for a
+// row that is dead again is a no-op, not a double-run.
+//
+// ---------------------------------------------------------------------------
+// THE DEDUPE INDEX APPLIES TO A REPLAYED ROW TOO - review finding I4
+// ---------------------------------------------------------------------------
+// Flipping a dead row to `queued` re-enters `jobs_dedupe_idx` (0029: unique on
+// `(queue, dedupe_key)` where `status in ('queued','running')`) under its
+// ORIGINAL `dedupe_key`, unchanged by replay. If a fresh submission for the
+// same work already holds that key in flight - e.g. `receipts/server/
+// submit.ts` re-enqueuing `ocr.process` under the image's sha256 after the
+// first attempt died - the reset collides and Postgres raises 23505. That is
+// not a transient fault ("try again" is wrong advice: retrying the same
+// replay collides again) - it means a live job for this exact work already
+// exists, so replaying the dead one would fork it into two. Detected on the
+// CAS write and reported as its own `DEDUPE_CONFLICT` code.
+//
+// ---------------------------------------------------------------------------
+// WHY THE ROW RESET GOES BEFORE DELIVERY GOES BEFORE THE AUDIT ROW
+// ---------------------------------------------------------------------------
+// Order is: (1) CAS the row to `queued`, (2) attempt delivery, (3) write ONE
+// audit row describing the ACTUAL outcome - `job.replayed` when delivered,
+// `job.replay_failed` when the reset had to be reverted. Auditing before
+// knowing the outcome (the original shape of this function) would let a
+// delivery failure leave an audit row asserting `after: {status: 'queued'}`
+// for a row that is actually `dead` again - a false record, which is exactly
+// what `consequences.ts`'s own header calls out as the reason NOT to audit
+// before the state is settled. Settling delivery first costs one extra round
+// trip and buys an audit trail that is never wrong about the row's own status.
+//
+// ---------------------------------------------------------------------------
+// M1: THE RESET MAKES `attempts` NON-MONOTONIC ACROSS THE REPLAY BOUNDARY
+// ---------------------------------------------------------------------------
+// `claim.ts`'s CAS and `heartbeat.ts`'s `refresh()` both guard their writes on
+// the tuple `(id, attempts, status='running')` as a LEASE - implicitly
+// assuming that tuple names one invocation's ownership uniquely. Resetting
+// `attempts` to 0 on replay means that assumption is no longer "attempts only
+// goes up for this row's whole life": a job's second lifetime (post-replay)
+// reuses the same low attempt numbers its first lifetime used. Doc 39
+// mandates the reset (see above) and this is not a reason to change it - a
+// stray delivery old enough to matter would have to survive past the
+// platform's own `maxDuration` kill AND past QStash's bounded retry backoff
+// AND past however long the row sat `dead` before an admin replayed it, which
+// is a materially different bar than "still in flight". Named here so the
+// assumption is a stated trade-off, not a silent one.
 // ===========================================================================
 
+/** doc 31 §5: "these are working lists, not archives" - same ceiling
+ * `admin/queue.ts#QUEUE_LIMIT` uses for the same reason. */
 const DEAD_JOBS_LIMIT = 100;
+
+/** Bounds the replay-history read (I6) - generous relative to
+ * `DEAD_JOBS_LIMIT` because several replays can share one job id. */
+const REPLAY_COUNT_ROW_LIMIT = 1_000;
+
+const ENTITY_JOB = "job";
+/** A replay that was delivered. Doc 39's own verb. */
+const ACTION_JOB_REPLAYED = "job.replayed";
+/** A replay whose reset had to be reverted because it could not be
+ * delivered (I3) - a distinct verb so the audit trail (and I6's replay-count
+ * read, which only counts `ACTION_JOB_REPLAYED`) can tell "this job was
+ * actually given a fresh attempt" apart from "someone tried and it did not
+ * take". Doc 39 does not name this verb; 0022's constraint is on SHAPE, not
+ * vocabulary, so registering one costs no migration. */
+const ACTION_JOB_REPLAY_FAILED = "job.replay_failed";
 
 // ---------------------------------------------------------------------------
 // Dependencies
@@ -98,10 +184,16 @@ export interface AdminJobsDeps {
   now: () => Date;
   /**
    * Injected in tests. Defaults to a real QStash publish. Never rejects: a
-   * publish failure is reported as `false`, not thrown, matching
-   * `src/lib/queue/publish.ts`'s own `publish()` contract.
+   * publish failure is reported as `null`, not thrown, matching
+   * `src/lib/queue/publish.ts`'s own `publish()` contract - including its
+   * return type (`string | null`, the QStash message id or nothing).
    */
-  republish: (queue: QueueName, jobId: string, payload: unknown, businessId: string | null) => Promise<boolean>;
+  republish: (
+    queue: QueueName,
+    jobId: string,
+    payload: unknown,
+    businessId: string | null,
+  ) => Promise<string | null>;
 }
 
 export function defaultAdminJobsDeps(): AdminJobsDeps | null {
@@ -134,7 +226,7 @@ interface DeadJobRow {
 const DEAD_JOB_COLUMNS =
   "id, queue, business_id, payload, attempts, max_attempts, last_error, finished_at, created_at";
 
-function toDeadJobItem(row: DeadJobRow): DeadJobItem {
+function toDeadJobItem(row: DeadJobRow, replayCount: number | null): DeadJobItem {
   return {
     jobId: row.id,
     queue: row.queue,
@@ -145,7 +237,46 @@ function toDeadJobItem(row: DeadJobRow): DeadJobItem {
     lastError: row.last_error,
     deadAt: row.finished_at,
     createdAt: row.created_at,
+    replayCount,
   };
+}
+
+/**
+ * How many times `job.replayed` has landed on each of the given job ids
+ * (I6: "recorded" must also mean "discoverable" - `attempts` resets on every
+ * replay, so a job on its fifth replay is otherwise indistinguishable on this
+ * screen from one on its first).
+ *
+ * `null` on a read failure - NOT `0` for every row, which would tell an
+ * operator "never replayed" about a job this could simply not find out about.
+ * Same "null means unreadable, never a guessed zero" rule every sibling read
+ * in this module and `loadMetrics` follow.
+ */
+async function loadReplayCounts(
+  deps: AdminJobsDeps,
+  jobIds: readonly string[],
+): Promise<Map<string, number> | null> {
+  if (jobIds.length === 0) return new Map();
+
+  const { data, error } = await deps.supabase
+    .from("audit_logs")
+    .select("entity_id")
+    .eq("entity_type", ENTITY_JOB)
+    .eq("action", ACTION_JOB_REPLAYED)
+    .in("entity_id", [...jobIds])
+    .limit(REPLAY_COUNT_ROW_LIMIT);
+
+  if (error !== null) {
+    console.error("[admin/jobs] replay-count read failed", error);
+    return null;
+  }
+
+  const counts = new Map<string, number>();
+  for (const row of (data ?? []) as Array<{ entity_id: string | null }>) {
+    if (row.entity_id === null) continue;
+    counts.set(row.entity_id, (counts.get(row.entity_id) ?? 0) + 1);
+  }
+  return counts;
 }
 
 /**
@@ -155,13 +286,22 @@ function toDeadJobItem(row: DeadJobRow): DeadJobItem {
  *
  * `null` on any read failure, `[]` on a genuinely clean platform - see
  * `QueueStatusView`'s own doc for why the distinction is load-bearing here.
+ *
+ * OLDEST FIRST (`finished_at` ascending) - review finding I5. The cap below
+ * is real (`DEAD_JOBS_LIMIT`, "working lists, not archives" per
+ * `admin/queue.ts`'s identical ceiling), and on a platform with more than 100
+ * simultaneously dead jobs the choice of which 100 to show is not neutral:
+ * newest-first would truncate away exactly the jobs that have been sitting
+ * dead the longest - the forgotten ones, and the ones an SLA-minded operator
+ * needs to see first. Same reasoning `admin/queue.ts`'s `open` filter states
+ * for its own oldest-first order.
  */
 async function loadDeadJobs(deps: AdminJobsDeps): Promise<DeadJobItem[] | null> {
   const { data, error } = await deps.supabase
     .from("jobs")
     .select(DEAD_JOB_COLUMNS)
     .eq("status", "dead")
-    .order("finished_at", { ascending: false })
+    .order("finished_at", { ascending: true })
     .limit(DEAD_JOBS_LIMIT);
 
   if (error !== null) {
@@ -169,7 +309,15 @@ async function loadDeadJobs(deps: AdminJobsDeps): Promise<DeadJobItem[] | null> 
     return null;
   }
 
-  return ((data ?? []) as DeadJobRow[]).map(toDeadJobItem);
+  const rows = (data ?? []) as DeadJobRow[];
+  const replayCounts = await loadReplayCounts(
+    deps,
+    rows.map((row) => row.id),
+  );
+
+  return rows.map((row) =>
+    toDeadJobItem(row, replayCounts === null ? null : (replayCounts.get(row.id) ?? 0)),
+  );
 }
 
 /**
@@ -211,7 +359,15 @@ export type ReplayErrorCode =
   | "NOT_FOUND"
   | "INVALID_STATE"
   | "WRITE_FAILED"
+  /** The CAS write hit `jobs_dedupe_idx` (0029): a live job already owns
+   * this row's dedupe key. See the module header (I4) - NOT the same as
+   * `WRITE_FAILED`, because retrying this replay cannot succeed until the
+   * conflicting job finishes. */
+  | "DEDUPE_CONFLICT"
   | "AUDIT_WRITE_FAILED"
+  /** The reset could not be confirmed delivered, so it was reverted; the job
+   * is still `dead`. See the module header (I3). */
+  | "REPUBLISH_FAILED"
   | "DEPENDENCY_UNAVAILABLE";
 
 export interface ReplayJobInput {
@@ -224,9 +380,11 @@ export interface ReplayJobInput {
 export interface ReplayJobDetail {
   status: "queued";
   attempts: 0;
-  /** Whether the best-effort re-publish to QStash succeeded. `false` does NOT
-   * mean the replay failed - see the module header. */
-  republished: boolean;
+  /** The QStash message id this replay was delivered under. Always present
+   * on success: `ok: true` now MEANS delivered - see the module header (I3).
+   * A replay that could not be confirmed delivered is `ok: false` with code
+   * `REPUBLISH_FAILED`, not a "succeeded but undelivered" detail flag. */
+  messageId: string;
 }
 
 /** The shared failure shape - standalone (not a slice of `ReplayJobResult`)
@@ -244,9 +402,6 @@ export type ReplayJobResult = { ok: true; detail: ReplayJobDetail } | ReplayFail
 function fail(code: ReplayErrorCode, message: string): ReplayFailure {
   return { ok: false, code, message };
 }
-
-const ENTITY_JOB = "job";
-const ACTION_JOB_REPLAYED = "job.replayed";
 
 interface JobRow {
   id: string;
@@ -312,20 +467,28 @@ async function assertCanReplay(
   return { ok: true, role };
 }
 
+/** Postgres unique violation - `jobs_dedupe_idx` firing on the CAS write
+ * (I4). Same constant, same meaning as `queue/publish.ts`'s own. */
+const UNIQUE_VIOLATION = "23505";
+
 /**
- * Replay a dead job: doc 39's "Replay procedure", run as one guarded write
- * plus an audited record of it. See the module header for why every design
- * choice below is what it is; this function is the shape those choices add
- * up to.
+ * Replay a dead job: doc 39's "Replay procedure", run as one guarded write,
+ * a delivery attempt, and an audited record of the ACTUAL outcome. See the
+ * module header for why every design choice below is what it is; this
+ * function is the shape those choices add up to.
  *
  * GUARD ORDER (the same normative order `consequences.ts` documents and uses):
- *   1. A non-blank reason                    -> REASON_REQUIRED
+ *   1. A non-blank reason                     -> REASON_REQUIRED
  *   2. The actor may act (table truth)        -> FORBIDDEN
  *   3. The job exists                         -> NOT_FOUND
  *   4. The job is actually dead                -> INVALID_STATE
- *   5. Write the reset, guarded on `status='dead'` so a race loses cleanly
- *   6. Write exactly one audit row; on failure, UNDO step 5
- *   7. Best-effort re-publish to QStash (never affects the result above)
+ *   5. Write the reset, guarded on `status='dead'` so a race loses cleanly;
+ *      a `jobs_dedupe_idx` collision reports DEDUPE_CONFLICT specifically
+ *   6. Attempt delivery. Not confirmed -> REVERT the reset, audit the
+ *      failed attempt (`job.replay_failed`), report REPUBLISH_FAILED -
+ *      never leave an undeliverable row sitting invisibly `queued` (I3)
+ *   7. Delivered -> best-effort record the new `qstash_message_id`, write
+ *      the `job.replayed` audit row; on audit failure, UNDO step 5
  */
 export async function replayJob(
   input: ReplayJobInput,
@@ -361,12 +524,6 @@ export async function replayJob(
   }
 
   const now = deps.now();
-  const before = {
-    status: job.status,
-    attempts: job.attempts,
-    max_attempts: job.max_attempts,
-    last_error: job.last_error,
-  };
   const patch = {
     status: "queued" as const,
     attempts: 0,
@@ -377,7 +534,6 @@ export async function replayJob(
     scheduled_at: now.toISOString(),
     qstash_message_id: null,
   };
-  const after = { status: patch.status, attempts: patch.attempts, last_error: patch.last_error };
 
   // The CAS: guarded on `status='dead'` so a concurrent change to this row
   // between the read above and this write (another admin replaying it, or a
@@ -392,6 +548,14 @@ export async function replayJob(
     .maybeSingle<{ id: string }>();
 
   if (writeError !== null) {
+    if (writeError.code === UNIQUE_VIOLATION) {
+      // I4: a live job already owns this row's dedupe key. Not transient -
+      // retrying THIS replay will collide again every time.
+      return fail(
+        "DEDUPE_CONFLICT",
+        "Another job is already in flight for this exact work. This dead job cannot be replayed while that one is running.",
+      );
+    }
     console.error("[admin/jobs] job replay write failed", writeError);
     return fail("WRITE_FAILED", "The job could not be replayed. Try again.");
   }
@@ -399,6 +563,72 @@ export async function replayJob(
     return fail(
       "INVALID_STATE",
       "This job changed while you were working. Refresh and check its current status.",
+    );
+  }
+
+  // ---- Delivery, BEFORE the audit row - see the module header for why. ----
+  // `isQueueName` narrows `job.queue` only within this expression; captured
+  // in `queueName` (rather than a boolean `deliverable`) so that narrowing
+  // survives into the `republish` call below.
+  const queueName: QueueName | null = isQueueName(job.queue) ? job.queue : null;
+  const deliverable = queueName !== null;
+  const messageId =
+    queueName === null
+      ? null
+      : await deps.republish(queueName, input.jobId, job.payload, job.business_id);
+
+  if (messageId === null) {
+    // I3: an undelivered `queued` row is invisible in this build (no
+    // reconciler exists to ever pick it up), which is worse than dead. Undo
+    // the reset so the job stays on the DLQ view, and say so plainly.
+    await revertReplay(deps, input.jobId, job, {
+      lastError: deliverable
+        ? "Replay attempted but could not be redelivered to QStash; the job was left dead."
+        : `Replay attempted but "${job.queue}" has no worker registered in this build; the job was left dead.`,
+    });
+
+    // Best effort: this is a forensic record of the ATTEMPT, not a state
+    // change that needs the same write-then-audit-else-revert gate step 7
+    // uses - the row is already back to what it was, so there is nothing
+    // left to protect if this insert itself fails, only something useful to
+    // lose (see I6: this is what lets an operator see a job was already
+    // tried and failed to deliver, not merely that it exists).
+    const { error: failureAuditError } = await deps.supabase.from("audit_logs").insert({
+      actor_id: input.actorId,
+      actor_kind: "admin",
+      actor_role: actor.role,
+      business_id: job.business_id,
+      action: ACTION_JOB_REPLAY_FAILED,
+      entity_type: ENTITY_JOB,
+      entity_id: input.jobId,
+      before: { status: job.status, attempts: job.attempts, last_error: job.last_error } as unknown as Json,
+      after: { status: "dead", attempts: job.attempts, redelivered: false } as unknown as Json,
+      reason: reason.reason,
+      request_id: input.requestId,
+    });
+    if (failureAuditError !== null) {
+      console.error("[admin/jobs] could not record the failed replay attempt for job", input.jobId, failureAuditError);
+    }
+
+    return fail(
+      "REPUBLISH_FAILED",
+      deliverable
+        ? "The job was reset but could not be redelivered, so it was left dead. Try again once the delivery problem is fixed."
+        : `This build has no worker for queue "${job.queue}", so nothing was replayed. The job was left dead.`,
+    );
+  }
+
+  // Best effort, same standing as `enqueue()`'s own post-publish write:
+  // losing this costs DLQ/QStash correlation on the NEXT dead-lettering,
+  // nothing about the delivery that already happened.
+  const { error: messageIdError } = await deps.supabase
+    .from("jobs")
+    .update({ qstash_message_id: messageId })
+    .eq("id", input.jobId);
+  if (messageIdError !== null) {
+    console.error(
+      `[admin/jobs] job ${input.jobId} was redelivered as ${messageId} but the id could not be recorded`,
+      messageIdError,
     );
   }
 
@@ -410,8 +640,13 @@ export async function replayJob(
     action: ACTION_JOB_REPLAYED,
     entity_type: ENTITY_JOB,
     entity_id: input.jobId,
-    before: before as unknown as Json,
-    after: after as unknown as Json,
+    before: {
+      status: job.status,
+      attempts: job.attempts,
+      max_attempts: job.max_attempts,
+      last_error: job.last_error,
+    } as unknown as Json,
+    after: { status: patch.status, attempts: patch.attempts, last_error: patch.last_error } as unknown as Json,
     reason: reason.reason,
     request_id: input.requestId,
   });
@@ -422,36 +657,34 @@ export async function replayJob(
     return fail("AUDIT_WRITE_FAILED", "The job was not replayed because it could not be recorded.");
   }
 
-  let republished = false;
-  if (isQueueName(job.queue)) {
-    republished = await deps.republish(job.queue, input.jobId, job.payload, job.business_id);
-  } else {
-    // Defensive only: every queue this build enqueues into is registered
-    // (`src/lib/queue/queues.ts`), so a dead row naming anything else is data
-    // from outside that registry. The row is still reset and audited above;
-    // only the delivery attempt is skipped, loudly.
-    console.warn(
-      `[admin/jobs] job ${input.jobId} was replayed but its queue "${job.queue}" is not in this build's registry; nothing was published`,
-    );
-  }
-
-  return { ok: true, detail: { status: "queued", attempts: 0, republished } };
+  return { ok: true, detail: { status: "queued", attempts: 0, messageId } };
 }
 
 /**
- * Put the row back after the audit row that was supposed to justify the
- * replay failed to write - the same UNDO `consequences.ts#revert` performs,
- * best effort, loud on failure. See that module's header for why neither
- * write-order avoids this case and why best effort is still the correct
- * response to an undo that itself fails.
+ * Put the row back after either (a) the audit row that was supposed to
+ * justify the replay failed to write, or (b) delivery could not be
+ * confirmed (I3) - the same UNDO `consequences.ts#revert` performs, best
+ * effort, loud on failure. See that module's header for why neither write
+ * order avoids case (a), and the module header above for why (b) exists at
+ * all.
+ *
+ * `overrides.lastError` lets the (b) caller leave a note explaining WHY the
+ * job is dead again, instead of restoring the stale error from whatever
+ * killed it the first time - an operator reading the DLQ row should see
+ * "someone already tried this and it didn't deliver", not silence.
  */
-async function revertReplay(deps: AdminJobsDeps, jobId: string, original: JobRow): Promise<void> {
+async function revertReplay(
+  deps: AdminJobsDeps,
+  jobId: string,
+  original: JobRow,
+  overrides: { lastError?: string } = {},
+): Promise<void> {
   const { error } = await deps.supabase
     .from("jobs")
     .update({
       status: original.status,
       attempts: original.attempts,
-      last_error: original.last_error,
+      last_error: overrides.lastError ?? original.last_error,
       finished_at: original.finished_at,
       started_at: original.started_at,
       heartbeat_at: original.heartbeat_at,
@@ -467,7 +700,7 @@ async function revertReplay(deps: AdminJobsDeps, jobId: string, original: JobRow
     );
     return;
   }
-  console.warn(`[admin/jobs] the replay of job ${jobId} was reverted because its audit row could not be written`);
+  console.warn(`[admin/jobs] the replay of job ${jobId} was reverted (${overrides.lastError ?? "audit write failed"})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -476,17 +709,28 @@ async function revertReplay(deps: AdminJobsDeps, jobId: string, original: JobRow
 
 const REPUBLISH_TIMEOUT_MS = 5_000;
 
+/** The same shape `queue/publish.ts`'s own `publishResponseSchema` checks -
+ * see the module header on why an HTML error page served with a 200 must
+ * not be read as a delivered message here either. */
+const republishResponseSchema = z.union([
+  z.object({ messageId: z.string().min(1) }),
+  z.array(z.object({ messageId: z.string().min(1) })).min(1),
+]);
+
 /**
- * Best-effort re-delivery of an already-reset job row to QStash. Never
- * throws and never returns anything the caller must react to beyond the
- * boolean: `replayJob` above has already committed the row and the audit row
- * by the time this runs, and doc 39's own principle - "Postgres is the truth"
- * - applies to a replay exactly as it applies to a fresh enqueue.
+ * Re-deliver an already-reset job row to QStash under its ORIGINAL `job_id`
+ * (doc 39's own words). Never throws; every failure - unconfigured,
+ * unreachable, refused, or a 200 whose body does not actually name a
+ * message - returns `null`, exactly as `queue/publish.ts`'s own `publish()`
+ * treats the identical set of failures. `replayJob` treats `null` as "not
+ * delivered", not merely "not confirmed" - see the module header (I3) for
+ * why the two are NOT the same thing to this caller, unlike a normal
+ * `enqueue()`.
  *
  * Exported (unlike a purely internal helper) so it can be tested directly
- * against a fake `fetchImpl`, the same seam `src/lib/queue/publish.ts`'s own
- * `publish()` uses - not because anything outside this module is meant to
- * call it; `defaultAdminJobsDeps()` is the one production call site.
+ * against a fake `fetchImpl`, the same seam `publish()` uses - not because
+ * anything outside this module is meant to call it; `defaultAdminJobsDeps()`
+ * is the one production call site.
  */
 export async function republishDeadJob(
   queue: QueueName,
@@ -494,19 +738,19 @@ export async function republishDeadJob(
   payload: unknown,
   businessId: string | null,
   fetchImpl: typeof fetch = globalThis.fetch,
-): Promise<boolean> {
+): Promise<string | null> {
   let env;
   try {
     env = getServerEnv();
   } catch (error) {
-    console.warn(`[admin/jobs] server env is unreadable; job ${jobId} stays queued for a manual worker run`, error);
-    return false;
+    console.warn(`[admin/jobs] server env is unreadable; could not redeliver job ${jobId}`, error);
+    return null;
   }
 
   const { QSTASH_URL, QSTASH_TOKEN, QSTASH_CALLBACK_ORIGIN } = env;
   if (QSTASH_URL === undefined || QSTASH_TOKEN === undefined || QSTASH_CALLBACK_ORIGIN === undefined) {
-    console.warn(`[admin/jobs] QStash is not configured; job ${jobId} stays queued for a manual worker run`);
-    return false;
+    console.warn(`[admin/jobs] QStash is not configured; could not redeliver job ${jobId}`);
+    return null;
   }
 
   const baseUrl = QSTASH_URL.replace(/\/+$/, "");
@@ -535,12 +779,29 @@ export async function republishDeadJob(
       console.error(
         `[admin/jobs] QStash refused the replay publish for job ${jobId} with status ${response.status}`,
       );
-      return false;
+      return null;
     }
-    return true;
+
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch (error) {
+      console.error(`[admin/jobs] QStash returned a non-JSON body for replayed job ${jobId}`, error);
+      return null;
+    }
+
+    const parsed = republishResponseSchema.safeParse(body);
+    if (!parsed.success) {
+      // Catches the review's own example: an HTML error page served with a
+      // 200. `response.ok` alone would have read this as delivered.
+      console.error(`[admin/jobs] QStash returned an unexpected body for replayed job ${jobId}`);
+      return null;
+    }
+
+    return Array.isArray(parsed.data) ? (parsed.data[0]?.messageId ?? null) : parsed.data.messageId;
   } catch (error) {
     console.error(`[admin/jobs] could not reach QStash to replay job ${jobId}`, error);
-    return false;
+    return null;
   } finally {
     clearTimeout(timer);
   }

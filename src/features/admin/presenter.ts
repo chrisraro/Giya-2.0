@@ -288,6 +288,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   "consumer.suspended": "Account suspended",
   "consumer.unsuspended": "Suspension lifted",
   "job.replayed": "Job replayed",
+  "job.replay_failed": "Replay attempted (not delivered)",
 };
 
 export function describeAuditAction(action: string): string {

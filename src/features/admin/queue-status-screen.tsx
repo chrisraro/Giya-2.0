@@ -129,6 +129,23 @@ function SweepHealthTable({ sweepHealth }: { sweepHealth: QueueStatusView["sweep
   );
 }
 
+/** I6: "recorded" must also mean "discoverable" - `attempts` resets on every
+ * replay, so this chip is the only thing on the screen that tells a job's
+ * fifth replay apart from its first. Renders nothing for a never-replayed
+ * job (0 is not worth a chip) and a distinct, honest note when the read
+ * itself failed - never a silent 0 standing in for "could not find out". */
+function ReplayCountChip({ replayCount }: { replayCount: number | null }) {
+  if (replayCount === null) {
+    return <span className="text-label-s text-on-surface-variant">replay history unavailable</span>;
+  }
+  if (replayCount === 0) return null;
+  return (
+    <span className="rounded-full bg-surface-container-high px-2 py-0.5 text-label-s text-on-surface-variant">
+      Replayed {replayCount} time{replayCount === 1 ? "" : "s"}
+    </span>
+  );
+}
+
 function DeadJobRow({ item, canAct }: { item: DeadJobItem; canAct: boolean }) {
   return (
     <li className="flex flex-col gap-3 rounded-md3-md border border-outline-variant bg-surface p-4 sm:flex-row sm:items-start sm:justify-between">
@@ -138,6 +155,7 @@ function DeadJobRow({ item, canAct }: { item: DeadJobItem; canAct: boolean }) {
           <span className="rounded-full bg-error-container px-2 py-0.5 text-label-s text-on-error-container">
             {item.attempts}/{item.maxAttempts} attempts
           </span>
+          <ReplayCountChip replayCount={item.replayCount} />
         </div>
         <p className="truncate text-body-m text-on-surface">{item.payloadIdentity}</p>
         <p className="text-body-s text-on-surface-variant">
@@ -159,9 +177,14 @@ function DeadJobRow({ item, canAct }: { item: DeadJobItem; canAct: boolean }) {
 
 function DeadLetterList({
   deadJobs,
+  deadTotal,
   canAct,
 }: {
   deadJobs: QueueStatusView["deadJobs"];
+  /** `byStatus.dead` - the exact count, read independently of this list (see
+   * `loadQueueStatus`). Used only to say when the list below is a partial
+   * view of it (I5), never to replace the list's own null/empty handling. */
+  deadTotal: number | null;
   canAct: boolean;
 }) {
   if (deadJobs === null) {
@@ -181,12 +204,25 @@ function DeadLetterList({
     );
   }
 
+  // I5: the list is capped (`DEAD_JOBS_LIMIT`, "a working list, not an
+  // archive"). When the exact count says more exist than this page shows,
+  // say so rather than let a truncated list read as the whole truth - the
+  // same honesty doctrine that keeps a failed read from rendering as empty.
+  const truncated = deadTotal !== null && deadTotal > deadJobs.length;
+
   return (
-    <ul className="flex flex-col gap-3">
-      {deadJobs.map((item) => (
-        <DeadJobRow key={item.jobId} item={item} canAct={canAct} />
-      ))}
-    </ul>
+    <div className="flex flex-col gap-3">
+      {truncated && (
+        <p className="text-body-s text-on-surface-variant">
+          Showing the {deadJobs.length} oldest of {deadTotal} dead jobs.
+        </p>
+      )}
+      <ul className="flex flex-col gap-3">
+        {deadJobs.map((item) => (
+          <DeadJobRow key={item.jobId} item={item} canAct={canAct} />
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -234,7 +270,7 @@ export function QueueStatusScreen({ byStatus, sweepHealth, deadJobs, canAct }: Q
         <h2 id="dead-heading" className="text-title-m text-on-surface">
           Dead letters
         </h2>
-        <DeadLetterList deadJobs={deadJobs} canAct={canAct} />
+        <DeadLetterList deadJobs={deadJobs} deadTotal={byStatus?.dead ?? null} canAct={canAct} />
       </section>
     </div>
   );

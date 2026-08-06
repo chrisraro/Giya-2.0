@@ -59,11 +59,11 @@ export async function replayJobAction(input: unknown): Promise<ReplayActionResul
 
   if (!outcome.ok) return { ok: false, code: outcome.code, message: outcome.message };
 
+  // `outcome.ok` now MEANS delivered - `replayJob` reports `REPUBLISH_FAILED`
+  // rather than `ok: true` when it could not confirm delivery (this build has
+  // no reconciler to pick up an undelivered `queued` row later; see
+  // `jobs.ts`'s module header, review finding I3). So there is exactly one
+  // success sentence, and it is never a promise this build cannot keep.
   revalidatePath(QUEUES_PATH);
-  return {
-    ok: true,
-    message: outcome.detail.republished
-      ? "The job is queued and was redelivered to its worker."
-      : "The job is queued for another attempt. It will be picked up by the next delivery or sweep.",
-  };
+  return { ok: true, message: "The job is queued and was redelivered to its worker." };
 }

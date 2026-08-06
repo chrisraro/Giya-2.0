@@ -2,15 +2,21 @@
 //
 // `/admin/monitoring/queues`: the read (`loadQueueStatus`) and doc 39's
 // replay procedure (`replayJob`), plus the QStash side-effect
-// (`republishDeadJob`) replay best-effort triggers.
+// (`republishDeadJob`) replay depends on.
 //
 // THE CENTRAL PROPERTY UNDER TEST, stated once because every guard below
 // serves it: a dead job that `replayJob` touches must come out the other
 // side genuinely claimable by the REAL `claimJob` (`src/lib/queue/claim.ts`)
-// - not merely "the code looks like it resets the right columns". The last
-// describe block below proves this by running the actual `claimJob` against
-// the same in-memory row `replayJob` wrote to, rather than asserting on the
-// patch object and trusting it satisfies `claimJob`'s predicate.
+// - not merely "the code looks like it resets the right columns". The
+// claimability describe block proves this by running the actual `claimJob`
+// against the same in-memory row `replayJob` wrote to, rather than asserting
+// on the patch object and trusting it satisfies `claimJob`'s predicate.
+//
+// SECOND PROPERTY, added on review: a replay is not successful until it is
+// DELIVERABLE. This build has no reconciler (see `jobs.ts`'s module header),
+// so an undelivered `queued` row is invisible forever, not merely delayed -
+// worse than the dead-lettered state it replaced. Every "delivery failed"
+// test below asserts the row is back to `dead`, not left stranded `queued`.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -94,7 +100,13 @@ interface WorldOptions {
   adminRole?: string | null;
   adminReadError?: { message: string } | null;
   jobReadError?: { message: string } | null;
-  jobWriteError?: { message: string } | null;
+  /** Applies ONLY to the first `jobs` UPDATE (the CAS reset) - not to the
+   * revert, the message-id write-back, or a later audit-failure revert -
+   * mirroring `consequences.test.ts`'s "the first update is the state
+   * change; a second one is the revert" convention. */
+  casWriteError?: { message: string; code?: string } | null;
+  /** Applies to the message-id write-back specifically (best effort). */
+  messageIdWriteError?: { message: string } | null;
   auditError?: { message: string } | null;
   /** Simulates another writer changing the row between the read and the CAS. */
   raceOnUpdate?: (row: JobFixture) => void;
@@ -102,6 +114,9 @@ interface WorldOptions {
   countError?: boolean;
   sweepRows?: unknown[];
   sweepError?: { message: string } | null;
+  /** audit_logs `entity_id` rows returned for the replay-count read (I6). */
+  replayAuditRows?: Array<{ entity_id: string | null; action?: string }>;
+  replayCountReadError?: { message: string } | null;
 }
 
 interface Op {
@@ -110,6 +125,7 @@ interface Op {
   filters: Array<{ column: string; value: unknown; method: "eq" | "in" }>;
   patch?: Record<string, unknown>;
   values?: Record<string, unknown>;
+  order?: { column: string; ascending: boolean } | undefined;
 }
 
 function createWorld(options: WorldOptions = {}) {
@@ -117,6 +133,7 @@ function createWorld(options: WorldOptions = {}) {
   const ops: Op[] = [];
   const auditInserts: Array<Record<string, unknown>> = [];
   const rpcs: Array<{ name: string; args: Record<string, unknown> }> = [];
+  let jobsUpdateCount = 0;
 
   function matches(row: JobFixture, filters: Op["filters"]): boolean {
     return filters.every(({ column, value, method }) => {
@@ -134,6 +151,7 @@ function createWorld(options: WorldOptions = {}) {
             const isCount = selectOpts?.head === true;
             let single = false;
             let limitN: number | undefined;
+            let orderInfo: Op["order"];
 
             const chain = {
               eq(column: string, value: unknown) {
@@ -144,7 +162,8 @@ function createWorld(options: WorldOptions = {}) {
                 filters.push({ column, value, method: "in" as const });
                 return chain;
               },
-              order() {
+              order(column: string, opts?: { ascending?: boolean }) {
+                orderInfo = { column, ascending: opts?.ascending ?? true };
                 return chain;
               },
               limit(n: number) {
@@ -161,7 +180,7 @@ function createWorld(options: WorldOptions = {}) {
             };
 
             function resolve() {
-              ops.push({ table, kind: "select", filters: [...filters] });
+              ops.push({ table, kind: "select", filters: [...filters], order: orderInfo });
               if (isCount) {
                 if (options.countError === true) {
                   return Promise.resolve({ count: null, error: { message: "count failed" } });
@@ -183,8 +202,8 @@ function createWorld(options: WorldOptions = {}) {
               if (limitN !== undefined) rows = rows.slice(0, limitN);
               // Snapshots, not live references: a caller holding onto a read
               // result must not see it mutate out from under it when a later
-              // write lands on the same store row (the revert test below
-              // depends on this - it captures "before" from this read).
+              // write lands on the same store row (the revert tests depend
+              // on this - they capture "before" from this read).
               const snapshot = rows.map((row) => ({ ...row }));
               if (single) {
                 return Promise.resolve({ data: snapshot[0] ?? null, error: null });
@@ -228,11 +247,25 @@ function createWorld(options: WorldOptions = {}) {
                 if (target !== undefined) options.raceOnUpdate(target);
               }
 
+              jobsUpdateCount += 1;
+              const isFirstUpdate = jobsUpdateCount === 1;
+              // Heuristic: the message-id write-back is the only update that
+              // touches ONLY `qstash_message_id`.
+              const isMessageIdWrite =
+                Object.keys(patch).length === 1 && Object.hasOwn(patch, "qstash_message_id");
+
               const matchesRows = [...store.values()].filter((row) => matches(row, filters));
               ops.push({ table, kind: "update", filters: [...filters], patch: { ...patch } });
 
-              if (options.jobWriteError !== undefined && options.jobWriteError !== null) {
-                return Promise.resolve({ data: null, error: options.jobWriteError });
+              if (isFirstUpdate && options.casWriteError !== undefined && options.casWriteError !== null) {
+                return Promise.resolve({ data: null, error: options.casWriteError });
+              }
+              if (
+                isMessageIdWrite &&
+                options.messageIdWriteError !== undefined &&
+                options.messageIdWriteError !== null
+              ) {
+                return Promise.resolve({ data: null, error: options.messageIdWriteError });
               }
               if (matchesRows.length === 0) {
                 return Promise.resolve({ data: null, error: null });
@@ -280,6 +313,52 @@ function createWorld(options: WorldOptions = {}) {
               error: options.auditError === undefined ? null : options.auditError,
             });
           },
+          select() {
+            const filters: Op["filters"] = [];
+            const chain = {
+              eq(column: string, value: unknown) {
+                filters.push({ column, value, method: "eq" as const });
+                return chain;
+              },
+              in(column: string, value: unknown[]) {
+                filters.push({ column, value, method: "in" as const });
+                return chain;
+              },
+              limit() {
+                return chain;
+              },
+              then(onFulfilled: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) {
+                ops.push({ table, kind: "select", filters: [...filters] });
+                if (
+                  options.replayCountReadError !== undefined &&
+                  options.replayCountReadError !== null
+                ) {
+                  return Promise.resolve({ data: null, error: options.replayCountReadError }).then(
+                    onFulfilled,
+                    onRejected,
+                  );
+                }
+                // Real filtering, not a canned passthrough: the `.eq("action",
+                // ...)` predicate is exactly what I6's "only job.replayed
+                // counts" test depends on.
+                const actionFilter = filters.find((f) => f.column === "action")?.value;
+                const entityIdFilter = filters.find((f) => f.column === "entity_id");
+                const rows = (options.replayAuditRows ?? []).filter((row) => {
+                  if (actionFilter !== undefined && row.action !== actionFilter) return false;
+                  if (entityIdFilter !== undefined) {
+                    const allowed = entityIdFilter.value as unknown[];
+                    if (!allowed.includes(row.entity_id)) return false;
+                  }
+                  return true;
+                });
+                return Promise.resolve({ data: rows, error: null }).then(
+                  onFulfilled,
+                  onRejected,
+                );
+              },
+            };
+            return chain;
+          },
         };
       }
 
@@ -294,7 +373,7 @@ function createWorld(options: WorldOptions = {}) {
     },
   };
 
-  const republish = vi.fn(async () => true);
+  const republish = vi.fn<AdminJobsDeps["republish"]>(async () => "msg-new-1");
 
   const deps: AdminJobsDeps = {
     supabase: client as unknown as SupabaseClient<Database>,
@@ -365,6 +444,18 @@ describe("loadQueueStatus", () => {
     expect(result.deadJobs?.map((row) => row.jobId)).toEqual(["dead-1"]);
   });
 
+  // I5. Mutant: order newest-first (or drop the explicit `ascending: true`).
+  // On a platform with more than `DEAD_JOBS_LIMIT` dead jobs, newest-first
+  // truncates away exactly the ones that have been dead the longest.
+  it("orders the dead-letter list oldest first", async () => {
+    const world = createWorld({ jobs: [job()] });
+    await loadQueueStatus(world.deps);
+    const deadListRead = world.ops.find(
+      (op) => op.table === "jobs" && op.kind === "select" && op.order !== undefined,
+    );
+    expect(deadListRead?.order).toEqual({ column: "finished_at", ascending: true });
+  });
+
   // Mutant: pass through the raw payload, or drop `describePayloadIdentity`
   // entirely. The dead-letter row must carry a rendered identity, not the
   // job_id-polluted raw payload object.
@@ -402,12 +493,52 @@ describe("loadQueueStatus", () => {
     expect(result.sweepHealth?.[0]?.jobname).toBe("campaigns-sweep");
   });
 
+  // Mutant: let one status's count failure blank out the whole `byStatus`
+  // object (e.g. `return null` on any per-status error) instead of leaving
+  // the other four counts intact.
   it("reports a status count failure as null for that status without losing the others", async () => {
     const world = createWorld({ jobs: [job({ status: "dead" })], countError: true });
     const result = await loadQueueStatus(world.deps);
     expect(result.byStatus?.dead).toBeNull();
     // deadJobs is a SEPARATE read from the count, so it still succeeds.
     expect(result.deadJobs).not.toBeNull();
+  });
+
+  // I6. Mutant: default every job's replay count to 0 instead of counting
+  // `audit_logs` rows, or count ALL actions instead of only
+  // `job.replayed` (which would conflate a delivered replay with a merely
+  // attempted one, `job.replay_failed`).
+  describe("replay counts (I6)", () => {
+    it("counts only job.replayed rows for each dead job, ignoring job.replay_failed", async () => {
+      const world = createWorld({
+        jobs: [job({ id: "dead-1", status: "dead" })],
+        replayAuditRows: [
+          { entity_id: "dead-1", action: "job.replayed" },
+          { entity_id: "dead-1", action: "job.replayed" },
+          { entity_id: "dead-1", action: "job.replay_failed" },
+        ],
+      });
+      const result = await loadQueueStatus(world.deps);
+      expect(result.deadJobs?.[0]?.replayCount).toBe(2);
+    });
+
+    it("reports 0, not null, for a job that has never been replayed", async () => {
+      const world = createWorld({ jobs: [job({ id: "dead-1" })], replayAuditRows: [] });
+      const result = await loadQueueStatus(world.deps);
+      expect(result.deadJobs?.[0]?.replayCount).toBe(0);
+    });
+
+    // Mutant: default a failed audit-history read to `0` instead of `null`.
+    // "Never replayed" and "could not find out" are different facts, same
+    // rule as every other null-vs-empty distinction in this module.
+    it("reports null, not 0, when the replay-history read itself fails", async () => {
+      const world = createWorld({
+        jobs: [job({ id: "dead-1" })],
+        replayCountReadError: { message: "connection reset" },
+      });
+      const result = await loadQueueStatus(world.deps);
+      expect(result.deadJobs?.[0]?.replayCount).toBeNull();
+    });
   });
 });
 
@@ -427,6 +558,8 @@ describe("replayJob: the mandatory reason", () => {
     expect(world.ops).toHaveLength(0);
   });
 
+  // Mutant: use a laxer length check than `reasonProblem`'s own
+  // `MIN_REASON_LENGTH` (e.g. accept any non-empty string).
   it("refuses a reason too short to be evidence of anything", async () => {
     const world = createWorld();
     const outcome = await replayJob(
@@ -435,6 +568,7 @@ describe("replayJob: the mandatory reason", () => {
     );
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.code).toBe("REASON_REQUIRED");
+    expect(world.ops).toHaveLength(0);
   });
 });
 
@@ -469,6 +603,8 @@ describe("replayJob: the actor check", () => {
     expect(world.updatesTo("jobs")).toHaveLength(0);
   });
 
+  // Mutant: refuse every role, including the ones that ARE allowed (e.g. an
+  // inverted `canActOnLadder` check, or one that always returns false).
   it("allows an active super_admin", async () => {
     const world = createWorld({ adminRole: "super_admin" });
     const outcome = await replayJob(
@@ -478,6 +614,9 @@ describe("replayJob: the actor check", () => {
     expect(outcome.ok).toBe(true);
   });
 
+  // Mutant: let the actor-verification error propagate as a thrown exception
+  // or a different code (e.g. WRITE_FAILED) instead of the fail-closed
+  // FORBIDDEN `assertCanReplay` returns on a read error.
   it("reports a database fault verifying the actor as FORBIDDEN, not a crash", async () => {
     const world = createWorld({ adminReadError: { message: "connection reset" } });
     const outcome = await replayJob(
@@ -490,6 +629,8 @@ describe("replayJob: the actor check", () => {
 });
 
 describe("replayJob: the subject and its state", () => {
+  // Mutant: report a different code (e.g. INVALID_STATE, or ok:true on a
+  // null row) when the job id does not resolve to any row.
   it("reports a job that does not exist as NOT_FOUND", async () => {
     const world = createWorld({ jobs: [] });
     const outcome = await replayJob(
@@ -552,6 +693,10 @@ describe("replayJob: the reset itself", () => {
     expect(row?.started_at).toBeNull();
   });
 
+  // Mutant: write `job.replayed` under a DIFFERENT `actor_kind` (e.g.
+  // "system" or "user"), which would let a replay through with a blank
+  // reason - `audit_logs_admin_reason_required` (0022) only fires for
+  // `actor_kind='admin'`.
   it("writes exactly one audit row, with the admin verb, actor and reason", async () => {
     const world = createWorld({ adminRole: "admin" });
     await replayJob({ jobId: JOB_ID, actorId: ADMIN_ID, reason: REASON, requestId: "req-1" }, world.deps);
@@ -582,6 +727,8 @@ describe("replayJob: the reset itself", () => {
     expect(row.after).toMatchObject({ status: "queued", attempts: 0 });
   });
 
+  // Mutant: drop `business_id` from the audit insert (or hardcode null).
+  // `audit_biz_idx` and the tenant-owner audit read both key on this column.
   it("carries the job's business_id onto the audit row, for the tenant-scoped audit read", async () => {
     const world = createWorld({ jobs: [job({ business_id: "biz-42" })] });
     await replayJob({ jobId: JOB_ID, actorId: ADMIN_ID, reason: REASON, requestId: "r1" }, world.deps);
@@ -613,13 +760,31 @@ describe("replayJob: races and failures", () => {
   });
 
   it("reports WRITE_FAILED and writes no audit row when the update itself errors", async () => {
-    const world = createWorld({ jobWriteError: { message: "deadlock detected" } });
+    const world = createWorld({ casWriteError: { message: "deadlock detected" } });
     const outcome = await replayJob(
       { jobId: JOB_ID, actorId: ADMIN_ID, reason: REASON, requestId: "r1" },
       world.deps,
     );
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.code).toBe("WRITE_FAILED");
+    expect(world.auditInserts).toHaveLength(0);
+  });
+
+  // I4. Mutant: report every write error, including a unique-violation, as
+  // the generic WRITE_FAILED ("try again"). A dedupe collision is NOT
+  // transient - retrying this exact replay collides again every time,
+  // because a live job already owns the row's dedupe key.
+  it("reports DEDUPE_CONFLICT, not WRITE_FAILED, when the reset collides with jobs_dedupe_idx", async () => {
+    const world = createWorld({ casWriteError: { message: "duplicate key value", code: "23505" } });
+    const outcome = await replayJob(
+      { jobId: JOB_ID, actorId: ADMIN_ID, reason: REASON, requestId: "r1" },
+      world.deps,
+    );
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.code).toBe("DEDUPE_CONFLICT");
+      expect(outcome.message).toMatch(/already in flight/i);
+    }
     expect(world.auditInserts).toHaveLength(0);
   });
 
@@ -645,50 +810,108 @@ describe("replayJob: races and failures", () => {
       max_attempts: 5,
       last_error: "resend 503",
     });
-    // Two writes recorded: the reset, then the revert.
-    expect(world.updatesTo("jobs")).toHaveLength(2);
   });
 });
 
-describe("replayJob: re-publishing to QStash", () => {
+describe("replayJob: re-publishing to QStash (I2, I3)", () => {
   it("re-publishes the SAME job_id to its own queue, with the job's payload and business", async () => {
     const world = createWorld({
       jobs: [job({ queue: "ocr.process", payload: { receipt_id: "receipt-1" }, business_id: "biz-9" })],
     });
-    await replayJob({ jobId: JOB_ID, actorId: ADMIN_ID, reason: REASON, requestId: "r1" }, world.deps);
+    const outcome = await replayJob(
+      { jobId: JOB_ID, actorId: ADMIN_ID, reason: REASON, requestId: "r1" },
+      world.deps,
+    );
     expect(world.republish).toHaveBeenCalledWith(
       "ocr.process",
       JOB_ID,
       { receipt_id: "receipt-1" },
       "biz-9",
     );
+    expect(outcome).toMatchObject({ ok: true, detail: { messageId: "msg-new-1" } });
   });
 
-  // Mutant: propagate a republish failure into the function's own result
-  // (e.g. return AUDIT_WRITE_FAILED-shaped failure, or `ok: false`). Doc 39's
-  // "Postgres is the truth" applies to a replay exactly as it does to a
-  // fresh enqueue - the row and the audit row are already durably committed
-  // by the time this runs, so a QStash outage must not un-replay the job.
-  it("still reports success when the best-effort republish fails", async () => {
+  // I2. Mutant: never write `qstash_message_id` back after a successful
+  // republish (the original bug: the reviewer's finding). 0029 documents
+  // `qstash_message_id is null` as meaning "not published" and load-bearing
+  // for a future reconciler's scan predicate - leaving it null after a real
+  // publish asserts a falsehood about the row.
+  it("records the new qstash_message_id after a successful redelivery", async () => {
     const world = createWorld();
-    world.republish.mockResolvedValueOnce(false);
+    world.republish.mockResolvedValueOnce("msg-abc-123");
+    await replayJob({ jobId: JOB_ID, actorId: ADMIN_ID, reason: REASON, requestId: "r1" }, world.deps);
+    expect(world.store.get(JOB_ID)?.qstash_message_id).toBe("msg-abc-123");
+  });
+
+  // Best effort: losing this write costs DLQ correlation on a FUTURE dead
+  // letter, nothing about the delivery that already happened - it must not
+  // fail the replay itself.
+  it("still reports success when recording the message id fails", async () => {
+    const world = createWorld({ messageIdWriteError: { message: "timeout" } });
     const outcome = await replayJob(
       { jobId: JOB_ID, actorId: ADMIN_ID, reason: REASON, requestId: "r1" },
       world.deps,
     );
-    expect(outcome).toMatchObject({ ok: true, detail: { republished: false } });
-    // The row itself is still reset - not rolled back over a delivery failure.
-    expect(world.store.get(JOB_ID)?.status).toBe("queued");
+    expect(outcome.ok).toBe(true);
   });
 
-  it("skips the publish attempt for a queue this build has no worker for, without failing the replay", async () => {
+  // I3. Mutant: leave the row `queued` when `republish` returns null (or
+  // report `ok: true` regardless of delivery). This build has no
+  // reconciler, so an undelivered `queued` row is invisible forever - the
+  // row must revert to `dead` and the caller must be told delivery failed.
+  it("reverts the reset and reports REPUBLISH_FAILED when delivery cannot be confirmed", async () => {
+    const world = createWorld({
+      jobs: [job({ attempts: 3, max_attempts: 5, last_error: "resend 503", status: "dead" })],
+    });
+    world.republish.mockResolvedValueOnce(null);
+
+    const outcome = await replayJob(
+      { jobId: JOB_ID, actorId: ADMIN_ID, reason: REASON, requestId: "r1" },
+      world.deps,
+    );
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.code).toBe("REPUBLISH_FAILED");
+
+    const row = world.store.get(JOB_ID);
+    expect(row?.status).toBe("dead");
+    expect(row?.attempts).toBe(3);
+    expect(row?.max_attempts).toBe(5);
+    // The DLQ row now explains itself, rather than restoring the stale error
+    // from whatever killed it the first time.
+    expect(row?.last_error).toMatch(/could not be redelivered/i);
+  });
+
+  // Mutant: record the failed attempt under the SAME verb as a real replay
+  // (`job.replayed`), which would let I6's replay-count chip claim a
+  // delivery that never happened.
+  it("audits a failed delivery attempt under a distinct verb, job.replay_failed", async () => {
+    const world = createWorld();
+    world.republish.mockResolvedValueOnce(null);
+    await replayJob({ jobId: JOB_ID, actorId: ADMIN_ID, reason: REASON, requestId: "r1" }, world.deps);
+
+    expect(world.auditInserts).toHaveLength(1);
+    expect(world.auditInserts[0]).toMatchObject({
+      action: "job.replay_failed",
+      entity_type: "job",
+      entity_id: JOB_ID,
+      reason: REASON,
+    });
+  });
+
+  // Mutant: attempt the publish call anyway for a queue with no worker in
+  // this build's registry (would throw indexing `QUEUE_REGISTRY[queue]`),
+  // or silently report success without ever having tried.
+  it("treats an unregistered queue as undeliverable: reverts to dead, never calls republish", async () => {
     const world = createWorld({ jobs: [job({ queue: "fraud.ring_sweep" })] });
     const outcome = await replayJob(
       { jobId: JOB_ID, actorId: ADMIN_ID, reason: REASON, requestId: "r1" },
       world.deps,
     );
-    expect(outcome).toMatchObject({ ok: true, detail: { republished: false } });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.code).toBe("REPUBLISH_FAILED");
     expect(world.republish).not.toHaveBeenCalled();
+    expect(world.store.get(JOB_ID)?.status).toBe("dead");
   });
 });
 
@@ -753,6 +976,23 @@ describe("replayJob leaves the row claimable by the normal worker path", () => {
     });
     expect(claim.status).toBe("claimed");
   });
+
+  // A replay that FAILED to deliver must NOT be claimable either - the row
+  // reverted to `dead`, and `claimJob`'s own first branch reports that as
+  // `done` (doc 39: "already succeeded or already dead"), never `claimed`.
+  it("a job whose replay could not be delivered is not claimable - it is still dead", async () => {
+    const world = createWorld({ jobs: [job({ attempts: 5, max_attempts: 5 })] });
+    world.republish.mockResolvedValueOnce(null);
+    await replayJob({ jobId: JOB_ID, actorId: ADMIN_ID, reason: REASON, requestId: "r1" }, world.deps);
+
+    const claim = await claimJob({
+      supabase: world.deps.supabase,
+      jobId: JOB_ID,
+      queue: "notify.email",
+      now: () => NOW,
+    });
+    expect(claim).toEqual({ status: "done", jobStatus: "dead" });
+  });
 });
 
 // ===========================================================================
@@ -760,11 +1000,17 @@ describe("replayJob leaves the row claimable by the normal worker path", () => {
 // ===========================================================================
 
 describe("republishDeadJob", () => {
-  it("does not call fetch when QStash is not configured", async () => {
+  it("returns null and does not call fetch when QStash is not configured", async () => {
     ENV.current = { QSTASH_URL: undefined, QSTASH_TOKEN: undefined, QSTASH_CALLBACK_ORIGIN: undefined };
     const fetchImpl = vi.fn();
-    const ok = await republishDeadJob("notify.email", JOB_ID, { notification_ids: ["n1"] }, "biz-1", fetchImpl as unknown as typeof fetch);
-    expect(ok).toBe(false);
+    const messageId = await republishDeadJob(
+      "notify.email",
+      JOB_ID,
+      { notification_ids: ["n1"] },
+      "biz-1",
+      fetchImpl as unknown as typeof fetch,
+    );
+    expect(messageId).toBeNull();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -772,18 +1018,18 @@ describe("republishDeadJob", () => {
   // is doc 39's own instruction ("re-publish to QStash with the SAME
   // job_id") and it is the one fact a replayed message must carry for the
   // worker's claim to find the right row.
-  it("posts to this queue's own destination with the same job_id in the body", async () => {
+  it("posts to this queue's own destination with the same job_id in the body, and returns the message id", async () => {
     const fetchImpl: typeof fetch = vi.fn(async () =>
       new Response(JSON.stringify({ messageId: "msg-new" }), { status: 200 }),
     );
-    const ok = await republishDeadJob(
+    const messageId = await republishDeadJob(
       "notify.email",
       JOB_ID,
       { notification_ids: ["n1"] },
       "biz-1",
       fetchImpl,
     );
-    expect(ok).toBe(true);
+    expect(messageId).toBe("msg-new");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const call = vi.mocked(fetchImpl).mock.calls[0];
     if (call === undefined) throw new Error("fetchImpl was not called");
@@ -795,24 +1041,67 @@ describe("republishDeadJob", () => {
     expect(body).toMatchObject({ job_id: JOB_ID, notification_ids: ["n1"] });
   });
 
-  it("reports false when QStash refuses the publish", async () => {
-    const fetchImpl = vi.fn(async () => new Response("nope", { status: 500 }));
-    const ok = await republishDeadJob(
+  // The body deliberately parses as a VALID success shape (a real QStash 5xx
+  // would never do this, but the fixture has to isolate `!response.ok` from
+  // the schema-validation branch below it - a non-JSON error body would
+  // return null via the JSON-parse failure regardless of whether the status
+  // check ran at all, which would make this test pass even with the status
+  // check deleted).
+  it("returns null when QStash refuses the publish, even if the body looks like a success", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ messageId: "should-not-count" }), { status: 500 }),
+    );
+    const messageId = await republishDeadJob(
       "notify.email",
       JOB_ID,
       {},
       null,
       fetchImpl as unknown as typeof fetch,
     );
-    expect(ok).toBe(false);
+    expect(messageId).toBeNull();
   });
 
-  it("reports false rather than throwing when the network call itself fails", async () => {
+  // I2. Mutant: read `response.ok` alone as success (the reviewer's own
+  // example - an HTML error page served with a 200 must not be read as a
+  // delivered message).
+  it("returns null when a 200 response is not even valid JSON", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response("<html><body>upstream error</body></html>", { status: 200 }),
+    );
+    const messageId = await republishDeadJob(
+      "notify.email",
+      JOB_ID,
+      {},
+      null,
+      fetchImpl as unknown as typeof fetch,
+    );
+    expect(messageId).toBeNull();
+  });
+
+  // Isolates the SCHEMA check from the JSON-parse check above it: valid JSON,
+  // wrong shape (no `messageId` anywhere) - the review's own example ("an
+  // HTML error page served with a 200") generalizes to any 200 whose body is
+  // not actually a delivery confirmation, JSON or not.
+  it("returns null when a 200 response is valid JSON but does not match QStash's publish shape", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ error: "internal error", code: 500 }), { status: 200 }),
+    );
+    const messageId = await republishDeadJob(
+      "notify.email",
+      JOB_ID,
+      {},
+      null,
+      fetchImpl as unknown as typeof fetch,
+    );
+    expect(messageId).toBeNull();
+  });
+
+  it("returns null rather than throwing when the network call itself fails", async () => {
     const fetchImpl = vi.fn(async () => {
       throw new Error("ECONNREFUSED");
     });
     await expect(
       republishDeadJob("notify.email", JOB_ID, {}, null, fetchImpl as unknown as typeof fetch),
-    ).resolves.toBe(false);
+    ).resolves.toBeNull();
   });
 });

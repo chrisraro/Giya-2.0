@@ -232,6 +232,12 @@ export interface DeadJobItem {
    * about what the column allows. */
   deadAt: string | null;
   createdAt: string;
+  /** How many times `job.replayed` has landed on this job id (review finding
+   * I6: `attempts` resets on every replay, so this is the only thing on the
+   * screen that tells a job's fifth replay apart from its first). Null means
+   * the audit-history read failed - NOT "never replayed", which a silent `0`
+   * would claim. */
+  replayCount: number | null;
 }
 
 /**

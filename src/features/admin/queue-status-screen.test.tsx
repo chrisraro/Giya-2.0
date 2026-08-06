@@ -36,6 +36,7 @@ function deadJob(overrides: Partial<DeadJobItem> = {}): DeadJobItem {
     lastError: "resend 503 x5",
     deadAt: "2026-07-26T10:00:00.000Z",
     createdAt: "2026-07-26T08:00:00.000Z",
+    replayCount: 0,
     ...overrides,
   };
 }
@@ -108,6 +109,48 @@ describe("QueueStatusScreen: dead letters", () => {
     render(<QueueStatusScreen {...view} deadJobs={[deadJob()]} canAct />);
     expect(screen.getByRole("button", { name: "Replay" })).toBeEnabled();
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  // I5. Mutant: drop the truncation notice, or compute it from the list
+  // length alone without comparing to the exact `byStatus.dead` count. A
+  // capped list rendered with no indication of a cap reads as the whole
+  // truth on a platform with more than 100 dead jobs.
+  it("says when the list is a partial view of a larger exact count", () => {
+    const jobs = Array.from({ length: 3 }, (_unused, index) => deadJob({ jobId: `job-${index}` }));
+    render(<QueueStatusScreen {...view} byStatus={byStatus({ dead: 250 })} deadJobs={jobs} canAct />);
+    expect(screen.getByText("Showing the 3 oldest of 250 dead jobs.")).toBeInTheDocument();
+  });
+
+  it("says nothing about truncation when the list already shows every dead job", () => {
+    const jobs = [deadJob()];
+    render(<QueueStatusScreen {...view} byStatus={byStatus({ dead: 1 })} deadJobs={jobs} canAct />);
+    expect(screen.queryByText(/oldest of/i)).not.toBeInTheDocument();
+  });
+
+  it("does not claim truncation when the exact count itself could not be read", () => {
+    const jobs = [deadJob()];
+    render(<QueueStatusScreen {...view} byStatus={null} deadJobs={jobs} canAct />);
+    expect(screen.queryByText(/oldest of/i)).not.toBeInTheDocument();
+  });
+
+  // I6. Mutant: render nothing for `replayCount`, or render `0` the same way
+  // as `null` (the audit-history read failed). `attempts` resets on every
+  // replay, so this chip is the only thing that tells a job's fifth replay
+  // apart from its first.
+  it("shows how many times a job has already been replayed", () => {
+    render(<QueueStatusScreen {...view} deadJobs={[deadJob({ replayCount: 3 })]} canAct />);
+    expect(screen.getByText("Replayed 3 times")).toBeInTheDocument();
+  });
+
+  it("renders no replay-count chip for a job that has never been replayed", () => {
+    render(<QueueStatusScreen {...view} deadJobs={[deadJob({ replayCount: 0 })]} canAct />);
+    expect(screen.queryByText(/^Replayed/)).not.toBeInTheDocument();
+  });
+
+  it("says replay history is unavailable rather than showing a false zero", () => {
+    render(<QueueStatusScreen {...view} deadJobs={[deadJob({ replayCount: null })]} canAct />);
+    expect(screen.getByText("replay history unavailable")).toBeInTheDocument();
+    expect(screen.queryByText(/^Replayed/)).not.toBeInTheDocument();
   });
 });
 
