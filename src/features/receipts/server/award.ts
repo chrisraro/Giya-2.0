@@ -163,7 +163,20 @@ export interface AwardPlan {
    * lock is exactly the fact this fallback already assumed, so replaying it
    * is authoritative, not a guess.
    */
-  dedupedFallback: { points: number; ruleSnapshot: Json } | null;
+  dedupedFallback: {
+    points: number;
+    ruleSnapshot: Json;
+    /**
+     * Review fix (task 1.2, I2): this fallback's OWN surviving campaign-capped
+     * contributions, recomputed against ITS pricing (never `budgetChecks`
+     * above verbatim - a deduped base collapses every multiplier's extra to
+     * 0, so a capped MULTIPLIER contribution shrinks with it while a capped
+     * BONUS does not). `awardAfterFixedPerVisitRace`'s retry sends this as
+     * `p_campaign_budget_checks`, so recovering from one race never silently
+     * drops the other guard.
+     */
+    budgetChecks: Array<{ campaignId: string; points: number }>;
+  } | null;
   /**
    * Doc 34 section 5, task 1.2: distinct campaign ids whose surviving
    * (non-dropped) contribution to THIS receipt comes from a campaign with a
@@ -187,6 +200,25 @@ export interface AwardPlan {
    * `budgetChecks` is non-empty.
    */
   budgetRaceFallback: { points: number; ruleSnapshot: Json; campaignId: string | null } | null;
+  /**
+   * Review fix (task 1.2, I2): the FOURTH plan variant - both the
+   * fixed_per_visit dedupe AND every campaign-capped contribution dropped.
+   * Present only when BOTH races are actually possible for this receipt
+   * (`verifyNoPriorFixedPerVisitEarn` is true AND `budgetChecks` is
+   * non-empty). Used two ways, never as a THIRD RPC attempt:
+   *   - `awardAfterFixedPerVisitRace`'s retry (which already carries
+   *     `dedupedFallback.budgetChecks`) can still raise CAMPAIGN_BUDGET_RACE
+   *     a second time; that compound race falls straight to the EXISTING
+   *     terminal zero-point path, but priced/annotated from THIS variant
+   *     rather than `dedupedFallback` alone, so the record correctly shows
+   *     both facts (review I6) instead of just the one this function knew
+   *     about.
+   *   - `awardAfterCampaignBudgetRace`'s retry (which already carries
+   *     `p_verify_no_prior_fixed_visit_earn` when applicable) falls to the
+   *     same terminal path the same way if IT raises FIXED_PER_VISIT_RACE a
+   *     second time.
+   */
+  bothDroppedFallback: { points: number; ruleSnapshot: Json; campaignId: string | null } | null;
   /**
    * Distinct campaign ids with a `max_total_points` cap that THIS receipt
    * considered, whether or not their contribution survived to the final
@@ -458,6 +490,7 @@ export async function priceReceipt(input: {
     dedupedFallback: null,
     budgetChecks: [],
     budgetRaceFallback: null,
+    bothDroppedFallback: null,
     maxTotalPointsCampaignIds: [],
   };
 
@@ -577,14 +610,35 @@ export async function priceReceipt(input: {
     dedupeFixedPerVisit,
   });
 
-  const { finalApplied, budgetDropped, budgetChecks, raceFallbackApplied, maxTotalPointsCampaignIds } =
-    await resolveCampaignBudgets({
-      supabase: deps.supabase,
-      consumerId: receipt.userId,
-      applied,
-      campaigns,
-      trialSnapshot: trial.ruleSnapshot,
-    });
+  const {
+    finalApplied,
+    budgetDropped,
+    budgetChecks,
+    raceFallbackApplied,
+    maxTotalPointsCampaignIds,
+    campaignIdByRuleId,
+    cappedSurvivingIds,
+  } = await resolveCampaignBudgets({
+    supabase: deps.supabase,
+    businessId,
+    consumerId: receipt.userId,
+    applied,
+    campaigns,
+    trialSnapshot: trial.ruleSnapshot,
+  });
+
+  // Review fix (task 1.2, M6): what a race-fallback variant's OWN
+  // budget_dropped must additionally record, beyond the advisory pass's own
+  // `budgetDropped` - every campaign a race-fallback variant drops that the
+  // advisory pass did NOT already drop (it survived there; a race-fallback
+  // variant drops it anyway, by construction).
+  const raceDroppedEntries: BudgetDrop[] = [...cappedSurvivingIds].map((id) => {
+    const campaign = campaigns.get(id);
+    return {
+      campaignId: id,
+      reason: campaign === undefined ? "max_total_points" : raceDropReason(campaign),
+    };
+  });
 
   const engineInput = {
     ...engineInputBase,
@@ -639,6 +693,15 @@ export async function priceReceipt(input: {
         campaigns,
         budgetDropped,
       }),
+      // Review fix (task 1.2, I2): recomputed from THIS fallback's OWN
+      // snapshot, not copied from the primary pass's `budgetChecks` - a
+      // deduped base collapses every multiplier's contribution to 0, which a
+      // capped multiplier's own re-check must see.
+      budgetChecks: contributionsForCampaigns(
+        fallbackResult.ruleSnapshot,
+        campaignIdByRuleId,
+        cappedSurvivingIds,
+      ),
     };
   }
 
@@ -663,7 +726,40 @@ export async function priceReceipt(input: {
         receipt,
         applied: raceFallbackApplied,
         campaigns,
-        budgetDropped,
+        // Review fix (task 1.2, M6): this variant's snapshot must ALSO
+        // record the campaigns dropped BECAUSE of the race, not only the
+        // advisory pass's own drops - otherwise a review reading this
+        // snapshot alone would see a total that looks short with no
+        // explanation for the missing points.
+        budgetDropped: [...budgetDropped, ...raceDroppedEntries],
+      }),
+      campaignId:
+        raceFallbackApplied.find((candidate) => candidate.campaignId !== null)?.campaignId ?? null,
+    };
+  }
+
+  // Review fix (task 1.2, I2): the fourth plan variant - both the
+  // fixed_per_visit dedupe AND every campaign-capped contribution dropped.
+  // Precomputed only when BOTH races are actually reachable for this
+  // receipt, so a compound race never falls back to a second implementation
+  // of the rule math, and its zero-point provenance (I6) records both facts
+  // rather than just one.
+  let bothDroppedFallback: AwardPlan["bothDroppedFallback"] = null;
+  if (verifyNoPriorFixedPerVisitEarn && raceFallbackApplied !== null) {
+    const bothResult = computePoints({
+      ...engineInputBase,
+      candidateRules: raceFallbackApplied.map((candidate) => candidate.rule),
+      dedupeFixedPerVisit: true,
+    });
+    bothDroppedFallback = {
+      points: bothResult.points,
+      ruleSnapshot: enrichRuleSnapshot({
+        snapshot: bothResult.ruleSnapshot,
+        now: deps.now(),
+        receipt,
+        applied: raceFallbackApplied,
+        campaigns,
+        budgetDropped: [...budgetDropped, ...raceDroppedEntries],
       }),
       campaignId:
         raceFallbackApplied.find((candidate) => candidate.campaignId !== null)?.campaignId ?? null,
@@ -690,6 +786,7 @@ export async function priceReceipt(input: {
     dedupedFallback,
     budgetChecks,
     budgetRaceFallback,
+    bothDroppedFallback,
     maxTotalPointsCampaignIds,
   };
 }
@@ -863,8 +960,11 @@ interface CampaignBudgetCaps {
  * trusted. */
 function parseCampaignBudget(budget: unknown): CampaignBudgetCaps {
   if (!isRecord(budget)) return { maxTotalPoints: null, perCustomerLimit: null };
+  // Review fix (task 1.2, M5): Number.isInteger, not just Number.isFinite - a
+  // hand-edited `100.5` must be treated as absent here rather than reach the
+  // RPC's `::integer` cast and throw 22P02 into the award path.
   const toCap = (value: unknown): number | null =>
-    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+    typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
   return {
     maxTotalPoints: toCap(budget.max_total_points),
     perCustomerLimit: toCap(budget.per_customer_limit),
@@ -872,25 +972,32 @@ function parseCampaignBudget(budget: unknown): CampaignBudgetCaps {
 }
 
 /**
- * The running total doc 34 section 5 defines for `max_total_points`:
- * `select coalesce(sum(points),0) from points_transactions where
- * campaign_id=$1 and points > 0`, verbatim. Returns null on a read failure
- * so the caller can fail CLOSED (drop the contribution) rather than risk an
- * over-award on a total it could not verify - the opposite posture from
- * `hasPaidFixedPerVisitEarn`'s fail-open, because THAT check has an
- * unconditional RPC-side backstop (0038) while an advisory budget read that
- * fails open here could let an uncapped-looking contribution reach the RPC
- * with no `p_campaign_budget_checks` entry to catch it.
+ * The running total doc 34 section 5 defines for `max_total_points`,
+ * CORRECTLY ATTRIBUTED (review C1, 0041's `private.campaign_points_awarded`):
+ * the sum, over this business's earn rows, of what EACH row's own
+ * `rule_snapshot` attributes to this campaign - never the row's whole-receipt
+ * `points` column, which doc 34's naive formula wrongly used and which
+ * charges a capped campaign for points a different campaign or the base rule
+ * actually granted. One SQL aggregate (review I3), never an unbounded
+ * fetch-all-rows-and-sum-in-JS.
+ *
+ * Returns null on a read failure so the caller can fail CLOSED (drop the
+ * contribution) rather than risk an over-award on a total it could not
+ * verify - the opposite posture from `hasPaidFixedPerVisitEarn`'s fail-open,
+ * because THAT check has an unconditional RPC-side backstop (0038) while an
+ * advisory budget read that fails open here could let an uncapped-looking
+ * contribution reach the RPC with no `p_campaign_budget_checks` entry to
+ * catch it.
  */
 async function campaignPointsAwarded(
   supabase: SupabaseClient<Database>,
+  businessId: string,
   campaignId: string,
 ): Promise<number | null> {
-  const { data, error } = await supabase
-    .from("points_transactions")
-    .select("points")
-    .eq("campaign_id", campaignId)
-    .gt("points", 0);
+  const { data, error } = await supabase.rpc("campaign_points_awarded", {
+    p_business_id: businessId,
+    p_campaign_id: campaignId,
+  });
 
   if (error !== null) {
     console.error(
@@ -899,28 +1006,28 @@ async function campaignPointsAwarded(
     );
     return null;
   }
-  return (data ?? []).reduce((sum: number, row) => {
-    const points = (row as { points: unknown }).points;
-    return sum + (typeof points === "number" ? points : 0);
-  }, 0);
+  return typeof data === "number" ? data : null;
 }
 
 /**
- * Doc 34 section 5's award-time `per_customer_limit`: "counts that
- * consumer's positive points_transactions with this campaign_id". Same
- * fail-closed posture as `campaignPointsAwarded` and for the same reason.
+ * Doc 34 section 5's award-time `per_customer_limit`, CORRECTLY ATTRIBUTED
+ * (review C1, 0041's `private.campaign_customer_earn_count`): counts this
+ * consumer's earn rows whose OWN `rule_snapshot` attributes a positive
+ * contribution to this campaign - never rows that merely name it as the
+ * receipt's primary `campaign_id`. Same fail-closed posture as
+ * `campaignPointsAwarded` and for the same reason.
  */
 async function campaignCustomerEarnCount(
   supabase: SupabaseClient<Database>,
+  businessId: string,
   campaignId: string,
   consumerId: string,
 ): Promise<number | null> {
-  const { data, error } = await supabase
-    .from("points_transactions")
-    .select("id")
-    .eq("campaign_id", campaignId)
-    .eq("consumer_id", consumerId)
-    .gt("points", 0);
+  const { data, error } = await supabase.rpc("campaign_customer_earn_count", {
+    p_business_id: businessId,
+    p_campaign_id: campaignId,
+    p_consumer_id: consumerId,
+  });
 
   if (error !== null) {
     console.error(
@@ -929,7 +1036,7 @@ async function campaignCustomerEarnCount(
     );
     return null;
   }
-  return (data ?? []).length;
+  return typeof data === "number" ? data : null;
 }
 
 interface CampaignBudgetResolution {
@@ -945,6 +1052,72 @@ interface CampaignBudgetResolution {
    * is nothing left a race could take away). */
   raceFallbackApplied: Array<{ campaignId: string | null; rule: PointsRule }> | null;
   maxTotalPointsCampaignIds: string[];
+  /** Which campaign each candidate rule (by rule id) belongs to - exposed so
+   * `priceReceipt` can recompute a DIFFERENT pricing pass's own per-campaign
+   * contributions (review I2: `dedupedFallback`'s and `bothDroppedFallback`'s
+   * own `budgetChecks`/`budget_dropped` must reflect THEIR OWN numbers, not
+   * the primary pass's, since a deduped base changes every multiplier's
+   * contribution). */
+  campaignIdByRuleId: ReadonlyMap<string, string>;
+  /** Every campaign id that carried EITHER cap and survived the advisory
+   * drop (i.e. exactly the ids `budgetChecks` names) - the set a race-fallback
+   * variant drops IN ADDITION to `budgetDropped` above. */
+  cappedSurvivingIds: ReadonlySet<string>;
+}
+
+/**
+ * Recomputes each named campaign's OWN contribution from a SPECIFIC pricing
+ * pass's own raw `multipliers`/`bonuses` arrays (i.e. `computePoints`'s
+ * un-enriched `ruleSnapshot`, before `enrichRuleSnapshot` decorates it).
+ * Review fix (task 1.2, I2): a deduped base collapses every multiplier's
+ * `points_delta` to 0 while leaving `bonus_points` untouched, so a capped
+ * campaign's contribution DIFFERS between the primary pass and the deduped
+ * fallback - `dedupedFallback.budgetChecks` must be computed from the
+ * fallback's OWN snapshot, never copied from the primary pass's
+ * `budgetChecks`.
+ */
+function contributionsForCampaigns(
+  snapshot: unknown,
+  campaignIdByRuleId: ReadonlyMap<string, string>,
+  campaignIds: ReadonlySet<string>,
+): Array<{ campaignId: string; points: number }> {
+  const totals = new Map<string, number>();
+  const add = (ruleId: unknown, amount: unknown): void => {
+    if (typeof ruleId !== "string" || typeof amount !== "number") return;
+    const campaignId = campaignIdByRuleId.get(ruleId);
+    if (campaignId === undefined || !campaignIds.has(campaignId)) return;
+    totals.set(campaignId, (totals.get(campaignId) ?? 0) + amount);
+  };
+  if (isRecord(snapshot)) {
+    for (const entry of Array.isArray(snapshot.multipliers) ? snapshot.multipliers : []) {
+      if (isRecord(entry)) add(entry.rule_id, entry.points_delta);
+    }
+    for (const entry of Array.isArray(snapshot.bonuses) ? snapshot.bonuses : []) {
+      if (isRecord(entry)) add(entry.rule_id, entry.bonus_points);
+    }
+  }
+  // Every named campaign id gets an entry, even 0 (a multiplier collapsed by
+  // dedupe): the RPC re-check is harmless at 0 and this keeps the guarded set
+  // identical across every variant rather than silently shrinking it.
+  return [...campaignIds].map((campaignId) => ({
+    campaignId,
+    points: totals.get(campaignId) ?? 0,
+  }));
+}
+
+/**
+ * Doc 34 section 5's "the reason a race-fallback drop was made", for a
+ * campaign in `cappedSurvivingIds` that a race-fallback variant drops IN
+ * ADDITION to the advisory pass's own `budgetDropped` (review M6: the race
+ * fallback's snapshot must record these too, not just the advisory drops).
+ * A campaign with both caps set reports `max_total_points` first, since that
+ * is the cap this receipt's OWN contribution actually threatens; a
+ * `per_customer_limit`-only campaign was never going to be re-checked for
+ * anything else.
+ */
+function raceDropReason(campaign: CampaignRow): BudgetDrop["reason"] {
+  const caps = parseCampaignBudget(campaign.budget);
+  return caps.maxTotalPoints !== null ? "max_total_points" : "per_customer_limit";
 }
 
 /**
@@ -968,12 +1141,13 @@ interface CampaignBudgetResolution {
  */
 async function resolveCampaignBudgets(input: {
   supabase: SupabaseClient<Database>;
+  businessId: string;
   consumerId: string;
   applied: ReadonlyArray<{ campaignId: string | null; rule: PointsRule }>;
   campaigns: ReadonlyMap<string, CampaignRow>;
   trialSnapshot: unknown;
 }): Promise<CampaignBudgetResolution> {
-  const { supabase, consumerId, applied, campaigns, trialSnapshot } = input;
+  const { supabase, businessId, consumerId, applied, campaigns, trialSnapshot } = input;
 
   // Which campaign each candidate rule belongs to, so the trial snapshot's
   // per-rule entries (keyed by rule_id) can be rolled up into a per-campaign
@@ -1005,6 +1179,7 @@ async function resolveCampaignBudgets(input: {
   const budgetDropped: BudgetDrop[] = [];
   const budgetChecks: Array<{ campaignId: string; points: number }> = [];
   const maxTotalPointsCampaignIds: string[] = [];
+  const cappedSurvivingIds = new Set<string>();
 
   for (const [campaignId, contribution] of contributionByCampaign) {
     const campaign = campaigns.get(campaignId);
@@ -1023,7 +1198,7 @@ async function resolveCampaignBudgets(input: {
     let dropped = false;
 
     if (caps.perCustomerLimit !== null) {
-      const count = await campaignCustomerEarnCount(supabase, campaignId, consumerId);
+      const count = await campaignCustomerEarnCount(supabase, businessId, campaignId, consumerId);
       if (count === null || count >= caps.perCustomerLimit) {
         droppedCampaignIds.add(campaignId);
         budgetDropped.push({ campaignId, reason: "per_customer_limit" });
@@ -1032,13 +1207,22 @@ async function resolveCampaignBudgets(input: {
     }
 
     if (!dropped && caps.maxTotalPoints !== null) {
-      const awarded = await campaignPointsAwarded(supabase, campaignId);
+      const awarded = await campaignPointsAwarded(supabase, businessId, campaignId);
       if (awarded === null || awarded + contribution > caps.maxTotalPoints) {
         droppedCampaignIds.add(campaignId);
         budgetDropped.push({ campaignId, reason: "max_total_points" });
-      } else {
-        budgetChecks.push({ campaignId, points: contribution });
+        dropped = true;
       }
+    }
+
+    // Review fix (task 1.2, I1): armed whenever EITHER cap is configured and
+    // survived, not only max_total_points - a per_customer_limit-only
+    // campaign must reach 0040's RPC-side re-check too, or nothing under the
+    // business_customers lock ever verifies it (two concurrent receipts for
+    // the same consumer could both pass the unlocked advisory read above).
+    if (!dropped) {
+      budgetChecks.push({ campaignId, points: contribution });
+      cappedSurvivingIds.add(campaignId);
     }
   }
 
@@ -1046,15 +1230,23 @@ async function resolveCampaignBudgets(input: {
     (candidate) => candidate.campaignId === null || !droppedCampaignIds.has(candidate.campaignId),
   );
 
-  const raceCheckedIds = new Set(budgetChecks.map((check) => check.campaignId));
   const raceFallbackApplied =
-    raceCheckedIds.size === 0
+    cappedSurvivingIds.size === 0
       ? null
       : finalApplied.filter(
-          (candidate) => candidate.campaignId === null || !raceCheckedIds.has(candidate.campaignId),
+          (candidate) =>
+            candidate.campaignId === null || !cappedSurvivingIds.has(candidate.campaignId),
         );
 
-  return { finalApplied, budgetDropped, budgetChecks, raceFallbackApplied, maxTotalPointsCampaignIds };
+  return {
+    finalApplied,
+    budgetDropped,
+    budgetChecks,
+    raceFallbackApplied,
+    maxTotalPointsCampaignIds,
+    campaignIdByRuleId,
+    cappedSurvivingIds,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1209,7 +1401,21 @@ export async function awardPoints(input: {
   receiptId: string;
   plan: AwardPlan;
 }): Promise<AwardResult> {
-  const result = await awardPointsInner(input);
+  // Review fix (task 1.2, M9): wrapped so a broken "never throws" contract
+  // somewhere inside `awardPointsInner` cannot silently skip the exhaustion
+  // check below. This function's own doc says "NEVER THROWS, for either
+  // caller" - if that promise is ever violated by a future change, the
+  // pause/notify check still runs rather than being skipped along with it.
+  let result: AwardResult;
+  try {
+    result = await awardPointsInner(input);
+  } catch (error) {
+    console.error(
+      `[receipts/award] awardPointsInner threw unexpectedly for receipt ${input.receiptId}; this violates its own "never throws" contract`,
+      error,
+    );
+    result = { kind: "refused", code: "AWARD_INTERNAL_ERROR", severity: "error" };
+  }
   // Doc 34 section 5, task 1.2: the post-commit exhaustion pause. Runs AFTER
   // every path above has settled (awarded, refused, zero-point, or a race
   // recovery of either kind), because the check reads the CAMPAIGN's current
@@ -1304,12 +1510,14 @@ async function awardPointsInner(input: {
 
 /**
  * The zero-point path (0023's `record_receipt_visit`), extracted so both the
- * ordinary zero-price case and the C2 race-recovery zero case call the exact
- * same code. Also where C3 is fixed: `rule_snapshot` is only ever persisted by
- * `award_receipt_points`, so a deduped-to-zero receipt - which never reaches
- * that RPC - would otherwise discard the `fixed_per_visit_deduped` fact
- * entirely. `persistFixedPerVisitDedupeMarker` merges it into
- * `receipts.parse_meta` instead, best-effort, after the visit is recorded.
+ * ordinary zero-price case and every race-recovery zero case (fixed_per_visit
+ * C2, campaign budget task 1.2) call the exact same code. Also where C3 is
+ * fixed, generalized by review I6: `rule_snapshot` is only ever persisted by
+ * `award_receipt_points`, so a deduped-to-zero or budget-dropped-to-zero
+ * receipt - which never reaches that RPC - would otherwise discard the
+ * `fixed_per_visit_deduped`/`budget_dropped` facts entirely.
+ * `persistAwardEvidenceMarker` merges them into `receipts.parse_meta`
+ * instead, best-effort, after the visit is recorded.
  */
 async function awardZeroPoints(input: {
   deps: AwardDeps;
@@ -1326,7 +1534,7 @@ async function awardZeroPoints(input: {
     return refuseRpc({ deps, receiptId, error, notePrefix: "visit_failed" });
   }
 
-  await persistFixedPerVisitDedupeMarker({ deps, receiptId, points, ruleSnapshot });
+  await persistAwardEvidenceMarker({ deps, receiptId, points, ruleSnapshot });
 
   console.info(
     `[receipts/award] receipt ${receiptId} priced at 0 points; visit recorded without a ledger row`,
@@ -1394,9 +1602,32 @@ async function awardAfterFixedPerVisitRace(input: {
     p_rule_snapshot: fallback.ruleSnapshot,
     ...(plan.campaignId === null ? {} : { p_campaign_id: plan.campaignId }),
     ...(plan.expiresAt === null ? {} : { p_expires_at: plan.expiresAt }),
+    // Review fix (task 1.2, I2): the OTHER guard (campaign budget) must not
+    // be silently dropped just because THIS retry is recovering from the
+    // fixed_per_visit one. Re-armed with the dedupedFallback's OWN
+    // contributions (recomputed against its deduped pricing, since a
+    // deduped base collapses a capped multiplier's contribution to 0 while
+    // leaving a capped bonus untouched) rather than reusing the primary
+    // plan's `budgetChecks` verbatim.
+    ...(fallback.budgetChecks.length > 0
+      ? {
+          p_campaign_budget_checks: fallback.budgetChecks.map((check) => ({
+            campaign_id: check.campaignId,
+            points: check.points,
+          })),
+        }
+      : {}),
   });
 
   if (error !== null) {
+    // Review fix (task 1.2, I2): a SECOND race - the campaign budget guard
+    // tripping on THIS retry, or any other failure - falls through to the
+    // EXISTING terminal path below. No third RPC attempt is made; instead the
+    // zero-point path is priced/annotated from `bothDroppedFallback` when it
+    // exists, so its provenance correctly records BOTH the dedupe and the
+    // budget drop rather than just the one this function already knew about
+    // (review I6).
+    const terminal = plan.bothDroppedFallback ?? fallback;
     console.error(
       `[receipts/award] retry after FIXED_PER_VISIT_RACE failed for receipt ${receiptId}; falling back to the zero-point path rather than stranding it`,
       error,
@@ -1422,7 +1653,7 @@ async function awardAfterFixedPerVisitRace(input: {
       deps,
       receiptId,
       points: 0,
-      ruleSnapshot: fallback.ruleSnapshot,
+      ruleSnapshot: terminal.ruleSnapshot,
     });
   }
 
@@ -1485,9 +1716,24 @@ async function awardAfterCampaignBudgetRace(input: {
     p_rule_snapshot: fallback.ruleSnapshot,
     ...(fallback.campaignId === null ? {} : { p_campaign_id: fallback.campaignId }),
     ...(plan.expiresAt === null ? {} : { p_expires_at: plan.expiresAt }),
+    // Review fix (task 1.2, I2): the OTHER guard (fixed_per_visit dedupe)
+    // must not be silently dropped just because THIS retry is recovering
+    // from the campaign budget race. `budgetRaceFallback` does not assume
+    // dedupe (only the capped contributions are dropped), so if the primary
+    // call still needed the RPC to verify no prior paid earn, this retry
+    // needs the SAME verification - reusing `plan.verifyNoPriorFixedPerVisitEarn`
+    // verbatim, since that fact depends only on the base rule and is
+    // unaffected by which campaigns survived.
+    ...(plan.verifyNoPriorFixedPerVisitEarn ? { p_verify_no_prior_fixed_visit_earn: true } : {}),
   });
 
   if (error !== null) {
+    // Review fix (task 1.2, I2): a SECOND race - the fixed_per_visit guard
+    // tripping on THIS retry, or any other failure - falls through to the
+    // EXISTING terminal path below, priced/annotated from
+    // `bothDroppedFallback` when it exists (same reasoning as the mirror
+    // image in `awardAfterFixedPerVisitRace`).
+    const terminal = plan.bothDroppedFallback ?? fallback;
     console.error(
       `[receipts/award] retry after CAMPAIGN_BUDGET_RACE failed for receipt ${receiptId}; falling back to the zero-point path rather than stranding it`,
       error,
@@ -1506,7 +1752,7 @@ async function awardAfterCampaignBudgetRace(input: {
       deps,
       receiptId,
       points: 0,
-      ruleSnapshot: fallback.ruleSnapshot,
+      ruleSnapshot: terminal.ruleSnapshot,
     });
   }
 
@@ -1521,20 +1767,22 @@ async function awardAfterCampaignBudgetRace(input: {
 }
 
 /**
- * C3 fix: `rule_snapshot.base.fixed_per_visit_deduped` is only ever written
- * by `award_receipt_points`, so a zero-point award - which never reaches that
- * RPC - would silently discard the ONE fact a review screen needs to explain
- * why 0 was paid. Merges `{ award: { total, fixed_per_visit_deduped: true } }`
- * into the receipt's existing `parse_meta` (read-modify-write, since
- * PostgREST cannot express a partial jsonb merge from the client) whenever
- * the snapshot says the dedupe actually fired. A no-op, not an error, when it
- * did not (nothing to record) - a receipt priced at 0 for an unrelated reason
- * (no active base rule, an earning floor) must not claim a dedupe that never
- * happened. Best-effort and never throws: this is provenance for humans, not
- * a ledger write, so a failure here logs and moves on rather than turning a
+ * C3 fix, generalized (task 1.2, review I6): `rule_snapshot.base.
+ * fixed_per_visit_deduped` and `rule_snapshot.budget_dropped` are only ever
+ * written by `award_receipt_points`, so a zero-point award - which never
+ * reaches that RPC - would silently discard whichever of those facts applies:
+ * the ONE thing a review screen needs to explain why 0 was paid. Merges
+ * `{ award: { total, fixed_per_visit_deduped, budget_dropped } }` into the
+ * receipt's existing `parse_meta` (read-modify-write, since PostgREST cannot
+ * express a partial jsonb merge from the client) whenever EITHER fact is
+ * non-trivial. A no-op, not an error, when neither is (nothing to record) - a
+ * receipt priced at 0 for an unrelated reason (no active base rule, an
+ * earning floor) must not claim a dedupe or a drop that never happened.
+ * Best-effort and never throws: this is provenance for humans, not a ledger
+ * write, so a failure here logs and moves on rather than turning a
  * successful visit-record into a reported failure.
  */
-async function persistFixedPerVisitDedupeMarker(input: {
+async function persistAwardEvidenceMarker(input: {
   deps: AwardDeps;
   receiptId: string;
   points: number;
@@ -1543,7 +1791,9 @@ async function persistFixedPerVisitDedupeMarker(input: {
   const { deps, receiptId, points, ruleSnapshot } = input;
   if (!isRecord(ruleSnapshot)) return;
   const base = ruleSnapshot.base;
-  if (!isRecord(base) || base.fixed_per_visit_deduped !== true) return;
+  const fixedPerVisitDeduped = isRecord(base) && base.fixed_per_visit_deduped === true;
+  const budgetDropped = Array.isArray(ruleSnapshot.budget_dropped) ? ruleSnapshot.budget_dropped : [];
+  if (!fixedPerVisitDeduped && budgetDropped.length === 0) return;
 
   const { data, error: readError } = await deps.supabase
     .from("receipts")
@@ -1552,7 +1802,7 @@ async function persistFixedPerVisitDedupeMarker(input: {
     .single();
   if (readError !== null) {
     console.error(
-      `[receipts/award] could not read parse_meta to record the fixed_per_visit dedupe for receipt ${receiptId}`,
+      `[receipts/award] could not read parse_meta to record award evidence for receipt ${receiptId}`,
       readError,
     );
     return;
@@ -1561,7 +1811,11 @@ async function persistFixedPerVisitDedupeMarker(input: {
   const currentParseMeta = isRecord(data?.parse_meta) ? data.parse_meta : {};
   const mergedParseMeta = toJson({
     ...currentParseMeta,
-    award: { total: points, fixed_per_visit_deduped: true },
+    award: {
+      total: points,
+      fixed_per_visit_deduped: fixedPerVisitDeduped,
+      budget_dropped: budgetDropped,
+    },
   });
 
   const { error: writeError } = await deps.supabase
@@ -1570,7 +1824,7 @@ async function persistFixedPerVisitDedupeMarker(input: {
     .eq("id", receiptId);
   if (writeError !== null) {
     console.error(
-      `[receipts/award] could not persist the fixed_per_visit dedupe marker for receipt ${receiptId}`,
+      `[receipts/award] could not persist the award evidence marker for receipt ${receiptId}`,
       writeError,
     );
   }

@@ -308,8 +308,48 @@ describe("preferences are re-checked at send time", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("does not email a profile with no consumers row", async () => {
+  it("does not email a consumer-only kind sent to a profile with no consumers row", async () => {
     const { client } = supabaseDouble({ profile: { is_suspended: false, consumers: null } });
+    const send = sendDouble();
+    await runNotifyEmail(
+      { job_id: "job-1", notification_ids: ["n1"] },
+      { supabase: client, send, ...deps() },
+    );
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  // Review fix (task 1.2, I4): campaign_budget_exhausted is addressed to a
+  // business owner, who by definition has no `consumers` row - that must not
+  // suppress it the way it correctly suppresses a MISMATCHED kind above.
+  it("DOES email a staff-facing kind (campaign_budget_exhausted) sent to a profile with no consumers row", async () => {
+    const { client, updates } = supabaseDouble({
+      rows: [
+        rejectionRow({
+          kind: "campaign_budget_exhausted",
+          title: "A campaign paused itself",
+          body: "Capped Promo reached its points budget and has been paused automatically.",
+          data: { route: "/business/campaigns", params: { campaign_id: "camp-1" } },
+        }),
+      ],
+      profile: { is_suspended: false, consumers: null },
+    });
+    const send = sendDouble();
+
+    const result = await runNotifyEmail(
+      { job_id: "job-1", notification_ids: ["n1"] },
+      { supabase: client, send, ...deps() },
+    );
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ sent: 1 });
+    expect(updates[0]?.patch).toMatchObject({ status: "sent" });
+  });
+
+  it("still suspends a staff-facing kind for a suspended owner", async () => {
+    const { client } = supabaseDouble({
+      rows: [rejectionRow({ kind: "campaign_budget_exhausted" })],
+      profile: { is_suspended: true, consumers: null },
+    });
     const send = sendDouble();
     await runNotifyEmail(
       { job_id: "job-1", notification_ids: ["n1"] },

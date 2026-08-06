@@ -122,6 +122,20 @@ function createFakeSupabase(input: {
           error: table === "audit_logs" ? (input.auditError ?? null) : null,
         })),
     }),
+    // Review fix (task 1.2, C1 + I3): pauseExhaustedCampaigns now reads the
+    // CORRECTLY ATTRIBUTED, SQL-aggregated running total via 0041's
+    // `public.campaign_points_awarded` RPC, not an unbounded
+    // points_transactions fetch-and-sum-in-JS.
+    rpc: (name: string) => {
+      ops.push({ table: `rpc:${name}`, kind: "select", payload: undefined, filters: [] });
+      if (name === "campaign_points_awarded") {
+        if (input.pointsReadError !== undefined) {
+          return Promise.resolve({ data: null, error: input.pointsReadError });
+        }
+        return Promise.resolve({ data: input.pointsSum ?? 0, error: null });
+      }
+      return Promise.resolve({ data: null, error: null });
+    },
   };
 
   return { client: client as unknown as SupabaseClient<Database>, ops };
@@ -222,7 +236,7 @@ describe("pauseExhaustedCampaigns", () => {
     await pauseExhaustedCampaigns({ supabase: client }, [CAMPAIGN_ID]);
 
     // Never even reads the running total: status is checked first.
-    expect(ops.some((op) => op.table === "points_transactions")).toBe(false);
+    expect(ops.some((op) => op.table === "rpc:campaign_points_awarded")).toBe(false);
     expect(ops.some((op) => op.kind === "update")).toBe(false);
     expect(raiseNotificationMock).not.toHaveBeenCalled();
   });
@@ -235,7 +249,7 @@ describe("pauseExhaustedCampaigns", () => {
 
     await pauseExhaustedCampaigns({ supabase: client }, [CAMPAIGN_ID]);
 
-    expect(ops.some((op) => op.table === "points_transactions")).toBe(false);
+    expect(ops.some((op) => op.table === "rpc:campaign_points_awarded")).toBe(false);
     expect(ops.some((op) => op.kind === "update")).toBe(false);
   });
 

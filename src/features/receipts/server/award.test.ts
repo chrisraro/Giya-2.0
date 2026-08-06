@@ -224,6 +224,33 @@ function createFakeSupabase(input: {
         }
         return Promise.resolve({ data: input.fixedPerVisitAlreadyPaid ?? false, error: null });
       }
+      // Doc 34 section 5, task 1.2 (review C1): resolveCampaignBudgets's two
+      // advisory reads now call these RPCs (0041's public definer wrappers)
+      // instead of querying points_transactions directly.
+      if (name === "campaign_points_awarded") {
+        if (input.campaignPointsAwardedError !== undefined) {
+          return Promise.resolve({ data: null, error: input.campaignPointsAwardedError });
+        }
+        const campaignId = (args as { p_campaign_id?: string } | undefined)?.p_campaign_id;
+        const lookup = input.campaignPointsAwarded;
+        const value =
+          typeof lookup === "number"
+            ? lookup
+            : (lookup !== undefined && campaignId !== undefined ? lookup[campaignId] : undefined) ?? 0;
+        return Promise.resolve({ data: value, error: null });
+      }
+      if (name === "campaign_customer_earn_count") {
+        if (input.campaignCustomerEarnCountError !== undefined) {
+          return Promise.resolve({ data: null, error: input.campaignCustomerEarnCountError });
+        }
+        const campaignId = (args as { p_campaign_id?: string } | undefined)?.p_campaign_id;
+        const lookup = input.campaignCustomerEarnCount;
+        const value =
+          typeof lookup === "number"
+            ? lookup
+            : (lookup !== undefined && campaignId !== undefined ? lookup[campaignId] : undefined) ?? 0;
+        return Promise.resolve({ data: value, error: null });
+      }
       if (name === "award_receipt_points" && awardRpcQueue !== undefined && awardRpcQueue.length > 0) {
         return Promise.resolve(awardRpcQueue.shift() as FakeResult);
       }
@@ -296,6 +323,7 @@ function plan(overrides: Partial<AwardPlan> = {}): AwardPlan {
     dedupedFallback: null,
     budgetChecks: [],
     budgetRaceFallback: null,
+    bothDroppedFallback: null,
     maxTotalPointsCampaignIds: [],
     ...overrides,
   };
@@ -442,6 +470,7 @@ describe("priceReceipt: fixed_per_visit VISIT-DAY dedupe (C1 fix)", () => {
       ruleSnapshot: expect.objectContaining({
         base: expect.objectContaining({ points: 0, fixed_per_visit_deduped: true }),
       }),
+      budgetChecks: [],
     });
   });
 
@@ -527,6 +556,7 @@ describe("priceReceipt: fixed_per_visit VISIT-DAY dedupe (C1 fix)", () => {
       ruleSnapshot: expect.objectContaining({
         base: expect.objectContaining({ points: 0, fixed_per_visit_deduped: true }),
       }),
+      budgetChecks: [],
     });
   });
 
@@ -851,7 +881,11 @@ describe("priceReceipt: campaign budget guardrails (task 1.2)", () => {
     });
 
     expect(result.points).toBe(190 + 150);
-    expect(result.budgetChecks).toEqual([]); // per_customer_limit alone is not RPC-rechecked
+    // Review fix (task 1.2, I1): armed for EITHER cap, not only
+    // max_total_points - a per_customer_limit-only campaign that survives
+    // must still reach the RPC's authoritative re-check, or nothing under
+    // the business_customers lock ever verifies it.
+    expect(result.budgetChecks).toEqual([{ campaignId: limited.id, points: 150 }]);
   });
 
   it("behaves exactly as before when the campaign carries no budget keys (no regression)", async () => {
@@ -871,9 +905,12 @@ describe("priceReceipt: campaign budget guardrails (task 1.2)", () => {
     expect(result.points).toBe(190 + 150);
     expect(result.budgetChecks).toEqual([]);
     expect(result.maxTotalPointsCampaignIds).toEqual([]);
-    // No points_transactions read was ever needed: both caps are absent, so
+    // Neither budget RPC was ever called: both caps are absent, so
     // resolveCampaignBudgets never queries the running total or the count.
-    expect(supabase.opsFor("points_transactions", "select")).toHaveLength(0);
+    expect(supabase.rpcCalls.map((call) => call.name)).not.toContain("campaign_points_awarded");
+    expect(supabase.rpcCalls.map((call) => call.name)).not.toContain(
+      "campaign_customer_earn_count",
+    );
   });
 
   it("fails CLOSED (drops the contribution) when the running-total read errors", async () => {
@@ -900,8 +937,8 @@ describe("priceReceipt: campaign budget guardrails (task 1.2)", () => {
   it("does not regress a business-default (campaign_id null) multiplier stack, no query needed", async () => {
     // A rule with no campaign_id (a business-default multiplier, doc 34
     // section 6) has nothing for resolveCampaignBudgets to consider at all -
-    // no campaign row lookup, no points_transactions read, identical output
-    // to pre-task-1.2 behaviour.
+    // no campaign row lookup, no budget RPC call, identical output to
+    // pre-task-1.2 behaviour.
     const bigReceipt: AwardReceipt = { ...RECEIPT, totalCentavos: 100_000 };
     const rate: PointsRuleRow = { ...BASE_RULE, rate_centavos_per_point: 100 }; // 1000 points floor
     const noCampaignMultiplier: PointsRuleRow = {
@@ -925,7 +962,43 @@ describe("priceReceipt: campaign budget guardrails (task 1.2)", () => {
     // budget-resolution pass.
     expect(result.points).toBe(1970);
     expect(result.budgetChecks).toEqual([]);
-    expect(supabase.opsFor("points_transactions", "select")).toHaveLength(0);
+    expect(supabase.rpcCalls.map((call) => call.name)).not.toContain("campaign_points_awarded");
+  });
+
+  // Review fix (task 1.2, I2): when a receipt is EXPOSED to both races at
+  // once (a fixed_per_visit base whose precheck found no prior earn yet, AND
+  // a stacked bonus from a campaign at its max_total_points cap),
+  // `bothDroppedFallback` must be precomputed so a compound race never falls
+  // back to a second implementation of the rule math.
+  it("precomputes bothDroppedFallback when both a fixed_per_visit dedupe and a campaign budget drop are both possible", async () => {
+    const supabase = createFakeSupabase({
+      pointsRules: [FIXED_VISIT_RULE, BONUS_RULE],
+      campaigns: [CAPPED_CAMPAIGN],
+      fixedPerVisitAlreadyPaid: false, // precheck believes this is the first earn today
+      campaignPointsAwarded: 100, // 100 + 150 <= 300: the bonus survives the advisory pass
+    });
+
+    const result = await priceReceipt({
+      deps: createDeps(supabase),
+      businessId: BUSINESS_ID,
+      receipt: RECEIPT,
+      isFirstVisit: false,
+    });
+
+    // Primary: base 10 (not yet deduped) + bonus 150 = 160.
+    expect(result.points).toBe(160);
+    expect(result.verifyNoPriorFixedPerVisitEarn).toBe(true);
+    expect(result.budgetChecks).toEqual([{ campaignId: CAPPED_CAMPAIGN.id, points: 150 }]);
+    // dedupedFallback: base deduped to 0, bonus survives (never derived from
+    // base) -> 150, and its OWN budgetChecks still names the campaign.
+    expect(result.dedupedFallback).toMatchObject({
+      points: 150,
+      budgetChecks: [{ campaignId: CAPPED_CAMPAIGN.id, points: 150 }],
+    });
+    // budgetRaceFallback: bonus dropped, base survives undeduped -> 10.
+    expect(result.budgetRaceFallback).toMatchObject({ points: 10 });
+    // bothDroppedFallback: base deduped to 0 AND bonus dropped -> 0.
+    expect(result.bothDroppedFallback).toMatchObject({ points: 0, campaignId: null });
   });
 });
 
@@ -1253,6 +1326,107 @@ describe("awardPoints: CAMPAIGN_BUDGET_RACE recovery (task 1.2)", () => {
 
     expect(result).toEqual({ kind: "skipped_zero_points" });
   });
+
+  // Review fix (task 1.2, I2): the retry must not silently drop the OTHER
+  // guard (fixed_per_visit) just because THIS one is recovering from a
+  // campaign budget race.
+  it("carries p_verify_no_prior_fixed_visit_earn on the retry when the primary plan still needed it", async () => {
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [
+        { data: null, error: { message: "CAMPAIGN_BUDGET_RACE" } },
+        { data: LEDGER_ROW_ID, error: null },
+      ],
+    });
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 340,
+        verifyNoPriorFixedPerVisitEarn: true,
+        budgetChecks: [{ campaignId: "01980000-0000-7000-8000-0000000000ca", points: 150 }],
+        budgetRaceFallback: { points: 190, ruleSnapshot: { engine: "points/v1" }, campaignId: null },
+      }),
+    });
+
+    expect(supabase.rpcCalls[1]?.args).toMatchObject({
+      p_verify_no_prior_fixed_visit_earn: true,
+    });
+  });
+
+  it("omits p_verify_no_prior_fixed_visit_earn on the retry when the primary plan never needed it", async () => {
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [
+        { data: null, error: { message: "CAMPAIGN_BUDGET_RACE" } },
+        { data: LEDGER_ROW_ID, error: null },
+      ],
+    });
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 340,
+        verifyNoPriorFixedPerVisitEarn: false,
+        budgetChecks: [{ campaignId: "01980000-0000-7000-8000-0000000000ca", points: 150 }],
+        budgetRaceFallback: { points: 190, ruleSnapshot: { engine: "points/v1" }, campaignId: null },
+      }),
+    });
+
+    expect(supabase.rpcCalls[1]?.args).not.toHaveProperty("p_verify_no_prior_fixed_visit_earn");
+  });
+
+  // Review fix (task 1.2, I2): a COMPOUND race - the retry itself trips the
+  // fixed_per_visit guard - falls through to the EXISTING terminal path (no
+  // third RPC attempt), priced from `bothDroppedFallback` so the zero-point
+  // provenance records BOTH facts rather than just the budget drop this
+  // function already knew about.
+  it("falls to the terminal zero-point path, priced from bothDroppedFallback, when the retry ALSO raises FIXED_PER_VISIT_RACE", async () => {
+    const bothSnapshot = {
+      engine: "points/v1",
+      base: { fixed_per_visit_deduped: true, points: 0 },
+      budget_dropped: [{ campaign_id: "01980000-0000-7000-8000-0000000000ca", reason: "max_total_points" }],
+    };
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [
+        { data: null, error: { message: "CAMPAIGN_BUDGET_RACE" } },
+        { data: null, error: { message: "FIXED_PER_VISIT_RACE" } },
+      ],
+    });
+
+    const result = await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 340,
+        verifyNoPriorFixedPerVisitEarn: true,
+        budgetChecks: [{ campaignId: "01980000-0000-7000-8000-0000000000ca", points: 150 }],
+        budgetRaceFallback: { points: 190, ruleSnapshot: { engine: "points/v1" }, campaignId: null },
+        bothDroppedFallback: { points: 0, ruleSnapshot: bothSnapshot, campaignId: null },
+      }),
+    });
+
+    // Exactly two award_receipt_points attempts, never a third - the compound
+    // race falls to the EXISTING zero-point path, not a new RPC call.
+    expect(supabase.rpcCalls.map((call) => call.name)).toEqual([
+      "award_receipt_points",
+      "award_receipt_points",
+      "record_receipt_visit",
+    ]);
+    expect(result).toEqual({ kind: "skipped_zero_points" });
+    // The provenance breadcrumb comes from `bothDroppedFallback`, not the
+    // single-guard `budgetRaceFallback` - proof the zero-point path recorded
+    // BOTH the dedupe and the budget drop.
+    const update = supabase
+      .opsFor("receipts", "update")
+      .find(
+        (op) =>
+          typeof op.payload === "object" && op.payload !== null && "parse_meta" in op.payload,
+      );
+    expect(update?.payload).toMatchObject({
+      parse_meta: { award: { fixed_per_visit_deduped: true } },
+    });
+  });
 });
 
 // ===========================================================================
@@ -1315,6 +1489,7 @@ describe("awardPoints: FIXED_PER_VISIT_RACE recovery (C2 fix)", () => {
         dedupedFallback: {
           points: 0,
           ruleSnapshot: { engine: "points/v1", base: { fixed_per_visit_deduped: true, points: 0 } },
+          budgetChecks: [],
         },
       }),
     });
@@ -1349,7 +1524,7 @@ describe("awardPoints: FIXED_PER_VISIT_RACE recovery (C2 fix)", () => {
       plan: plan({
         points: 15,
         verifyNoPriorFixedPerVisitEarn: true,
-        dedupedFallback: { points: 5, ruleSnapshot: fallbackSnapshot },
+        dedupedFallback: { points: 5, ruleSnapshot: fallbackSnapshot, budgetChecks: [] },
       }),
     });
 
@@ -1386,6 +1561,7 @@ describe("awardPoints: FIXED_PER_VISIT_RACE recovery (C2 fix)", () => {
         dedupedFallback: {
           points: 5,
           ruleSnapshot: { engine: "points/v1", base: { fixed_per_visit_deduped: true, points: 0 } },
+          budgetChecks: [],
         },
       }),
     });
@@ -1425,6 +1601,7 @@ describe("awardPoints: FIXED_PER_VISIT_RACE recovery (C2 fix)", () => {
         dedupedFallback: {
           points: 0,
           ruleSnapshot: { engine: "points/v1", base: { fixed_per_visit_deduped: true, points: 0 } },
+          budgetChecks: [],
         },
       }),
     });
@@ -1450,6 +1627,110 @@ describe("awardPoints: FIXED_PER_VISIT_RACE recovery (C2 fix)", () => {
       "record_receipt_visit",
     ]);
     expect(result).toEqual({ kind: "skipped_zero_points" });
+  });
+
+  // Review fix (task 1.2, I2): the retry must not silently drop the OTHER
+  // guard (campaign budget) just because THIS one is recovering from the
+  // fixed_per_visit dedupe race.
+  it("carries p_campaign_budget_checks on the retry from dedupedFallback's OWN contributions", async () => {
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [
+        { data: null, error: { message: "FIXED_PER_VISIT_RACE" } },
+        { data: LEDGER_ROW_ID, error: null },
+      ],
+    });
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 15,
+        verifyNoPriorFixedPerVisitEarn: true,
+        dedupedFallback: {
+          points: 5,
+          ruleSnapshot: { engine: "points/v1" },
+          budgetChecks: [{ campaignId: "01980000-0000-7000-8000-0000000000ca", points: 5 }],
+        },
+      }),
+    });
+
+    expect(supabase.rpcCalls[1]?.args).toMatchObject({
+      p_campaign_budget_checks: [{ campaign_id: "01980000-0000-7000-8000-0000000000ca", points: 5 }],
+    });
+  });
+
+  it("omits p_campaign_budget_checks on the retry when dedupedFallback has nothing capped", async () => {
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [
+        { data: null, error: { message: "FIXED_PER_VISIT_RACE" } },
+        { data: LEDGER_ROW_ID, error: null },
+      ],
+    });
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 15,
+        verifyNoPriorFixedPerVisitEarn: true,
+        dedupedFallback: { points: 5, ruleSnapshot: { engine: "points/v1" }, budgetChecks: [] },
+      }),
+    });
+
+    expect(supabase.rpcCalls[1]?.args).not.toHaveProperty("p_campaign_budget_checks");
+  });
+
+  // Review fix (task 1.2, I2): a COMPOUND race - the retry itself trips the
+  // campaign budget guard - falls through to the EXISTING terminal path (no
+  // third RPC attempt), priced from `bothDroppedFallback` so the zero-point
+  // provenance records BOTH facts.
+  it("falls to the terminal zero-point path, priced from bothDroppedFallback, when the retry ALSO raises CAMPAIGN_BUDGET_RACE", async () => {
+    const bothSnapshot = {
+      engine: "points/v1",
+      base: { fixed_per_visit_deduped: true, points: 0 },
+      budget_dropped: [{ campaign_id: "01980000-0000-7000-8000-0000000000ca", reason: "max_total_points" }],
+    };
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [
+        { data: null, error: { message: "FIXED_PER_VISIT_RACE" } },
+        { data: null, error: { message: "CAMPAIGN_BUDGET_RACE" } },
+      ],
+    });
+
+    const result = await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 15,
+        verifyNoPriorFixedPerVisitEarn: true,
+        dedupedFallback: {
+          points: 5,
+          ruleSnapshot: { engine: "points/v1" },
+          budgetChecks: [{ campaignId: "01980000-0000-7000-8000-0000000000ca", points: 5 }],
+        },
+        bothDroppedFallback: { points: 0, ruleSnapshot: bothSnapshot, campaignId: null },
+      }),
+    });
+
+    expect(supabase.rpcCalls.map((call) => call.name)).toEqual([
+      "award_receipt_points",
+      "award_receipt_points",
+      "record_receipt_visit",
+    ]);
+    expect(result).toEqual({ kind: "skipped_zero_points" });
+    const update = supabase
+      .opsFor("receipts", "update")
+      .find(
+        (op) =>
+          typeof op.payload === "object" && op.payload !== null && "parse_meta" in op.payload,
+      );
+    expect(update?.payload).toMatchObject({
+      parse_meta: {
+        award: {
+          budget_dropped: [{ campaign_id: "01980000-0000-7000-8000-0000000000ca", reason: "max_total_points" }],
+        },
+      },
+    });
   });
 });
 
@@ -1481,7 +1762,10 @@ describe("awardPoints: fixed_per_visit dedupe persisted to parse_meta (C3 fix)",
 
     const update = supabase.opsFor("receipts", "update")[0];
     expect(update?.payload).toEqual({
-      parse_meta: { existing: "field", award: { total: 0, fixed_per_visit_deduped: true } },
+      parse_meta: {
+        existing: "field",
+        award: { total: 0, fixed_per_visit_deduped: true, budget_dropped: [] },
+      },
     });
     expect(result).toEqual({ kind: "skipped_zero_points" });
   });
@@ -1524,13 +1808,13 @@ describe("awardPoints: fixed_per_visit dedupe persisted to parse_meta (C3 fix)",
       plan: plan({
         points: 10,
         verifyNoPriorFixedPerVisitEarn: true,
-        dedupedFallback: { points: 0, ruleSnapshot: dedupedSnapshot },
+        dedupedFallback: { points: 0, ruleSnapshot: dedupedSnapshot, budgetChecks: [] },
       }),
     });
 
     const update = supabase.opsFor("receipts", "update")[0];
     expect(update?.payload).toEqual({
-      parse_meta: { award: { total: 0, fixed_per_visit_deduped: true } },
+      parse_meta: { award: { total: 0, fixed_per_visit_deduped: true, budget_dropped: [] } },
     });
   });
 });
@@ -1569,7 +1853,7 @@ describe("fixed_per_visit dedupe: end-to-end zero-point lifecycle (M4)", () => {
     ]);
     const update = supabase.opsFor("receipts", "update")[0];
     expect(update?.payload).toEqual({
-      parse_meta: { award: { total: 0, fixed_per_visit_deduped: true } },
+      parse_meta: { award: { total: 0, fixed_per_visit_deduped: true, budget_dropped: [] } },
     });
     expect(result).toEqual({ kind: "skipped_zero_points" });
   });

@@ -52,11 +52,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** `campaigns.budget->>'max_total_points'` (doc 34 section 5), or null when
  * absent/not a positive integer - the same parsing `resolveCampaignBudgets`
  * in `../../receipts/server/award.ts` uses, restated here rather than
- * imported so this module has no dependency on the receipts slice. */
+ * imported so this module has no dependency on the receipts slice.
+ * `Number.isInteger`, not just `Number.isFinite` (review M5): a hand-edited
+ * `100.5` must read as absent here too, consistently with the award path. */
 function maxTotalPoints(budget: unknown): number | null {
   if (!isRecord(budget)) return null;
   const raw = budget.max_total_points;
-  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : null;
+  return typeof raw === "number" && Number.isInteger(raw) && raw > 0 ? raw : null;
 }
 
 /**
@@ -111,24 +113,25 @@ async function pauseOneIfExhausted(deps: ExhaustionDeps, campaignId: string): Pr
   const cap = maxTotalPoints(campaign.budget);
   if (cap === null) return; // the cap was raised or removed since this receipt priced
 
-  const { data: rows, error: sumError } = await deps.supabase
-    .from("points_transactions")
-    .select("points")
-    .eq("campaign_id", campaignId)
-    .gt("points", 0);
+  // Review fix (task 1.2, C1 + I3): the CORRECTLY ATTRIBUTED running total
+  // (0041's `public.campaign_points_awarded`, sharing ONE definition with
+  // `award.ts`'s own advisory read and `award_receipt_points`'s authoritative
+  // re-check) - never a naive `points`/`campaign_id` filter, and never an
+  // unbounded fetch-all-rows-and-sum-in-JS: this is a single SQL aggregate,
+  // so a campaign with more earn rows than any page size still gets a
+  // correct answer and can still be paused.
+  const { data: awarded, error: sumError } = await deps.supabase.rpc("campaign_points_awarded", {
+    p_business_id: campaign.business_id,
+    p_campaign_id: campaignId,
+  });
 
-  if (sumError !== null) {
+  if (sumError !== null || typeof awarded !== "number") {
     console.error(
       `[campaigns/exhaustion] could not sum awarded points for campaign ${campaignId}`,
       sumError,
     );
     return;
   }
-
-  const awarded = (rows ?? []).reduce((sum: number, row) => {
-    const points = (row as { points: unknown }).points;
-    return sum + (typeof points === "number" ? points : 0);
-  }, 0);
   if (awarded < cap) return; // budget still has room; nothing to pause
 
   // Optimistic, exactly like campaigns/server/repo.ts's setCampaignStatus:

@@ -2547,6 +2547,7 @@ export type Database = {
       }
       award_receipt_points: {
         Args: {
+          p_campaign_budget_checks?: Json
           p_campaign_id?: string
           p_expires_at?: string
           p_points: number
@@ -2555,6 +2556,18 @@ export type Database = {
           p_verify_no_prior_fixed_visit_earn?: boolean
         }
         Returns: string
+      }
+      campaign_customer_earn_count: {
+        Args: {
+          p_business_id: string
+          p_campaign_id: string
+          p_consumer_id: string
+        }
+        Returns: number
+      }
+      campaign_points_awarded: {
+        Args: { p_business_id: string; p_campaign_id: string }
+        Returns: number
       }
       claim_reward: { Args: { p_reward_id: string }; Returns: string }
       clawback_receipt_points: {

@@ -189,7 +189,7 @@ async function deliver(row: NotificationRow, deps: DeliverDeps): Promise<Deliver
     // fan-out. The window between the two is small and the rule is not about
     // size: an opt-out that arrives after the row was written must win, because
     // the consumer's last word is the one that counts.
-    const suppression = await suppressionReason(deps.supabase, row.user_id);
+    const suppression = await suppressionReason(deps.supabase, row.user_id, row.kind);
     if (suppression !== null) {
       await markRow(deps.supabase, row.id, "failed", suppression);
       return "skipped";
@@ -244,6 +244,18 @@ async function deliver(row: NotificationRow, deps: DeliverDeps): Promise<Deliver
 }
 
 /**
+ * Kinds addressed to business staff rather than a consumer (doc 30 section
+ * 5.3's staff-facing row). Review fix (task 1.2, I4): a profile with no
+ * `consumers` row is EXPECTED for one of these - `campaign_budget_exhausted`
+ * is addressed to a business owner, who by definition never has a consumers
+ * row - so it must not be suppressed on that basis alone. Every OTHER kind
+ * that reaches this channel is still consumer-only, and a staff profile
+ * there remains a mismatch worth suppressing rather than emailing
+ * incorrectly.
+ */
+const STAFF_FACING_KINDS: ReadonlySet<string> = new Set(["campaign_budget_exhausted"]);
+
+/**
  * Why this recipient must not be emailed, or null when they may be.
  *
  * Fails CLOSED: an unreadable preference row suppresses the send. That is the
@@ -254,6 +266,7 @@ async function deliver(row: NotificationRow, deps: DeliverDeps): Promise<Deliver
 async function suppressionReason(
   supabase: SupabaseClient<Database>,
   userId: string,
+  kind: string,
 ): Promise<string | null> {
   const { data, error } = await supabase
     .from("profiles")
@@ -268,12 +281,19 @@ async function suppressionReason(
   if (data === null) return "no profile";
 
   // Doc 30 section 5.5: "Suspended users receive nothing except
-  // suspension/appeal emails." This is not one of those.
+  // suspension/appeal emails." This is not one of those. Applies to staff
+  // and consumers alike - `is_suspended` is a platform-wide identity column
+  // (0002), not a consumer-only one.
   if (data.is_suspended) return "recipient is suspended";
 
-  // A profile with no consumers row is staff-only, and no kind on this channel
-  // is addressed to staff yet.
-  if (data.consumers === null) return "recipient is not a consumer";
+  if (data.consumers === null) {
+    // A profile with no consumers row is staff. Review fix (task 1.2, I4):
+    // doc 30 section 5.3 now registers ONE staff-facing kind that emails
+    // (`campaign_budget_exhausted`) - everything else on this channel is
+    // still consumer-only, so a staff profile there is a MISMATCH, not the
+    // expected shape, and stays suppressed.
+    return STAFF_FACING_KINDS.has(kind) ? null : "recipient is not a consumer";
+  }
 
   // Doc 30 section 5.5 exempts TRANSACTIONAL email from `email_enabled`, and
   // its examples are account and security mail: password change, staff invite,
