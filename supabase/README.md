@@ -102,7 +102,7 @@ is transaction-wrapped (`begin ... rollback`) and leaves no data behind:
 psql "$DATABASE_URL" -f supabase/tests/rls_identity_smoke.sql
 ```
 
-Twenty-six suites, one per domain (review fix, task 2.1: the prior count of "Nineteen" - itself already a correction attempt - was still wrong; four existing suites had never been added as table rows at all: `receipt_escalation_smoke.sql`, `rls_jobs_smoke.sql`, `rls_merchant_aliases_smoke.sql`, `rpc_campaign_budget_guard_smoke.sql`, restored below in their migration order rather than appended, so this table reads in the same order the suites were written; task 2.5 adds two more, `rls_job_alert_state_smoke.sql` and `rpc_job_health_terminal_failures_smoke.sql`):
+Twenty-six suites, one per domain (review fix, task 2.1: the prior count of "Nineteen" - itself already a correction attempt - was still wrong; four existing suites had never been added as table rows at all: `receipt_escalation_smoke.sql`, `rls_jobs_smoke.sql`, `rls_merchant_aliases_smoke.sql`, `rpc_campaign_budget_guard_smoke.sql`, restored below in their migration order rather than appended, so this table reads in the same order the suites were written; task 2.5 adds two more, `rls_job_alert_state_smoke.sql` and `rpc_job_health_terminal_failures_smoke.sql`; T3.4a adds `rls_avatars_storage_smoke.sql`, the twenty-seventh row. Note the directory now holds TWENTY-NINE files: `rls_feature_flags_smoke.sql` (0062) and `rpc_find_auth_user_by_email_smoke.sql` (0063) shipped without a row here and still need one - counted honestly rather than folded into the number above):
 
 | file | covers |
 |---|---|
@@ -131,6 +131,7 @@ Twenty-six suites, one per domain (review fix, task 2.1: the prior count of "Nin
 | `rpc_campaigns_sweep_smoke.sql` | Task 2.1 `campaigns.sweep` (0053, review-fixed twice by 0054 and 0055), 33 assertions: doc 34's T3 (`scheduled -> active` at `starts_at`) and T7 (`active|paused -> ended` at `ends_at`) as ONE `public.sweep_campaigns` function with two independent candidate scans; a due scheduled campaign on an ACTIVE business activates with a `campaign.activated` audit row (`actor_kind='system'`, `after.trigger='sweep'` - the app's own vocabulary from `src/features/campaigns/server/audit.ts`, never a parallel verb); a not-yet-due scheduled campaign and both an already-`ended` and an already-`archived` campaign are left completely untouched with no audit row; an `active` campaign AND a `paused` campaign both past `ends_at` are ended with `campaign.ended` recording the correct source status in `before`, PROVEN AGAIN on a business the T3 skip case has already made suspended (T7 is unconditional and a fixture now pins that rather than leaving it asserted only by construction); G1 (business standing) gates T3 alone - a due scheduled campaign on a SUSPENDED business is SKIPPED (stays `scheduled`, no audit row, no error) and then genuinely activates once the business is set back to `active`, proving the skip re-checks live standing rather than caching a verdict; GENUINE SELF-CLEARING under a TIGHT `p_limit=1` (0054 review fix I1/I2, the actual 0045-shaped bug 0053 shipped with: a `p_limit=200`/8-fixture "second run is 0" check cannot distinguish "left candidacy" from "still occupying a slot doing no work" the way a small-limit starvation probe can - a permanently-ineligible `'closed'`-business campaign sorted first by `starts_at` no longer starves a later, gate-passing one out of the budget); `private.campaigns_sweep_ineligible_count()` (0055 review fix I1: 0054's own I1+I3 interaction silently dropped skip visibility to zero for the ordinary case) returning exactly the one due-but-ineligible campaign in play, fully revoked from every role including `service_role`; the widened `campaigns_active_window_idx` (now covering `paused`, which 0012's original predicate excluded); the `cron.job` row's exact schedule (`*/5 * * * *`) and command; no `points_transactions` row written by any of it; and the service_role-only grant |
 | `rpc_balance_check_smoke.sql` | Task 2.2 `integrity.balance_check` (0056, review-fixed three times by 0057, 0058 and 0059), 73 assertions: the three-layer fence on `balance_check_findings` including its pair-level cleanup (0058 replaced 0057's composite FK with an `after delete` trigger - review fix I7, the FK's implicit `FOR KEY SHARE` lock conflicted with every money-path writer's `FOR UPDATE` - then 0059 made that trigger function `security definer`, review fix C2: plain plpgsql meant its internal DELETE ran with the INVOKER's privileges, and `service_role` has DELETE revoked on `balance_check_findings`, so `service_role` could not delete ANY `business_customers` row at all until this fix); the I-A grant matrix across all six callables, including two new in 0059, `private.balance_check_is_priority` (I10, the one shared tier-0 predicate implementation) and `private.balance_check_findings_pair_cleanup` itself (M17); a genuinely drifted pair (a cached balance set to 650 against a 500 ledger sum, constructed directly since no real writer produces this) correctly flagged `drifted=true` with both numbers recorded, alongside clean pairs including a SIX-type ledger (review fix M3 added `reversal`) and a consumer with real activity at TWO businesses (review fix I2 - the ledger-sum business-scoping fixture 0056 shipped without, red-verified live against a reintroduced business_id-less mutant); the drifted pair's cached balance and the ledger's row count both UNCHANGED after the check (detection only, never auto-corrected); a STRUCTURAL pin (via `pg_get_functiondef`, comments stripped before checking for a statement-boundary `;` - review fix C1) that the candidate read and the upsert are one unbroken statement, that `p_limit` is clamped before reaching any `limit` clause (review fix M5), that the live body actually contains the word "tier" and calls both `balance_check_priority_count` and `balance_check_coverage_days` by name (the 0058 "defense"), PLUS an exact `balance_check body revision: 0059` marker pin (review fix I9, closing the gap that a future body satisfying only the older markers would still pass); `p_limit=0` and `p_limit=null` as no-ops; GENUINE ROTATION under a TIGHT `p_limit=1` across four successive calls; the `private.balance_check_coverage_days` tripwire primitive proven budget-corrected (review fix I5 - at `p_limit=200`, exactly `points.expiry_sweep`'s own live cron limit, the effective rotation budget collapses to a floor of 1, so `coverage_days` equals the full pair count rather than the naive `ceil(n/200)`); a fresh clawback out-ranking a never-checked bystander pair for the next `p_limit=1` slot, with `private.balance_check_priority_count` asserted directly both before (1) and after (0) that run resolves it (review fix I3b/I6); `balance_check_summary().drifted_count` asserted as a baseline-plus-one delta rather than a hardcoded literal (review fix I8); a pair-level cleanup proof (delete `business_customers`, the finding disappears with it); a SECOND, SERVICE_ROLE-SPECIFIC cleanup proof (review fix C2) - the only assertion in the file that runs under `set local role service_role` rather than as `postgres`, `lives_ok`-asserting the identical delete no longer errors; and the `cron.job` row's exact schedule (`40 18 * * *`) and command |
 | `rls_job_alert_state_smoke.sql` | `job_alert_state` (task 2.5, filed as 0060 / applied live as 0058_job_health_alerts - see that file's own ledger-name note), 13 assertions: the service-role-only fence (no policies at all, privileges revoked underneath), the service_role privilege split - the opposite shape from `jobs` (0029): DELETE stays and TRUNCATE does not, because the checker's own recovery path IS a per-row delete rather than never deleting at all - the no-truncate statement trigger, and the one shape check (a blank `jobname` is rejected) |
+| `rls_avatars_storage_smoke.sql` | the `avatars` bucket and its owner-prefix fence on `storage.objects` (0064), 31 assertions: the bucket settings pinned individually (PUBLIC, 2MB, exactly jpeg/png/webp) so flipping any of them is a visible change rather than a silent one; exactly four policies, one per verb, all `{authenticated}` and never `anon`; the fence for all four verbs in BOTH directions (own segment allowed, another consumer's segment denied) plus the malformed-path cases it must fail closed on - a bare bucket-root filename (`foldername('bare.jpg')` is `{}`, so `[1]` is NULL and a NULL predicate is not true), a nested `{uid}/a/b.jpg` refused by the one-level depth pin, and a segment that merely STARTS WITH the caller's uid refused because the comparison is equality and not a prefix match; the UPDATE `with check` half proven separately from its `using` half (a consumer cannot rename their OWN object into somebody else's prefix); and TWO project facts that would otherwise make the file lie - `storage.objects` carries a statement-level `protect_objects_delete` trigger that raises 42501 for EVERY role above RLS unless `storage.allow_delete_query` is set, asserted explicitly BEFORE that GUC goes on so the delete assertions after it are measuring the policy and not the trigger; and both client roles hold full table-level DML on `storage.objects` by Supabase default, asserted so every 42501 in the file reads as a policy refusing a row rather than a missing grant. The three STRUCTURAL pins on `pg_policies.qual` / `with_check` exist because of a measured gap: PostgreSQL applies the SELECT policy to rows an UPDATE or DELETE reads through its WHERE, so with the own-only SELECT policy in place a deliberately widened `using (bucket_id = 'avatars')` on the update or delete policy still touches zero rows and every behavioural assertion stays green - the predicate text is what catches it |
 | `rpc_job_health_terminal_failures_smoke.sql` | `public.sweep_job_terminal_failures` (0061, task 2.5 review-fix pass 2), 12 assertions: THE REGRESSION TEST for the bug the migration exists to close - a job whose only run in the window is in-flight (`status='running'`) reports zero terminal failures and zero terminal runs, unlike 0028's own `sweep_job_health.failures` (`status <> 'succeeded'`), which would count it as one; a mixed fixture (one succeeded run, two genuinely failed runs 30 minutes apart, one in-flight) proving `terminal_runs` excludes the in-flight row, `terminal_failures` counts only `status='failed'`, and the MOST RECENT failure's message wins over the older one; the `p_hours` window genuinely bounding the read (a 1-hour window sees the 30-minutes-ago failure but not the ones 2h/3h back); and the full I-A grant matrix (anon/authenticated denied both by `throws_ok` on a direct call and by literal `has_function_privilege` assertions, service_role allowed). Fixtures go through `cron.schedule()` for the job row (direct `INSERT` on `cron.job` is refused even to `postgres` - verified live, the table is owned by `supabase_admin`) and a direct `INSERT` with an explicit out-of-range `runid` for `cron.job_run_details` (directly insertable, but its `runid` sequence is not) |
 
 Each suite states the migration range it needs in its header. New suites take
@@ -201,6 +202,59 @@ Note that `file_size_limit` and `allowed_mime_types` are enforced by the Storage
 API, not by Postgres. The submit path re-checks the 10MB cap and magic-byte
 sniffs the content type server-side; the bucket settings are a second fence, not
 the only one.
+
+### `avatars` (0064_avatars_storage.sql)
+
+| property | value |
+|---|---|
+| `public` | `true` |
+| `file_size_limit` | `2097152` (2MB) |
+| `allowed_mime_types` | `image/jpeg`, `image/png`, `image/webp` |
+| path convention | `avatars/{user_id}/{uuid}.jpg` |
+
+Same mechanism as `receipts`: the object `name` inside the bucket is
+`{user_id}/{uuid}.jpg`, so the first path segment is the owning consumer's auth
+uid, and every policy fences on `(storage.foldername(name))[1] =
+(select auth.uid())::text`. `src/features/identity/avatar.ts` builds that name
+and `src/features/identity/avatar.test.ts` parses the predicates back out of the
+migration and asserts the two agree, so a drift between the path the app writes
+and the segment the policy reads fails a unit test rather than production.
+
+Four policies, one per verb, all `authenticated` only:
+
+- `avatars_objects_owner_insert` (INSERT) - own uid prefix, one level deep.
+- `avatars_objects_owner_select` (SELECT) - own objects only.
+- `avatars_objects_owner_update` (UPDATE) - own objects, and the `with check`
+  half stops a consumer renaming their own object into somebody else's prefix.
+- `avatars_objects_owner_delete` (DELETE) - own objects only.
+
+**Public, unlike `receipts`, and deliberately.** The tradeoff: public means the
+bytes are CDN-served to anyone holding the URL, in exchange for no
+`createSignedUrl` round trip on every render of every surface that shows a face,
+and a URL a CDN can actually cache. Private would put a signed-URL call on
+`/profile` (already `force-dynamic`) and on every future avatar surface, with a
+TTL that expires inside an open tab. What makes it defensible rather than merely
+convenient is that the bytes published are not the bytes the consumer picked:
+the server action re-encodes every upload through sharp
+(`src/features/identity/server/avatar-image.ts`) before it reaches the bucket,
+which strips the EXIF GPS tag a phone camera writes. Note also that public does
+NOT make the bucket enumerable - `list` reads `storage.objects` and is still
+gated by the SELECT policy, so the only avatars a stranger can fetch are the ones
+whose (uuid) URL they were given.
+
+**UPDATE and DELETE policies exist here, unlike `receipts`.** A receipt image is
+evidence and must never be swapped or removed; an avatar is meant to be replaced
+and removed, and a replace that could not delete the previous object would orphan
+a permanently-fetchable public copy of a face the consumer just took down.
+Replace is implemented as upload-new-uuid, point `profiles.avatar_url` at it,
+then delete the old object - in that order, so a failed cleanup leaves an orphan
+rather than a broken avatar.
+
+Note `storage.objects` carries storage's own statement-level
+`protect_objects_delete` trigger, which raises 42501 for every role - above RLS -
+unless the session GUC `storage.allow_delete_query` is `'true'`. The Storage API
+sets it; direct SQL does not. Any test of the DELETE policy has to set it too, or
+it is measuring the trigger.
 
 ## Scheduled jobs (pg_cron)
 
@@ -1216,6 +1270,21 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0058_balance_check_deployment_correction.sql | 20260806111225 | 0058_balance_check_deployment_correction |
 | 0059_balance_check_trigger_privilege_fix.sql | 20260806114840 | 0059_balance_check_trigger_privilege_fix |
 | 0061_job_health_terminal_failures.sql | 20260806120833 | 0061_job_health_terminal_failures |
+| 0064_avatars_storage.sql | (pending) | 0064_avatars_storage |
+
+Two files carry no row above and should get one when their live versions are
+known: `0062_feature_flags.sql` and `0063_find_auth_user_by_email.sql`. They
+were committed without a ledger entry; this is recorded rather than guessed,
+because inventing a version here is exactly how the 0047 out-of-band incident
+below became hard to reconstruct. `0064_avatars_storage.sql` is marked
+`(pending)` because T3.4a deliberately did not apply it: the file, its
+`supabase/tests/rls_avatars_storage_smoke.sql` suite and this ledger row were
+written first, and the coordinator applies it and verifies the deployed objects
+against `pg_policies` afterwards. What should be true live once it lands: one
+`storage.buckets` row `avatars` (`public = true`, `file_size_limit = 2097152`,
+`allowed_mime_types = {image/jpeg,image/png,image/webp}`) and exactly four
+`pg_policies` rows on `storage.objects` named `avatars_objects_owner_insert` /
+`_select` / `_update` / `_delete`, every one of them `{authenticated}` only.
 
 **Rows 0001-0035 are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`; rows 0036-0049 were applied later, and 0042-0049 on 2026-08-06.** The
 sentence below describes the replay only. It does NOT describe 0042-0049: one
