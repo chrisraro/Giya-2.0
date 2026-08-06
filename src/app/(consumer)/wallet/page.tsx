@@ -96,8 +96,22 @@ export default async function WalletPage() {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const [balances, ledger, receipts] = await Promise.all([
-    getMyBalances(),
+  const [balancesResult, ledger, receipts] = await Promise.all([
+    // getMyBalances() throws on a genuine query error (not just "no rows") -
+    // see its doc comment in repo.ts. Fail SOFT here rather than let that
+    // take the whole page down or, worse, silently degrade to `[]`: post-fix
+    // `[]` renders the SAME "No balances yet" empty state as a real failure
+    // would, and telling a consumer with a real balance that they have none
+    // is the single most alarming lie this app could tell - precisely the
+    // trust failure doc 03's loyalty research flags as what makes users call
+    // a program a scam. So the failure carries its own flag through to the
+    // render instead of being flattened into the empty case.
+    getMyBalances()
+      .then((balances) => ({ ok: true as const, balances }))
+      .catch((error: unknown) => {
+        console.error("[wallet] failed to load balances, showing the failure state instead of an empty one", error);
+        return { ok: false as const, balances: [] as BalanceDTO[] };
+      }),
     listMyLedger(),
     // Doc 36's wallet UX contract: the pending "Processing receipt" entry.
     // Read from the database rather than mirrored from the submit response,
@@ -109,9 +123,13 @@ export default async function WalletPage() {
       ? listMyReceipts({ userId: user.id, limit: WALLET_RECEIPT_LIMIT, cursor: null })
       : Promise.resolve({ rows: [] }),
   ]);
+  const balances = balancesResult.balances;
+  const balancesFailed = !balancesResult.ok;
   // LedgerEntryDTO only carries businessId; balances (from every business
   // the caller has a business_customers row with) is the cheapest source
-  // for the display name without a second per-row lookup.
+  // for the display name without a second per-row lookup. Empty on a failed
+  // read too - a missing display name degrades gracefully (see its render
+  // site below), unlike fabricating a balance ever would.
   const businessNameById = new Map(balances.map((balance) => [balance.businessId, balance.businessName]));
 
   return (
@@ -119,7 +137,17 @@ export default async function WalletPage() {
       <h1 className="text-headline-m text-on-surface">Wallet</h1>
 
       <section className="mt-6 space-y-2">
-        {balances.length === 0 ? (
+        {balancesFailed ? (
+          // Deliberately distinct from "No balances yet" below: that state
+          // means the read succeeded and genuinely found nothing, this one
+          // means the read never completed. Rendering the same screen for
+          // both would tell a consumer with a real balance that it is gone.
+          <EmptyState
+            icon="error"
+            title="We couldn't load your balances"
+            body="Your points are safe - pull to refresh or try again in a moment."
+          />
+        ) : balances.length === 0 ? (
           <EmptyState
             icon="account_balance_wallet"
             title="No balances yet"
