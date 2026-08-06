@@ -941,7 +941,7 @@ select throws_ok(
   'validate_redemption of a claim the consumer already cancelled raises CLAIM_ALREADY_CANCELLED');
 reset role;
 
--- ---------------------------------------------------------------- grants (0050)
+-- ---------------------------------------------------------------- grants (0050-0051)
 -- 69. consumer-facing, matching claim_reward's own grant shape: anon may not
 --     call it, authenticated may (the row lock + ownership check inside the
 --     function scope WHICH claim, not who may attempt)
@@ -953,11 +953,17 @@ select ok(
   has_function_privilege('authenticated', 'public.cancel_claim(uuid)', 'EXECUTE'),
   'authenticated can execute cancel_claim');
 
--- M6 (review fix): the grant matrix, for completeness - service_role is not
--- explicitly granted execute on cancel_claim anywhere, so the implicit
--- PUBLIC grant revoke above means service_role has none either. Pinned so a
--- future migration cannot silently widen this consumer-only entry point to
--- the service role without the suite noticing.
+-- M6 (review fix): the grant matrix, for completeness - and it found a real
+-- gap rather than confirming an assumption. The assumption WAS that
+-- `revoke ... from public, anon` transitively covers service_role. It does
+-- not: Supabase grants EXECUTE on new public-schema functions to service_role
+-- via PROJECT-LEVEL DEFAULT PRIVILEGES, independently of any revoke in the
+-- migration, so cancel_claim shipped in 0050 with service_role EXECUTE. What
+-- makes this assertion pass is the EXPLICIT `revoke ... from service_role` in
+-- 0051 - not a side effect of the revoke above. Do not remove that revoke
+-- believing it redundant; removing it fails this test, which is the point.
+-- A controller sweep found the same default-privilege gap still open on
+-- claim_reward, validate_redemption and public.register_business.
 select ok(
   not has_function_privilege('service_role', 'public.cancel_claim(uuid)', 'EXECUTE'),
   'service_role cannot execute cancel_claim (consumer-only entry point, not a system job)');

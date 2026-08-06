@@ -90,6 +90,14 @@ export function nextPhaseForStatus(current: Phase, status: string): Phase {
   if (current === "redeemed" || current === "cancelled") return current;
   if (status === "redeemed") return "redeemed";
   if (status === "cancelled") return "cancelled";
+  // N4 (review): 'expired' is deliberately NOT terminal here, and that is a
+  // decision rather than an omission. The claim-expiry sweep can flip a row
+  // claimed -> expired while this screen is open, but by then the token's own
+  // 5-minute TTL has long since driven the phase to 'code-expired', which
+  // already tells the truth; and `canCancel` reads `claim.status` directly,
+  // so the cancel affordance disappears regardless. Adding it here would
+  // change what a customer sees mid-countdown for no gain. Revisit if the
+  // token TTL ever exceeds the claim window.
   return current;
 }
 
@@ -310,9 +318,19 @@ export function RedemptionQr({ claim }: RedemptionQrProps) {
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
     function observe(status: string | undefined) {
-      if (settled || (status !== "redeemed" && status !== "cancelled")) return;
-      settled = true;
-      setPhase(status);
+      if (settled || status === undefined) return;
+      // N3 (review): route through the same pure decision the prop-sync path
+      // uses, rather than re-deriving a subset of it here. The two were
+      // behaviourally equivalent, but three comments claimed a single source
+      // of truth that did not exist - which is exactly how they drift the
+      // next time a terminal status is added.
+      let observed = false;
+      setPhase((current) => {
+        const next = nextPhaseForStatus(current, status);
+        observed = next !== current;
+        return next;
+      });
+      if (observed) settled = true;
     }
 
     function startPolling() {
