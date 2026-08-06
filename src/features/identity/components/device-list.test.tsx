@@ -43,6 +43,16 @@ function renderList(devices = DEVICES) {
  * parts taken out. `textContent` alone would count the `sr-only` span and let a
  * screen-reader-only warning pass as a visible one, which is the exact defect
  * these tests exist to catch.
+ *
+ * LIMIT, stated rather than hidden: hidden-ness is detected by CLASS NAME. That
+ * is correct for this component under jsdom, which applies no CSS and where
+ * `.sr-only` is the codebase's one hiding convention - but it is not a real
+ * visibility check. Text hidden by `hidden`, `aria-hidden`, `display: none` in
+ * an inline style, or a differently-named utility class would read as VISIBLE
+ * here and could satisfy the visible-warning assertion while a sighted person
+ * saw nothing. If another hiding mechanism ever appears in this component, this
+ * helper has to learn about it; a genuine computed-style check is not available
+ * in jsdom without a CSS engine.
  */
 function visibleLabelOf(control: HTMLElement): string {
   const clone = control.cloneNode(true) as HTMLElement;
@@ -87,6 +97,43 @@ function expectNoOverclaim(text: string): void {
   for (const claim of OVERCLAIMS) {
     expect(text).not.toMatch(claim);
   }
+}
+
+// AND THE ALLOWLIST, WHICH IS THE LAYER THAT ACTUALLY CLOSES THIS.
+//
+// The denylist above is incomplete by construction - a review proved it by
+// writing three overclaims in wordings it does not enumerate ("also ends the
+// session on that browser immediately", "and on your other browsers", "That
+// browser has been logged off already") and all 343 tests stayed green. A
+// denylist over prose can always be walked around.
+//
+// The prose on this screen is FIXED, not composed, so it can be pinned exactly.
+// Any sentence added, removed or reworded fails these assertions - and that
+// failure is the gate: it forces a person to read the new claim and decide
+// whether the product can keep it before it ships. Same shape as this repo's
+// SQL agreement tests, which pin the migration's own text rather than a pattern
+// that might match it.
+//
+// The denylist stays underneath, for the parts that ARE composed: the device
+// summaries, and any message an action returns at runtime.
+
+/** The standing note under the list, exactly. */
+const REMOVAL_NOTE =
+  "Removing a device takes it off this list. " +
+  "It does not sign that browser out on its own, so it stays signed in until its session " +
+  "expires or somebody signs out on it. " +
+  "Removing the device you are using now signs you out here. " +
+  "If you think someone else is using your account, change your password.";
+
+/** The sentence a failed revoke shows, exactly. */
+const REMOVE_FAILED_SENTENCE = "We could not remove that device just now. Please try again.";
+
+/** The two remove-button labels, exactly. */
+const CURRENT_BUTTON_LABEL = "Remove and sign out";
+const OTHER_BUTTON_LABEL = "Remove";
+
+function normalize(text: string | null | undefined): string {
+  return (text ?? "").replace(/\s+/g, " ").trim();
 }
 
 beforeEach(() => {
@@ -208,6 +255,39 @@ describe("the honesty of the copy", () => {
     const { container } = renderList();
 
     expect(container.textContent).toMatch(/does not sign that browser out/i);
+  });
+
+  it("CRITICAL: the standing note is EXACTLY this, sentence for sentence", async () => {
+    // The claim-complete assertion. A denylist cannot enumerate every way to
+    // say "we ended that session"; an exact pin over fixed prose does not have
+    // to - anything added or reworded fails here, and a person then has to read
+    // it. All three sentences the review slipped past the denylist die on this
+    // one line.
+    const { container } = renderList();
+
+    expect(normalize(container.querySelector("#device-removal-note")?.textContent)).toBe(
+      REMOVAL_NOTE,
+    );
+  });
+
+  it("CRITICAL: the failed-revoke sentence is EXACTLY this", async () => {
+    mocks.revokeDevice.mockResolvedValue({ ok: false, message: DEVICE_REMOVE_FAILED });
+    renderList();
+
+    fireEvent.click(removeButtonFor("Safari on iPhone"));
+
+    expect(normalize((await screen.findByRole("alert")).textContent)).toBe(
+      REMOVE_FAILED_SENTENCE,
+    );
+  });
+
+  it("CRITICAL: the two remove-button labels are EXACTLY these", async () => {
+    // The current row's label is the other piece of fixed prose that carries a
+    // claim about what pressing it does.
+    renderList();
+
+    expect(visibleLabelOf(removeButtonFor("Chrome on Windows"))).toBe(CURRENT_BUTTON_LABEL);
+    expect(visibleLabelOf(removeButtonFor("Safari on iPhone"))).toBe(OTHER_BUTTON_LABEL);
   });
 
   it("CRITICAL: qualifies that disclaimer for the one row it is false about", async () => {

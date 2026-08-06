@@ -153,8 +153,16 @@ export function DeviceList({ devices: initial }: DeviceListProps) {
           unqualified it is T3.2's Critical inverted: there the product claimed
           a control it did not have; here it would disclaim a consequence it
           does have, and the surprise sign-out lands on somebody who has just
-          read that nothing would happen. */}
-      <p className="text-body-s text-on-surface-variant">
+          read that nothing would happen.
+
+          THE `id` IS LOAD-BEARING FOR A TEST. device-list.test.tsx pins this
+          paragraph's full text against an exact literal, because a denylist of
+          forbidden phrasings is walk-around-able and this prose is fixed rather
+          than composed. If you change a word here, that test fails - and it is
+          meant to: somebody has to read the new sentence and decide whether the
+          product can keep the promise it makes. Do not "fix" it by loosening
+          the assertion. */}
+      <p id="device-removal-note" className="text-body-s text-on-surface-variant">
         Removing a device takes it off this list. It does not sign that browser out on its own, so
         it stays signed in until its session expires or somebody signs out on it. Removing the
         device you are using now signs you out here. If you think someone else is using your
