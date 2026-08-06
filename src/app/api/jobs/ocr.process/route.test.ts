@@ -43,6 +43,12 @@ vi.mock("@/lib/queue/claim", () => ({
   finishJob: (...args: unknown[]) => finishJob(...(args as [])),
 }));
 
+const heartbeatStop = vi.fn();
+const startHeartbeat = vi.fn();
+vi.mock("@/lib/queue/heartbeat", () => ({
+  startHeartbeat: (args: unknown) => startHeartbeat(args),
+}));
+
 const runOcrProcess = vi.fn();
 vi.mock("@/workers/receipts/ocr", () => ({
   runOcrProcess: (...args: unknown[]) => runOcrProcess(...(args as [])),
@@ -113,6 +119,7 @@ beforeEach(() => {
     },
   });
   runOcrProcess.mockResolvedValue({ kind: "terminal", status: "approved" });
+  startHeartbeat.mockReturnValue({ stop: heartbeatStop });
   vi.spyOn(console, "info").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -333,6 +340,58 @@ describe("retryable outcomes ask for another delivery", () => {
     expect(claimJob).not.toHaveBeenCalled();
     expect(runOcrProcess).not.toHaveBeenCalled();
   });
+});
+
+describe("the heartbeat", () => {
+  // t2-6: a claimed job must refresh heartbeat_at for exactly the window the
+  // handler is actually running, so a stalled worker can be told apart from a
+  // slow one - and never any longer than that.
+  it("starts only after the job is claimed, with this invocation's own ownership predicate", async () => {
+    await post(VALID_BODY, sign(VALID_BODY));
+
+    expect(startHeartbeat).toHaveBeenCalledTimes(1);
+    expect(startHeartbeat).toHaveBeenCalledWith(
+      expect.objectContaining({ supabase: serviceClient, jobId: JOB_ID, attempts: 1 }),
+    );
+    // Started strictly after claimJob resolved and before the pipeline ran -
+    // an interval covering work that has not started yet would tick against
+    // nothing, and one started after the pipeline returns would miss the
+    // whole window it exists to cover.
+    const claimOrder = claimJob.mock.invocationCallOrder[0];
+    const startOrder = startHeartbeat.mock.invocationCallOrder[0];
+    const runOrder = runOcrProcess.mock.invocationCallOrder[0];
+    expect(claimOrder).toBeLessThan(startOrder as number);
+    expect(startOrder).toBeLessThan(runOrder as number);
+  });
+
+  it("stops after the pipeline succeeds", async () => {
+    await post(VALID_BODY, sign(VALID_BODY));
+    expect(heartbeatStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops after a retryable outcome", async () => {
+    runOcrProcess.mockResolvedValue({ kind: "retryable", status: "processing" });
+    await post(VALID_BODY, sign(VALID_BODY));
+    expect(heartbeatStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops even when the handler throws", async () => {
+    runOcrProcess.mockRejectedValue(new Error("boom"));
+    await post(VALID_BODY, sign(VALID_BODY));
+    expect(heartbeatStop).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["done", "held", "exhausted", "missing"] as const)(
+    "never starts when the claim result is '%s' - there is no handler running to heartbeat for",
+    async (status) => {
+      claimJob.mockResolvedValue(
+        status === "done" ? { status, jobStatus: "succeeded" } : { status },
+      );
+      await post(VALID_BODY, sign(VALID_BODY));
+      expect(startHeartbeat).not.toHaveBeenCalled();
+      expect(heartbeatStop).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("duplicate delivery", () => {

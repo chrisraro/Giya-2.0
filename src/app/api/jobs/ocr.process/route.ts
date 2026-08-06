@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { processReceipt } from "@/features/receipts/server/process";
 import { claimJob, finishJob } from "@/lib/queue/claim";
+import { startHeartbeat } from "@/lib/queue/heartbeat";
 import { queuePath } from "@/lib/queue/queues";
 import { verifyQStashRequest } from "@/lib/queue/verify";
 import { createServiceRoleClient } from "@/lib/supabase/service";
@@ -198,6 +199,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   // ---- 4. work + 5. outcome ----------------------------------------------
+  //
+  // `ocr.process`'s maxDuration (120s) is doc 39's own trigger for a heartbeat
+  // ("required for any worker with maxDuration > 60"): a healthy 90-second OCR
+  // call is otherwise indistinguishable from a worker that died at second 3
+  // until claim.ts's full 2x-maxDuration reclaim window has passed. Started
+  // only now, after the claim, so its ownership predicate has the `attempts`
+  // value THIS invocation actually won; stopped from `finally` so it never
+  // outlives the handler - a heartbeat written after the job settles would
+  // re-establish liveness for a job nobody is running, which doc 39 and the
+  // brief for this task both call worse than no heartbeat at all.
+  const heartbeat = startHeartbeat({ supabase, jobId, attempts: claim.job.attempts });
   try {
     const result = await runOcrProcess(payload.data, { supabase, processReceipt });
 
@@ -241,6 +253,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     console.error(`${LOG_PREFIX} unexpected failure running job ${jobId}`, error);
     await finishJob(supabase, jobId, { kind: "failed", error: "unexpected worker failure" });
     return new NextResponse(null, { status: 503 });
+  } finally {
+    // Every exit above - each `return` in the switch, and the catch above -
+    // runs this first. `stop()` is idempotent and safe even if the heartbeat
+    // already stopped itself after losing its lease.
+    heartbeat.stop();
   }
 }
 
