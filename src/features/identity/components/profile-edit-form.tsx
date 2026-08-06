@@ -15,7 +15,7 @@ import {
 } from "../actions";
 import { AVATAR_ACCEPTED_MIME_TYPES, AVATAR_MAX_UPLOAD_BYTES, oversizePhotoMessage } from "../avatar";
 import { initialsFrom } from "../display-name";
-import { GENERIC_FAILURE } from "../messages";
+import { GENERIC_FAILURE, reportThrown } from "../messages";
 import { DISPLAY_NAME_MAX_LENGTH, profileEditSchema } from "../profile-schema";
 import { CityPicker, useCityPicker } from "./city-picker";
 
@@ -46,24 +46,8 @@ import { CityPicker, useCityPicker } from "./city-picker";
 // the busy flag was never cleared, and the screen sat there with every control
 // disabled and nothing written on it.
 
-/**
- * Log the thrown value, return the consumer's sentence.
- *
- * The mirror of `infrastructureFailure` in actions.ts, and it exists because
- * that fix was half-applied: RETURNED database and storage errors were mapped to
- * copy while THROWN ones went through `toErrorMessage` and rendered the
- * framework's own words - "Body exceeded 1 MB limit", "Failed to fetch",
- * "ECONNRESET". Same slice, same class of failure, two different policies.
- *
- * A throw is infrastructure by definition. Nothing that reaches a catch here is
- * a choice the consumer made and could change, so there is nothing for a
- * specific message to tell them. The detail goes to the console, where a
- * developer with the session open is the one who can act on it.
- */
-function reportThrown(scope: string, thrown: unknown): string {
-  console.error(`[identity] ${scope}`, thrown);
-  return GENERIC_FAILURE;
-}
+// `reportThrown` moved to messages.ts when the consent settings island needed
+// the same policy. One copy, one policy: see its docstring there.
 
 export interface ProfileEditFormProps {
   readonly displayName: string;
@@ -87,8 +71,6 @@ export function ProfileEditForm({
   const [saved, setSaved] = React.useState(false);
   const [savingProfile, setSavingProfile] = React.useState(false);
   const [busyWithPhoto, setBusyWithPhoto] = React.useState(false);
-
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   // This form never unmounts the picker, so the placement is not load-bearing
   // here the way it is in the onboarding wizard - but the hook is where the
@@ -247,8 +229,9 @@ export function ProfileEditForm({
               aria-disabled={busyWithPhoto || undefined}
             >
               {avatarUrl ? "Change photo" : "Add a photo"}
+              {/* No ref: the handler resets the input through `event.target`,
+                  so nothing outside the change event needs a handle on it. */}
               <input
-                ref={fileInputRef}
                 type="file"
                 name="avatar"
                 accept={AVATAR_ACCEPTED_MIME_TYPES.join(",")}

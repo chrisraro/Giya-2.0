@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { registerDevice } from "@/features/identity/server/devices";
 import { createClient } from "@/lib/supabase/server";
 import { getSafeRedirect } from "@/lib/auth/safe-redirect";
 
@@ -45,6 +46,25 @@ export async function GET(request: NextRequest) {
     const supabase = await createClient();
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (!error) {
+      // A session now exists, so this browser is a device. `user_devices` had
+      // no writer anywhere in the app until this slice; this is the PKCE and
+      // OAuth half of "when a session is established" (the other is the
+      // password form on /login, which registers through a server action
+      // because it runs in the browser).
+      //
+      // ON THE SUCCESS BRANCH ONLY. A failed exchange means no session, and a
+      // device row written then would be attributed to whoever was signed in
+      // before.
+      //
+      // The catch keeps a device write from turning a WORKING sign-in into
+      // "that link expired or was already used", which is what the tail of this
+      // function would otherwise tell them. registerDevice already swallows its
+      // own database failures; this is for the ones it cannot.
+      try {
+        await registerDevice();
+      } catch (thrown) {
+        console.error("[identity] device registration threw after code exchange", thrown);
+      }
       return NextResponse.redirect(`${origin}${next}`);
     }
   }

@@ -8,12 +8,22 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-const mocks = vi.hoisted(() => ({ exchangeCodeForSession: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  exchangeCodeForSession: vi.fn(),
+  registerDevice: vi.fn(),
+}));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: { exchangeCodeForSession: mocks.exchangeCodeForSession },
   }),
+}));
+
+// The device writer's own SQL and identity rule live in
+// src/features/identity/server/devices.test.ts. Here it is a seam: what this
+// route owns is WHETHER it is called, and on which branch.
+vi.mock("@/features/identity/server/devices", () => ({
+  registerDevice: mocks.registerDevice,
 }));
 
 const { GET } = await import("./route");
@@ -85,5 +95,45 @@ describe("the dead-handshake path", () => {
     const url = await callback("?code=stale");
 
     expect(url.searchParams.get("error")).toBe("confirm");
+  });
+});
+
+// `public.user_devices` had no writer anywhere in src/. A device only exists
+// once a session does, and this route is one of the two places a session is
+// established (the other is the password form on /login).
+describe("device registration", () => {
+  it("CRITICAL: registers the device once the exchange has produced a session", async () => {
+    await callback("?code=abc");
+
+    expect(mocks.registerDevice).toHaveBeenCalledTimes(1);
+  });
+
+  it("CRITICAL: registers nothing when the exchange failed", async () => {
+    // No session, no device. Writing one here would attribute a row to whoever
+    // happened to be signed in before.
+    mocks.exchangeCodeForSession.mockResolvedValue({ error: { message: "expired" } });
+
+    await callback("?code=stale");
+
+    expect(mocks.registerDevice).not.toHaveBeenCalled();
+  });
+
+  it("CRITICAL: registers nothing on the OAuth-cancelled path", async () => {
+    await callback("?error=access_denied");
+
+    expect(mocks.registerDevice).not.toHaveBeenCalled();
+  });
+
+  it("still lands the consumer where they were going when registration throws", async () => {
+    // Whatever happened to the device row, the exchange succeeded and they are
+    // signed in. Bouncing them to /login with "that link expired" would be a
+    // lie about the thing that actually worked.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.registerDevice.mockRejectedValue(new Error("ECONNRESET"));
+
+    const url = await callback("?code=abc&next=%2Fwallet");
+
+    expect(url.pathname).toBe("/wallet");
+    consoleError.mockRestore();
   });
 });

@@ -9,6 +9,7 @@ import { SocialButtons } from "@/components/auth/social-buttons";
 import { CheckEmail } from "@/components/auth/check-email";
 import { PasswordField } from "@/components/auth/password-field";
 import { Captcha, CAPTCHA_ENABLED } from "@/components/auth/captcha";
+import { registerCurrentDevice } from "@/features/identity/actions";
 import { TextField } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -169,45 +170,69 @@ export default function SignupPage() {
 
     setFormError("");
     setSubmitting(true);
-    const supabase = createClient();
-    const next = destinationFor(role);
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: { full_name: name, intended_role: role },
-        emailRedirectTo: `${window.location.origin}/auth/callback?next=${next}`,
-        ...(captchaToken && { captchaToken }),
-      },
-    });
-    setSubmitting(false);
-    // Each hCaptcha token is single-use: reset the widget after every submit
-    // (success or failure) so a retry gets a fresh token.
-    captchaRef.current?.resetCaptcha();
-    setCaptchaToken("");
 
-    if (error) {
-      // Live E2E showed a non-Error rejection rendering as "{}"; route
-      // through toErrorMessage so this always ends up a real string.
-      const message = toErrorMessage(error);
-      // Supabase's raw message ("User already registered") confirms to an
-      // attacker that a given email has an account (an enumeration leak),
-      // so this one case gets a neutral, dual-purpose copy instead of the
-      // pass-through below.
-      setFormError(
-        /already registered/i.test(message)
-          ? "If that email is new to Giya, we just sent it a confirmation link. If you already have an account, sign in instead."
-          : message,
-      );
-      return;
+    // try/finally with `setSubmitting(false)` as the finally, for the same
+    // reason as the login page: a server-action round trip now sits between the
+    // Supabase call and the navigation, and clearing the flag before it would
+    // re-enable "Create account" over a page that has not moved. A second tap
+    // there is a second signUp AND a second device registration.
+    try {
+      const supabase = createClient();
+      const next = destinationFor(role);
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { full_name: name, intended_role: role },
+          emailRedirectTo: `${window.location.origin}/auth/callback?next=${next}`,
+          ...(captchaToken && { captchaToken }),
+        },
+      });
+      // Each hCaptcha token is single-use: reset the widget after every submit
+      // (success or failure) so a retry gets a fresh token.
+      captchaRef.current?.resetCaptcha();
+      setCaptchaToken("");
+
+      if (error) {
+        // Live E2E showed a non-Error rejection rendering as "{}"; route
+        // through toErrorMessage so this always ends up a real string.
+        const message = toErrorMessage(error);
+        // Supabase's raw message ("User already registered") confirms to an
+        // attacker that a given email has an account (an enumeration leak),
+        // so this one case gets a neutral, dual-purpose copy instead of the
+        // pass-through below.
+        setFormError(
+          /already registered/i.test(message)
+            ? "If that email is new to Giya, we just sent it a confirmation link. If you already have an account, sign in instead."
+            : message,
+        );
+        return;
+      }
+
+      if (data.user && !data.session) {
+        // No session yet - Supabase has email confirmation on and is waiting
+        // for the link. Nothing to register: this browser is not signed in, and
+        // the device row is written when the link lands on /auth/callback.
+        setConfirmationEmail(email);
+        return;
+      }
+
+      // A session DID come back, which is what Supabase returns when email
+      // confirmation is off. That is a real signed-in browser, so it is a
+      // device - and before this it was the one session-establishing path in
+      // the app that registered nothing. Same shape as /login: awaited so the
+      // navigation cannot cancel it, and caught so a failed device write cannot
+      // strand somebody on the signup form with a working account.
+      try {
+        await registerCurrentDevice();
+      } catch (thrown) {
+        console.error("[identity] device registration threw during sign-up", thrown);
+      }
+
+      router.push(next);
+    } finally {
+      setSubmitting(false);
     }
-
-    if (data.user && !data.session) {
-      setConfirmationEmail(email);
-      return;
-    }
-
-    router.push(next);
   }
 
   async function handleResend(resendCaptchaToken: string) {

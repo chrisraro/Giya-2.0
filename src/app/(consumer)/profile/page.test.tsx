@@ -94,10 +94,46 @@ describe("/profile notifications row", () => {
     expect(screen.getByText("4 unread notifications")).toBeInTheDocument();
   });
 
-  it("leaves the rows that genuinely have nowhere to go as plain rows", async () => {
+});
+
+// The LAST dead affordance on this page. "Devices" rendered as
+// `{ icon: "devices", label: "Devices", href: undefined }`: a row with a chevron
+// pointing nowhere, next to a "Preferences" screen that did not exist either
+// while 0021's four consent column grants sat unused.
+describe("/profile settings rows that used to go nowhere", () => {
+  it("CRITICAL: Devices is a real link now", async () => {
     await renderProfile();
 
-    expect(screen.queryByRole("link", { name: /Devices/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Devices/ })).toHaveAttribute(
+      "href",
+      "/profile/devices",
+    );
+  });
+
+  it("CRITICAL: Preferences reaches the consent screen", async () => {
+    // Without this row, /profile/settings exists and nobody can reach it - and
+    // the four consents stay as invisible as they were with no screen at all.
+    await renderProfile();
+
+    expect(screen.getByRole("link", { name: /Preferences/ })).toHaveAttribute(
+      "href",
+      "/profile/settings",
+    );
+  });
+
+  it("CRITICAL: no row renders a chevron that points nowhere", async () => {
+    // The property, not the instance: every row in the settings list is a link.
+    // A future row added without an href fails here rather than shipping as
+    // another dead affordance.
+    const { container } = render(await ProfilePage());
+
+    const chevrons = Array.from(container.querySelectorAll(".material-symbols-rounded")).filter(
+      (icon) => icon.textContent === "chevron_right",
+    );
+    expect(chevrons.length).toBeGreaterThan(0);
+    for (const chevron of chevrons) {
+      expect(chevron.closest("a")).not.toBeNull();
+    }
   });
 });
 

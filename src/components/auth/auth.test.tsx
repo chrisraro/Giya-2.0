@@ -26,6 +26,17 @@ vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({ auth: authMocks }),
 }));
 
+// The login page calls `registerCurrentDevice` after a successful sign-in - a
+// SERVER ACTION, so the real module graph behind it reaches `server-only`,
+// which throws on import from a client module. Next's bundler replaces a
+// "use server" import with a reference and never pulls that graph into the
+// client; vitest has no such directive, so the seam is mocked here instead.
+// What the action does is covered in src/features/identity/actions.test.ts, and
+// that it is called at all in src/app/(auth)/login/page.test.tsx.
+vi.mock("@/features/identity/actions", () => ({
+  registerCurrentDevice: vi.fn(async () => undefined),
+}));
+
 // Real `@/lib/env` throws at module-evaluation time unless the required
 // NEXT_PUBLIC_SUPABASE_* vars are set (see env.test.ts) - and now that
 // `@/components/auth/captcha` imports it directly, that import reaches the
