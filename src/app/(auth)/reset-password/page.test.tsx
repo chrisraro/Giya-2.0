@@ -7,15 +7,15 @@ import ResetPasswordPage from "./page";
 // /auth/confirm's explicit verifyOtp({ type: "recovery" }) check - not
 // merely that a session of any kind exists. The check itself now lives in
 // GET /auth/recovery-status (its own route.test.ts covers the actual
-// cookie logic); this page's only job is to ask it and render accordingly,
-// so its test mocks `fetch`, not any Supabase claims/session shape. An
-// earlier version of this gate inferred the answer from a session's `amr`
-// claim, which turned out to have no "recovery" value at all (every
-// email-OTP flow - recovery, invite, signup, magiclink - records as
-// `amr: "otp"`), so it was replaced outright rather than patched.
+// cookie logic); this page's only job is to ask it and render accordingly.
+//
+// The actual password update no longer happens client-side either: it POSTs
+// to /api/v1/auth/reset-password (its own route.test.ts covers the
+// authorization - the recovery cookie check and its clearing on success).
+// This page mocks `fetch` for both, keyed by URL, rather than mocking
+// Supabase's updateUser/claims/session shapes directly.
 
 const authMocks = vi.hoisted(() => ({
-  updateUser: vi.fn(),
   signOut: vi.fn(),
 }));
 
@@ -37,18 +37,31 @@ vi.mock("next-themes", () => ({
 
 const fetchMock = vi.fn();
 
+let recoveryVerified = true;
+let updateResponse: { ok: boolean; status: number; json: () => Promise<unknown> };
+
 function recoveryStatusResponds(verified: boolean) {
-  fetchMock.mockResolvedValue({
-    json: async () => ({ data: { verified } }),
-  });
+  recoveryVerified = verified;
+}
+
+function updatePasswordResponds(status: number, body: unknown) {
+  updateResponse = { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
 beforeEach(() => {
-  authMocks.updateUser.mockReset().mockResolvedValue({ data: {}, error: null });
   authMocks.signOut.mockReset().mockResolvedValue({ error: null });
-  fetchMock.mockReset();
+  recoveryVerified = true;
+  updatePasswordResponds(200, { data: { message: "Password updated." } });
+  fetchMock.mockReset().mockImplementation(async (url: string) => {
+    if (url === "/auth/recovery-status") {
+      return { json: async () => ({ data: { verified: recoveryVerified } }) };
+    }
+    if (url === "/api/v1/auth/reset-password") {
+      return updateResponse;
+    }
+    throw new Error(`Unexpected fetch call in test: ${url}`);
+  });
   vi.stubGlobal("fetch", fetchMock);
-  recoveryStatusResponds(true);
 });
 
 afterEach(() => {
@@ -86,7 +99,9 @@ describe("ResetPasswordPage - recovery gate", () => {
   });
 
   it("does not stay stuck on a blank screen when the recovery-status check fails outright", async () => {
-    fetchMock.mockRejectedValue(new Error("network down"));
+    fetchMock.mockImplementation(async () => {
+      throw new Error("network down");
+    });
     render(<ResetPasswordPage />);
 
     expect(
@@ -96,24 +111,35 @@ describe("ResetPasswordPage - recovery gate", () => {
 });
 
 describe("ResetPasswordPage - form", () => {
-  it("shows a validation error on empty submit and never calls updateUser", async () => {
+  it("shows a validation error on empty submit and never POSTs the reset", async () => {
     render(<ResetPasswordPage />);
     await screen.findByLabelText("New password");
 
     fireEvent.click(screen.getByRole("button", { name: "Update password" }));
 
     expect(screen.getByText("Password is required")).toBeInTheDocument();
-    expect(authMocks.updateUser).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/v1/auth/reset-password",
+      expect.anything(),
+    );
   });
 
-  it("updates the password, signs out the recovery session, and shows a confirmation with a sign-in link", async () => {
+  it("POSTs the new password, signs out the recovery session, and shows a confirmation with a sign-in link", async () => {
     render(<ResetPasswordPage />);
     await screen.findByLabelText("New password");
 
     fireEvent.change(screen.getByLabelText("New password"), { target: { value: "newSecret123" } });
     fireEvent.click(screen.getByRole("button", { name: "Update password" }));
 
-    await waitFor(() => expect(authMocks.updateUser).toHaveBeenCalledWith({ password: "newSecret123" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/v1/auth/reset-password",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ password: "newSecret123" }),
+        }),
+      ),
+    );
     await waitFor(() => expect(authMocks.signOut).toHaveBeenCalled());
 
     expect(await screen.findByText("Password updated")).toBeInTheDocument();
@@ -121,10 +147,9 @@ describe("ResetPasswordPage - form", () => {
     expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
   });
 
-  it("shows updateUser's error message inline and does not sign out or advance past the form", async () => {
-    authMocks.updateUser.mockResolvedValueOnce({
-      data: {},
-      error: { message: "Password should be at least 6 characters" },
+  it("shows the server's error message inline and does not sign out or advance past the form", async () => {
+    updatePasswordResponds(422, {
+      error: { code: "VALIDATION_FAILED", message: "Password should be at least 6 characters" },
     });
     render(<ResetPasswordPage />);
     await screen.findByLabelText("New password");
@@ -137,5 +162,22 @@ describe("ResetPasswordPage - form", () => {
     ).toBeInTheDocument();
     expect(authMocks.signOut).not.toHaveBeenCalled();
     expect(screen.getByLabelText("New password")).toBeInTheDocument();
+  });
+
+  it("shows a generic error and does not sign out when the reset POST itself rejects (network failure)", async () => {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === "/auth/recovery-status") {
+        return { json: async () => ({ data: { verified: true } }) };
+      }
+      throw new Error("network down");
+    });
+    render(<ResetPasswordPage />);
+    await screen.findByLabelText("New password");
+
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "newSecret123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Update password" }));
+
+    expect(await screen.findByText("Something went wrong. Please try again.")).toBeInTheDocument();
+    expect(authMocks.signOut).not.toHaveBeenCalled();
   });
 });

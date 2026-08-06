@@ -6,9 +6,10 @@ import { AuthCard } from "@/components/auth/auth-card";
 import { PasswordField } from "@/components/auth/password-field";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
-import { toErrorMessage } from "@/lib/auth/error-message";
 
 type Status = "checking" | "no-session" | "ready" | "done";
+
+const GENERIC_ERROR = "Something went wrong. Please try again.";
 
 export default function ResetPasswordPage() {
   const [status, setStatus] = React.useState<Status>("checking");
@@ -26,17 +27,42 @@ export default function ResetPasswordPage() {
     setPasswordError("");
     setFormError("");
     setSubmitting(true);
-    const supabase = createClient();
-    const { error } = await supabase.auth.updateUser({ password });
-    if (error) {
+
+    // updateUser() no longer runs client-side: it lives behind
+    // POST /api/v1/auth/reset-password, the only place that can actually
+    // enforce the recovery cookie as an authorization check (this page's
+    // own GET /auth/recovery-status call, above, only decides what to
+    // RENDER - it has no power to refuse a write). That route also clears
+    // the cookie once the update succeeds, which this page cannot do
+    // itself (it is httpOnly).
+    let response: Response | null = null;
+    try {
+      response = await fetch("/api/v1/auth/reset-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+    } catch {
+      // response stays null - handled by the !response branch below.
+    }
+
+    if (!response || !response.ok) {
       setSubmitting(false);
-      setFormError(toErrorMessage(error));
+      const message = response
+        ? await response
+            .json()
+            .then((json: { error?: { message?: string } }) => json?.error?.message)
+            .catch(() => undefined)
+        : undefined;
+      setFormError(message ?? GENERIC_ERROR);
       return;
     }
+
     // The recovery link's session did its one job. Sign it out and send the
     // user back through a normal login with the new password rather than
     // leaving them signed in on whatever device opened the emailed link -
     // that device is not guaranteed to be the account owner's.
+    const supabase = createClient();
     await supabase.auth.signOut();
     setSubmitting(false);
     setStatus("done");

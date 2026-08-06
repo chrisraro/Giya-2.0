@@ -2,7 +2,95 @@
 
 Status: COMPLETE.
 
-## Round 3: a new Critical, fixed by removing the guess entirely (read this first)
+## Round 4: I8 - the recovery marker was never cleared (read this first)
+
+Approved verdict from round 3: the recovery cookie is decisively stronger
+than the old `amr` gate, not a forgeable substitute for it, and neither
+gate was ever the authorization boundary for `updateUser` - the Supabase
+session was. What round 3 still got wrong: the marker's own lifecycle. It
+is minted by `/auth/confirm` and never cleared anywhere - `recovery-cookie.ts`
+chose a 10-minute TTL over delete-on-read (correctly: deleting on read
+would break a page reload), but that reasoning does not extend to
+delete-on-**success**, and round 3 never did that either. `signOut()`
+clears Supabase's own session cookies from the browser; it cannot touch a
+separate, app-owned, HttpOnly cookie.
+
+The exploitable path: complete a reset -> click the page's own "Sign in"
+link -> sign in normally with the new password (an ORDINARY session,
+`amr: "password"`, nothing recovery-flavored about it) -> navigate back to
+`/reset-password` -> the still-live marker answers `verified: true` ->
+the form renders -> `updateUser` succeeds. That is I4's exact property -
+an ordinary session reaching the reset form - reintroduced with a
+10-minute fuse instead of being unbounded.
+
+**Fix, per the coordinator's specific instruction (the better of two
+possible shapes): moved `updateUser` behind a new server route,
+`POST /api/v1/auth/reset-password`, that both CHECKS the marker and
+CLEARS it on success.** This promotes the cookie from a UI gate (which a
+client could always bypass by submitting the form directly, skipping the
+`recovery-status` check page.tsx uses only to decide what to render) to a
+genuine authorization control - the route refuses the write outright
+(403 FORBIDDEN) when the cookie is absent or not exactly `"1"`, independent
+of `requireSession`'s 401 (a signed-in user with no recovery cookie is
+403, not 401 - they ARE authenticated, just not authorized for this one
+action). `reset-password/page.tsx` no longer calls `supabase.auth.updateUser()`
+at all; it POSTs to this route and, only on success, calls `signOut()`
+client-side (which the server route structurally cannot do, since ending
+a Supabase session client-side is what the SDK's own `signOut()` is for)
+before showing the confirmation.
+
+`recovery-cookie.ts` gained `clearRecoveryCookieHeader()`, a raw
+`Set-Cookie: ...; Max-Age=0; ...` string (not a `NextResponse.cookies.delete()`
+call, since a `defineHandler`-built route only gets to add response headers
+through its `HandlerResult` contract, never a `NextResponse` object of its
+own) matching every attribute `/auth/confirm` set the cookie with, so the
+browser actually recognizes it as the same cookie to expire.
+
+**TDD red-first, and the specifically-requested named mutant for the
+clearing assertion:** dropping the `headers: { "Set-Cookie":
+clearRecoveryCookieHeader() }` return from the success path reintroduces
+I8 exactly - the "updates the password and clears the recovery cookie on
+success" test failed against it, precisely. Four more mutants, each
+isolated and reverted: clearing the cookie on `updateUser` FAILURE too
+(would break the documented retry-inside-the-window UX) -> caught by
+"does NOT clear the cookie when updateUser fails"; widening the cookie
+check from strict `=== "1"` to any truthy value -> caught by "403s when
+the cookie holds any value other than exactly '1'"; dropping the recovery
+cookie check (`authorize`) entirely -> caught by "403s when the recovery
+cookie is missing"; dropping `requireSession: true` -> caught by "401s
+when there is no session at all". Page-level: dropping the response-status
+gate (advance to "done" on any outcome) -> caught by two tests (the
+server-error-message test and the network-failure test); dropping the
+client-side `signOut()` call on success -> caught by the main success
+test.
+
+**Corrections noted, not silently absorbed:** the coordinator's own prior
+wording called this a "single-use marker cookie" - it is TTL-based, as
+`recovery-cookie.ts` has said explicitly since round 3; that correction is
+the coordinator's to make to the user, not mine to fix in code, so I'm
+only flagging that I saw it, not changing anything for it.
+
+**Minors, recorded per instruction, not fixed:**
+- `/auth/confirm` performs a state-changing, single-use action (`verifyOtp`)
+  on a GET request, so a corporate link-scanner that prefetches URLs before
+  a human clicks (Outlook Safe Links being the canonical example) will
+  consume the recovery token before the real user does, then admit the
+  SCANNER's request, not theirs - the user clicks a moment later and finds
+  the token already spent. This is inherent to the `token_hash` pattern
+  (the standard, documented Supabase approach still does this) and is the
+  identical exposure `/auth/callback`'s own PKCE `?code=` handling already
+  has for signup confirmation and OAuth - not something this round
+  introduced or could avoid within the token_hash design.
+- `secure: true` is unconditional on both cookies (`/auth/confirm`'s mint
+  and `reset-password`'s clear). Correct for production, fine on
+  `localhost` (browsers treat it as a secure context even over plain
+  HTTP), but would silently drop the cookie - not error, just never be
+  set or sent - on a non-localhost HTTP dev host (e.g. a LAN IP without
+  TLS). Not fixed because this app's actual deployment target is HTTPS
+  throughout; noting it so a future non-localhost HTTP dev setup doesn't
+  spend time confused about why the recovery flow silently fails there.
+
+## Round 3: a new Critical, fixed by removing the guess entirely
 
 Round 2's I4 fix gated `/reset-password` on the session's `amr` claim
 equaling `"recovery"`. The coordinator checked this against the actually
@@ -97,18 +185,24 @@ working, not a nice-to-have**: this repo has no `supabase/config.toml` and
 no `supabase/templates/` directory at all (checked directly - `find
 supabase -iname "*template*" -o -iname config.toml` returns nothing), so
 the Recovery email template is managed entirely in the Supabase Dashboard,
-outside any file this sandboxed environment can read or write. Right now
-that template almost certainly still uses the default `{{ .ConfirmationURL }}`
-(a PKCE code link), which `/auth/callback` would still technically accept
-- but `/auth/confirm`, the route this design actually needs traffic to
-reach, only understands `token_hash` + `type=recovery`. **Someone with
-Supabase Dashboard access must change the Recovery email template** (Auth
-> Email Templates > Reset Password) to link to
+outside any file this sandboxed environment can read or write. **Corrected
+per the coordinator - my first description of the un-migrated failure mode
+was wrong on two counts, and this is the accurate one**: `resetPasswordForEmail`'s
+`redirectTo: ${origin}/auth/confirm` does not change what link the DEFAULT
+template sends - it still uses `{{ .ConfirmationURL }}`, which routes the
+click through GoTrue's own `/auth/v1/verify` endpoint, which 302s to
+`/auth/confirm` with a PKCE `?code=` parameter, never a `token_hash`. So
+`/auth/confirm` receives a request with `tokenHash === null`, its `if
+(tokenHash && type === "recovery")` guard fails, and it falls straight
+through to its existing `/login?error=confirm` redirect - the same "That
+link expired or was already used" notice any other failure there shows.
+**Not a 404, and `/auth/callback` is never involved at all** - I said both
+of those and both were wrong. **Someone with Supabase Dashboard access must
+change the Recovery email template** (Auth > Email Templates > Reset
+Password) to link to
 `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=recovery`
-before this flow will work for a single real user. Until that happens,
-clicking a real recovery email link will 404 or hit whatever `/auth/callback`
-does with a `type=recovery`-shaped code it was never meant to receive.
-I have no dashboard access from this sandbox to make that change myself.
+before this flow will work for a single real user. I have no dashboard
+access from this sandbox to make that change myself.
 
 **On cross-device, two corrections to round 2's report, both from the
 coordinator and both right:**
