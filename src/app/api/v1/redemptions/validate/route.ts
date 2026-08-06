@@ -36,11 +36,16 @@ const STATUS_BY_CODE: Record<string, number> = {
   UNAUTHENTICATED: 401,
   FORBIDDEN: 403,
   CUSTOMER_BLACKLISTED: 403,
+  // Doc 30 section 2.8's registered code for a suspended tenant
+  // (src/lib/auth/suspension.ts's businessSuspension gate in
+  // rewards/server/service.ts's validateRedemption).
+  BUSINESS_SUSPENDED: 403,
   CLAIM_ALREADY_REDEEMED: 409,
   CLAIM_INVALID_STATE: 409,
   CLAIM_EXPIRED: 422,
   REDEMPTION_TOKEN_INVALID: 422,
   REDEMPTION_METHOD_INVALID: 422,
+  DEPENDENCY_UNAVAILABLE: 503,
 };
 
 export async function POST(request: NextRequest): Promise<NextResponse> {

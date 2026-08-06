@@ -7,6 +7,7 @@ import { z } from "zod";
 
 import { ApiError, API_ERROR_CODES } from "@/lib/api/errors";
 import type { ErrorDetail } from "@/lib/api/errors";
+import { ACCOUNT_SUSPENDED, readConsumerSuspension } from "@/lib/auth/suspension";
 import { enqueue, isQueueConfigured } from "@/lib/queue/publish";
 import type { EnqueueInput, EnqueueResult } from "@/lib/queue/publish";
 import { createServiceRoleClient } from "@/lib/supabase/service";
@@ -23,12 +24,16 @@ import type { CanonicalizeReceiptImage } from "./image";
 // is the last moment the property it guards can still be established:
 //
 //   1. path ownership   - the ONLY thing tying the object to this caller
-//   2. cooldown         - doc 37 ladder step 2, before any work is done
-//   3. download + sniff - the declared content type is attacker-controlled
-//   4. canonicalize     - strips EXIF/GPS; after this the bytes are ours
-//   5. sha256 + pHash   - over the CANONICAL bytes, which is what is stored
-//   6. insert           - service role, since receipts has no client insert
-//   7. dispatch         - enqueue `ocr.process` (doc 36 Stage 1 step 5), or
+//   2. suspension       - doc 37 ladder step 4 (full lockout), the MORE severe
+//                         of the two account-level gates, checked before the
+//                         less severe one so a suspended consumer's refusal
+//                         never depends on cooldown state
+//   3. cooldown         - doc 37 ladder step 2, before any work is done
+//   4. download + sniff - the declared content type is attacker-controlled
+//   5. canonicalize     - strips EXIF/GPS; after this the bytes are ours
+//   6. sha256 + pHash   - over the CANONICAL bytes, which is what is stored
+//   7. insert           - service role, since receipts has no client insert
+//   8. dispatch         - enqueue `ocr.process` (doc 36 Stage 1 step 5), or
 //                         process inline when there is no queue to enqueue to
 //
 // EVERY write here goes through the service-role client. That is not a
@@ -282,6 +287,42 @@ function assertOwnedImagePath(imagePath: string, userId: string): void {
 
   if (segments.length !== 2 || filename === undefined || !IMAGE_FILENAME_PATTERN.test(filename)) {
     throw invalidImage("That image path is not one this app issued. Please try again.");
+  }
+}
+
+/**
+ * Doc 30 section 2.8 + the brief's requirement 3: a suspended consumer must
+ * be refused by this money path directly, independent of the `/suspended`
+ * screen the consumer layout redirects to (that redirect is a courtesy; this
+ * is the control - a suspended consumer calling `POST /api/v1/receipts`
+ * straight past the UI must still be refused). Checked with the SAME
+ * service-role client `loadConsumer` below already uses, so this is one more
+ * query on that client, not a new session dependency.
+ *
+ * Fails CLOSED: `readConsumerSuspension` returning `"unknown"` (a read this
+ * function cannot trust) refuses the scan with 503, the SAME status
+ * `loadConsumer`'s own read failure already answers with - a suspension
+ * state this code cannot verify must not let an award-triggering scan
+ * through.
+ */
+async function assertNotSuspended(
+  supabase: SupabaseClient<Database>,
+  userId: string,
+): Promise<void> {
+  const status = await readConsumerSuspension(supabase, userId);
+  if (status === "suspended") {
+    throw new ApiError(
+      403,
+      ACCOUNT_SUSPENDED,
+      "Your account is suspended. Please contact support.",
+    );
+  }
+  if (status === "unknown") {
+    throw new ApiError(
+      503,
+      API_ERROR_CODES.DEPENDENCY_UNAVAILABLE,
+      "Receipt scanning is temporarily unavailable. Please try again shortly.",
+    );
   }
 }
 
@@ -646,6 +687,7 @@ export async function submitReceipt(
   const now = deps.now?.() ?? new Date();
 
   assertOwnedImagePath(body.image_path, userId);
+  await assertNotSuspended(supabase, userId);
 
   const consumer = await loadConsumer(supabase, userId);
   assertNotBlocked(consumer, now);

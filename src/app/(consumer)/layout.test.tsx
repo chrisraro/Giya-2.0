@@ -74,7 +74,7 @@ describe("consumer onboarding gate", () => {
   it("lets an onboarded consumer through", async () => {
     signedIn();
     mocks.maybeSingle.mockResolvedValue({
-      data: { onboarded_at: "2026-07-01T00:00:00.000Z" },
+      data: { onboarded_at: "2026-07-01T00:00:00.000Z", is_suspended: false },
       error: null,
     });
 
@@ -95,6 +95,38 @@ describe("consumer onboarding gate", () => {
     // onboarding is a preference collector, not a security boundary.
     signedIn();
     mocks.maybeSingle.mockResolvedValue({ data: null, error: { message: "boom" } });
+
+    await expect(renderLayout()).resolves.toBeDefined();
+  });
+});
+
+describe("consumer suspension gate (doc 30 section 2.8)", () => {
+  it("CRITICAL: redirects a signed-in consumer whose profile is suspended", async () => {
+    signedIn();
+    mocks.maybeSingle.mockResolvedValue({
+      data: { onboarded_at: "2026-07-01T00:00:00.000Z", is_suspended: true },
+      error: null,
+    });
+
+    await expect(renderLayout()).rejects.toThrow("NEXT_REDIRECT:/suspended?type=account");
+  });
+
+  it("checks suspension before onboarding, so a suspended-but-un-onboarded consumer lands on /suspended, not /onboarding", async () => {
+    signedIn();
+    mocks.maybeSingle.mockResolvedValue({
+      data: { onboarded_at: null, is_suspended: true },
+      error: null,
+    });
+
+    await expect(renderLayout()).rejects.toThrow("NEXT_REDIRECT:/suspended?type=account");
+  });
+
+  it("does not touch an unsuspended consumer (the negative case)", async () => {
+    signedIn();
+    mocks.maybeSingle.mockResolvedValue({
+      data: { onboarded_at: "2026-07-01T00:00:00.000Z", is_suspended: false },
+      error: null,
+    });
 
     await expect(renderLayout()).resolves.toBeDefined();
   });
