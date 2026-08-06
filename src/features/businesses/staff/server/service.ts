@@ -134,57 +134,65 @@ export type ResolveInviteeResult = ResolvedInvitee | { ok: false; message: strin
 
 /** The one column this module reads off `auth.users`. Deliberately narrow -
  * see `findExistingAuthUser`'s header for why only `id`/`email` are ever
- * selected. */
+ * returned, and 0063's migration header for why that narrowness is
+ * structural (the RPC's own return type), not merely a `.select()` string
+ * a caller could widen. */
 interface AuthUserRow {
   id: string;
   email: string | null;
 }
 
 /**
- * Looks an email up directly against `auth.users`, READ ONLY. Review fix
- * (round 3, I3/C2): the coordinator confirmed live that `auth.users` is
- * directly readable with the service-role client, which replaces what used
- * to be this module's only way to find an existing account
- * (`auth.admin.generateLink`, which - for an email with no account yet -
- * also CREATES one). A plain read has none of that method's downsides for
- * the existing-account case: no dependency on GoTrue's undocumented
- * behaviour for an already-registered email, no possibility of silently
- * minting a second identity for someone who already has one, and nothing
- * created at all when the row is merely being looked up.
+ * Looks an email up directly against `auth.users`, READ ONLY, via
+ * `public.find_auth_user_by_email` (migration 0063). Review fix (round 4):
+ * an EARLIER version of this function called
+ * `supabase.schema("auth").from("users")...` directly - the PostgREST
+ * cross-schema path, gated by PostgREST's OWN `db-schemas` config
+ * (defaulting to `public, graphql_public`), whose live setting turned out to
+ * be unverifiable from inside this project at all
+ * (`current_setting('pgrst.db_schemas')` reads null; Supabase stores it in
+ * the PostgREST service config, not anywhere SQL can see). Its silent
+ * failure mode - PGRST106, logged, treated as "not found" - would make the
+ * whole "resolve an existing account by reading, not creating" fix
+ * invisibly degrade back to always minting a new account. A `public`-schema
+ * RPC has none of that uncertainty: it is reached through the ORDINARY
+ * `public` PostgREST path every other function in this schema already uses,
+ * verifiable the same way as any of them (this repo's `scripts/sdd/
+ * check-grants.sh`, and this function was confirmed live against migration
+ * 0063 - correctness AND the full anon/authenticated/service_role grant
+ * matrix - before this code was written to call it).
  *
- * `auth.users` IS a real Postgres table, just outside the `public` schema
- * this project's generated `Database` type describes - `.schema(...)` is
- * typed to accept only schema keys `Database` declares
- * (`SupabaseClient.schema<DynamicSchema extends keyof Database>`), so this
- * cast is required rather than a shortcut; widening the SHARED generated
- * type for one caller reading one auth-schema table was rejected as the
- * worse option. It is still exactly as privileged as every other read/write
- * in this module: only ever a service-role client (RLS-bypassing by
- * design), only ever called server-side, and scoped here to the two columns
- * this caller actually needs - not `select("*")`, which would pull
- * encrypted_password, confirmation tokens and every other authentication
- * secret this function has no business touching.
+ * This is also why the `.schema("auth")` type cast this function used to
+ * need is simply gone: `find_auth_user_by_email` is an ordinary
+ * `Database["public"]["Functions"]` entry, typed the same way every other
+ * `.rpc()` call in this codebase already is.
+ *
+ * Still exactly as privileged as every other read/write in this module:
+ * only ever called with a service-role client (RLS-bypassing by design,
+ * and the function's own grants independently deny `anon`/`authenticated`
+ * regardless of what client calls it), only ever server-side, and the RPC
+ * itself returns only `id`/`email` - never `encrypted_password`,
+ * confirmation tokens, or any other `auth.users` column this caller has no
+ * business touching.
  */
 async function findExistingAuthUser(
   supabase: SupabaseClient<Database>,
   email: string,
 ): Promise<AuthUserRow | null> {
-  const { data, error } = await (supabase as unknown as SupabaseClient)
-    .schema("auth")
-    .from("users")
-    .select("id, email")
-    .eq("email", email)
-    .maybeSingle<AuthUserRow>();
+  const { data, error } = await supabase.rpc("find_auth_user_by_email", { p_email: email });
 
   if (error !== null) {
     // Not fatal to the invite: falls through to `generateLink` below, which
     // for a genuinely-existing confirmed user fails cleanly on its own
     // (an honest {ok:false}, never a silently-wrong id) rather than this
     // function inventing a second, riskier failure mode of its own.
-    console.error("[businesses/staff] auth.users lookup failed", error);
+    console.error("[businesses/staff] find_auth_user_by_email RPC failed", error);
     return null;
   }
-  return data;
+  // `returns table (...)` comes back as an array (0 or 1 row - the function's
+  // own `limit 1`), not a single object the way `.maybeSingle()` on a table
+  // read would.
+  return data[0] ?? null;
 }
 
 /**

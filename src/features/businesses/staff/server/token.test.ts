@@ -65,6 +65,34 @@ describe("generateInviteToken's entropy source (source-level, see comment above)
     expect(source).toMatch(/import\s*\{\s*randomBytes\s*\}\s*from\s*"node:crypto"/);
     expect(source).not.toMatch(/Math\.random/);
   });
+
+  it("review fix R5: generateInviteToken's RETURN EXPRESSION is randomBytes's own output, not merely an unused import sitting nearby", () => {
+    // The test above is shallower than it reads (the review's own words):
+    // importing `randomBytes` and never writing `Math.random` is satisfied
+    // by, for example, a monotonic counter -
+    //
+    //   let n = 0;
+    //   export function generateInviteToken(): string {
+    //     n += 1;
+    //     return Buffer.alloc(32).fill(0).map((_, i) => (i === 31 ? n : 0))
+    //       ...toString("base64url");
+    //   }
+    //
+    // - which imports `randomBytes`, never mentions `Math.random`, and
+    //   still passes every test above (fixed length, url-safe alphabet, and
+    //   even "never repeats" for the first 50 calls) while being exactly
+    //   "sequential", which the module's own header explicitly rules out
+    //   ("Not a uuid: a v4 uuid is 122 bits with a recognisable shape...").
+    // This asserts the RETURN STATEMENT ITSELF calls `randomBytes` and
+    // pipes its output straight to the returned string - a positive,
+    // structural pin on what is actually returned, not an absence check on
+    // what ISN'T.
+    const source = readFileSync("src/features/businesses/staff/server/token.ts", "utf8");
+
+    expect(source).toMatch(
+      /return\s+randomBytes\(\s*TOKEN_BYTES\s*\)\.toString\(\s*"base64url"\s*\)\s*;/,
+    );
+  });
 });
 
 describe("inviteExpiresAt", () => {

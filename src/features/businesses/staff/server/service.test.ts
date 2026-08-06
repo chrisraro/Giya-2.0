@@ -34,8 +34,7 @@ const mocks = vi.hoisted(() => {
     serviceFrom: vi.fn(),
     serviceClient: vi.fn(),
     generateLink: vi.fn(),
-    schemaFrom: vi.fn(),
-    schema: vi.fn(),
+    rpc: vi.fn(),
   };
 });
 
@@ -54,6 +53,7 @@ vi.mock("./notify", () => ({ sendStaffInviteEmail: vi.fn(async () => undefined) 
 
 const service = await import("./service");
 const { sendStaffInviteEmail } = await import("./notify");
+const { inviteExpiresAt } = await import("./token");
 
 type Builder = ReturnType<typeof mocks.makeBuilder>;
 
@@ -125,33 +125,26 @@ beforeEach(() => {
 
   mocks.serviceFrom.mockImplementation((name: string) => serviceTable(name));
 
-  // `findExistingAuthUser` (round-3 review fix): `.schema("auth").from(
-  // "users")...`. Defaults to "no existing row", so every pre-existing test
-  // below - all written before this read was added, all expecting the
-  // generateLink/account-creation path - keeps its original behaviour
-  // unless a test explicitly overrides `authUsersTable().__result`.
-  const authUsers = mocks.makeBuilder();
-  authUsers.__result = { data: null, error: null };
-  mocks.schemaFrom.mockReturnValue(authUsers);
-  mocks.schema.mockReturnValue({ from: mocks.schemaFrom });
-  serviceBuilders.__auth_users = authUsers;
+  // `findExistingAuthUser` (round-4 review fix): calls
+  // `supabase.rpc("find_auth_user_by_email", {p_email})`, migration 0063's
+  // RPC - `returns table (...)`, so a "not found" result is `data: []`, not
+  // `data: null` the way a `.maybeSingle()` table read would answer it.
+  // Defaults to "no existing row", so every pre-existing test below - all
+  // written before this read was added, all expecting the generateLink/
+  // account-creation path - keeps its original behaviour unless a test
+  // explicitly overrides `mocks.rpc`'s result.
+  mocks.rpc.mockResolvedValue({ data: [], error: null });
 
   mocks.serviceClient.mockReturnValue({
     from: mocks.serviceFrom,
     auth: { admin: { generateLink: mocks.generateLink } },
-    schema: mocks.schema,
+    rpc: mocks.rpc,
   });
   mocks.generateLink.mockResolvedValue({
     data: { user: { id: INVITEE_USER_ID }, properties: { action_link: null } },
     error: null,
   });
 });
-
-/** `auth.users` fake behind `findExistingAuthUser` - see the `beforeEach`
- * comment above for why it defaults to "not found". */
-function authUsersTable(): Builder {
-  return serviceTable("__auth_users");
-}
 
 // ===========================================================================
 // invite: the target-role refusal (owner can invite anyone but owner;
@@ -223,21 +216,26 @@ describe("inviteStaff: role gating", () => {
 });
 
 // ===========================================================================
-// Round 3 review fix: resolving the invitee is READ-FIRST.
-// findExistingAuthUser looks `auth.users` up by email BEFORE
-// `generateLink` (which can CREATE an account) ever runs. An existing
-// account must be resolved with zero side effects.
+// Round 4 review fix: resolving the invitee is READ-FIRST, via
+// public.find_auth_user_by_email (0063's RPC), not the `.schema("auth")`
+// PostgREST call round 3 shipped (unverifiable whether PostgREST's
+// `db-schemas` config actually exposes `auth` - see the migration's own
+// header). An existing account must be resolved with zero side effects,
+// BEFORE `generateLink` (which can CREATE an account) ever runs.
 // ===========================================================================
 
-describe("inviteStaff: resolving the invitee (read-first, round 3)", () => {
-  it("resolves an EXISTING account by reading auth.users, and does NOT call generateLink", async () => {
-    // Mutant this catches: skipping the read (or ignoring what it found) and
-    // always calling generateLink would still successfully invite this
-    // person, so `result.ok` alone cannot tell the two paths apart - only
-    // the assertion on `mocks.generateLink` proves NOTHING was created for
-    // an address that already has an account.
+describe("inviteStaff: resolving the invitee (read-first via RPC, round 4)", () => {
+  it("resolves an EXISTING account via the find_auth_user_by_email RPC, and does NOT call generateLink", async () => {
+    // Mutant this catches: skipping the RPC call (or ignoring what it
+    // found) and always calling generateLink would still successfully
+    // invite this person, so `result.ok` alone cannot tell the two paths
+    // apart - only the assertion on `mocks.generateLink` proves NOTHING
+    // was created for an address that already has an account.
     const EXISTING_ID = "already-has-an-account";
-    authUsersTable().__result = { data: { id: EXISTING_ID, email: "existing@example.com" }, error: null };
+    mocks.rpc.mockResolvedValue({
+      data: [{ id: EXISTING_ID, email: "existing@example.com" }],
+      error: null,
+    });
     serviceTable("business_staff").__result = {
       data: baseStaffRow({ user_id: EXISTING_ID, invited_email: "existing@example.com" }),
       error: null,
@@ -254,10 +252,11 @@ describe("inviteStaff: resolving the invitee (read-first, round 3)", () => {
     expect(patch.user_id).toBe(EXISTING_ID);
   });
 
-  it("falls back to generateLink (account creation) only when auth.users has no row for this email", async () => {
+  it("falls back to generateLink (account creation) only when the RPC finds no row for this email", async () => {
     // The mirror of the test above: confirms the fallback path still runs,
-    // not just that the new path short-circuits it.
-    authUsersTable().__result = { data: null, error: null };
+    // not just that the new path short-circuits it. `returns table` comes
+    // back as an EMPTY ARRAY for no match, not null.
+    mocks.rpc.mockResolvedValue({ data: [], error: null });
     serviceTable("business_staff").__result = { data: baseStaffRow(), error: null };
 
     await service.inviteStaff(BUSINESS, OWNER_ACTOR, { email: "new@example.com", role: "staff" });
@@ -265,16 +264,18 @@ describe("inviteStaff: resolving the invitee (read-first, round 3)", () => {
     expect(mocks.generateLink).toHaveBeenCalledWith({ type: "invite", email: "new@example.com" });
   });
 
-  it("queries auth.users by the exact invited email", async () => {
+  it("calls the RPC with the exact invited email as p_email", async () => {
     serviceTable("business_staff").__result = { data: baseStaffRow(), error: null };
 
     await service.inviteStaff(BUSINESS, OWNER_ACTOR, { email: "someone@example.com", role: "staff" });
 
-    expect(authUsersTable().eq).toHaveBeenCalledWith("email", "someone@example.com");
+    expect(mocks.rpc).toHaveBeenCalledWith("find_auth_user_by_email", {
+      p_email: "someone@example.com",
+    });
   });
 
-  it("a failed auth.users read degrades to the fallback path rather than failing the whole invite", async () => {
-    authUsersTable().__result = { data: null, error: { message: "connection reset" } };
+  it("a failed RPC call degrades to the fallback path rather than failing the whole invite", async () => {
+    mocks.rpc.mockResolvedValue({ data: null, error: { message: "connection reset" } });
     serviceTable("business_staff").__result = { data: baseStaffRow(), error: null };
 
     const result = await service.inviteStaff(BUSINESS, OWNER_ACTOR, {
@@ -393,6 +394,36 @@ describe("inviteStaff: writing the row", () => {
     expect(firstCallArg(table, "update").status).toBe("invited");
   });
 
+  it("review fix R1: reactivation writes the FRESH expiry, not the stale expired one it is replacing", async () => {
+    // Named regression: the token half of "reactivation writes a live
+    // invite" was already pinned (the `invite_token` length assertion two
+    // tests up), but the EXPIRY half was not - writing back
+    // `existing.invite_expires_at` (the already-past timestamp the whole
+    // reactivation exists to replace) broke nothing else, and every
+    // reactivated invite would have arrived pre-expired: the C1 bug class
+    // returning through the C1 fix itself.
+    const table = serviceTable("business_staff");
+    const staleExpiry = "2020-01-01T00:00:00.000Z";
+    const expired = baseStaffRow({ status: "invited", invite_expires_at: staleExpiry });
+    const fixedNow = new Date("2026-08-01T00:00:00.000Z");
+    queueResults(table, [
+      { data: null, error: { code: "23505", message: "duplicate key" } },
+      { data: expired, error: null },
+      { data: baseStaffRow({ status: "invited" }), error: null },
+    ]);
+
+    await service.inviteStaff(
+      BUSINESS,
+      OWNER_ACTOR,
+      { email: "new@example.com", role: "staff" },
+      { ...service.defaultDeps(), now: () => fixedNow },
+    );
+
+    const patch = firstCallArg(table, "update");
+    expect(patch.invite_expires_at).not.toBe(staleExpiry);
+    expect(patch.invite_expires_at).toBe(inviteExpiresAt(fixedNow));
+  });
+
   it("a reactivation writes exactly one audit row, action staff.invite_resent", async () => {
     const table = serviceTable("business_staff");
     const disabled = baseStaffRow({ status: "disabled", invite_token: null });
@@ -440,6 +471,37 @@ describe("inviteStaff: writing the row", () => {
     expect(revertPatch.role).toBe("manager");
     expect(revertPatch.invited_email).toBe("old@example.com");
     expect(revertPatch.invite_token).toBeNull();
+  });
+
+  it("review fix R3: a race that loses the reactivation's CAS is reported, not silently accepted", async () => {
+    // Cloned from acceptInvite's own CAS-race test above (`.eq("status",
+    // existing.status)` guards the reactivating UPDATE the same way
+    // `.eq("status", "invited")` guards accept's) - the row changes status
+    // between reinviteExisting's read and its write (e.g. someone else
+    // reactivated or accepted it in between), so the CAS matches zero rows.
+    //
+    // Mutant this catches: dropping the `.eq("status", existing.status)`
+    // guard (or ignoring a null `reactivated`) would let this UPDATE apply
+    // unconditionally. Verified TWO ways, because `queueResults` scripts
+    // its canned answers by CALL ORDER regardless of what filters were
+    // actually applied, so the `result.ok` assertion alone would still
+    // pass even with the guard deleted (confirmed by mutating it: the
+    // canned null still comes back on schedule). The `table.eq` assertion
+    // is the one that actually pins the guard's presence.
+    const table = serviceTable("business_staff");
+    queueResults(table, [
+      { data: null, error: { code: "23505", message: "duplicate key" } }, // insert
+      { data: baseStaffRow({ status: "disabled" }), error: null }, // read: found, reactivatable
+      { data: null, error: null }, // guarded update: lost the race -> null
+    ]);
+
+    const result = await service.inviteStaff(BUSINESS, OWNER_ACTOR, {
+      email: "new@example.com",
+      role: "staff",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(table.eq).toHaveBeenCalledWith("status", "disabled");
   });
 
   it("writes exactly one audit_logs row, action staff.invited", async () => {
@@ -801,6 +863,7 @@ function makeFilteringStaffTable(initialRows: BusinessStaffRowLike[]): Filtering
   const builder = {} as FilteringBuilder;
   let filters: Array<[string, unknown, boolean]> = [];
   let pendingPatch: Record<string, unknown> | null = null;
+  let pendingInsert: Record<string, unknown> | null = null;
   let isDelete = false;
 
   // Reset happens on `.from()` (one call per query chain - see
@@ -814,10 +877,19 @@ function makeFilteringStaffTable(initialRows: BusinessStaffRowLike[]): Filtering
   builder.__reset = () => {
     filters = [];
     pendingPatch = null;
+    pendingInsert = null;
     isDelete = false;
   };
   builder.select = vi.fn(() => builder);
-  builder.insert = vi.fn(() => builder);
+  // Simulates business_staff's real `unique(business_id, user_id)` index
+  // (0002:279) - the same constraint C1's reactivation tests exercise via
+  // `queueResults`' scripted 23505, but here derived from actual fixture
+  // rows so a query that OMITS `business_id` from a later lookup can be
+  // proven to find the wrong tenant's row (R2).
+  builder.insert = vi.fn((row: Record<string, unknown>) => {
+    pendingInsert = row;
+    return builder;
+  });
   builder.update = vi.fn((patch: Record<string, unknown>) => {
     pendingPatch = patch;
     return builder;
@@ -837,18 +909,47 @@ function makeFilteringStaffTable(initialRows: BusinessStaffRowLike[]): Filtering
   builder.order = vi.fn(() => builder);
   builder.limit = vi.fn(() => builder);
 
-  function matchIndex(): number {
-    return rows.findIndex((row) =>
-      filters.every(([key, value, wantEqual]) => {
+  function matchIndices(): number[] {
+    return rows.reduce<number[]>((acc, row, idx) => {
+      const matches = filters.every(([key, value, wantEqual]) => {
         const rowValue = (row as Record<string, unknown>)[key];
         return wantEqual ? rowValue === value : rowValue !== value;
-      }),
-    );
+      });
+      if (matches) acc.push(idx);
+      return acc;
+    }, []);
   }
 
   async function resolve(): Promise<{ data: unknown; error: unknown }> {
-    const idx = matchIndex();
-    if (idx === -1) return { data: null, error: null };
+    if (pendingInsert !== null) {
+      const conflict = rows.some(
+        (row) =>
+          row.business_id === pendingInsert!.business_id && row.user_id === pendingInsert!.user_id,
+      );
+      if (conflict) {
+        return { data: null, error: { code: "23505", message: "duplicate key value violates unique constraint" } };
+      }
+      const inserted = { id: `generated-${rows.length}`, ...pendingInsert } as BusinessStaffRowLike;
+      rows.push(inserted);
+      return { data: inserted, error: null };
+    }
+
+    const indices = matchIndices();
+    // Mirrors real `.maybeSingle()`/`.single()`: more than one matching row
+    // is a HARD ERROR (PGRST116, "JSON object requested, multiple ... rows
+    // returned"), never a silent pick of the first one. This is the
+    // mechanism R2's cross-tenant test relies on: a query missing its
+    // `business_id` predicate can match a SECOND row (a different tenant's)
+    // that a correctly-scoped query would never see, which must surface as
+    // a failure here exactly as it would against the real database.
+    if (indices.length > 1) {
+      return {
+        data: null,
+        error: { message: "JSON object requested, multiple (or no) rows returned" },
+      };
+    }
+    const idx = indices[0];
+    if (idx === undefined) return { data: null, error: null };
     if (isDelete) {
       const [removed] = rows.splice(idx, 1);
       return { data: removed ?? null, error: null };
@@ -978,6 +1079,62 @@ describe("cross-tenant fence (I4)", () => {
     expect(result.ok).toBe(true);
     expect(table.rows[0]!.status).toBe("disabled");
     expect(table.rows[0]!.invite_token).toBeNull();
+  });
+
+  it("review fix R2: reactivation's existing-row lookup never reactivates a DIFFERENT business's row (third instance of the fence)", async () => {
+    // The same person (one INVITEE_USER_ID) has a disabled row at TWO
+    // businesses - realistic (a former staff member elsewhere who is also
+    // being re-invited here). Re-inviting them at BUSINESS collides with
+    // BUSINESS's own row (23505, business_staff's real unique(business_id,
+    // user_id) index) and reinviteExisting's lookup must resolve to THAT
+    // row alone.
+    //
+    // Mutant this catches: dropping `.eq("business_id", business.id)` from
+    // reinviteExisting's lookup (service.ts) makes this fail - the
+    // filtering fake's `.eq("user_id", ...)` alone now matches BOTH rows,
+    // which mirrors what a real `.maybeSingle()` does with two matching
+    // rows (a hard error, PGRST116-shaped) rather than silently picking
+    // one - so the mutant turns a clean reactivation into a reported
+    // failure, and either way the OTHER business's row must stay
+    // untouched.
+    const rows: BusinessStaffRowLike[] = [
+      {
+        id: "row-own-business",
+        business_id: BUSINESS.id,
+        user_id: INVITEE_USER_ID,
+        role: "staff",
+        status: "disabled",
+        invited_email: "new@example.com",
+        invite_token: null,
+        invite_expires_at: null,
+        created_at: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        id: "row-other-business",
+        business_id: OTHER_BUSINESS.id,
+        user_id: INVITEE_USER_ID,
+        role: "manager",
+        status: "disabled",
+        invited_email: "other@example.com",
+        invite_token: null,
+        invite_expires_at: null,
+        created_at: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+    const table = makeFilteringStaffTable(rows);
+    serviceBuilders.business_staff = table as unknown as Builder;
+
+    const result = await service.inviteStaff(BUSINESS, OWNER_ACTOR, {
+      email: "new@example.com",
+      role: "staff",
+    });
+
+    expect(result.ok).toBe(true);
+    const own = table.rows.find((r) => r.id === "row-own-business")!;
+    const other = table.rows.find((r) => r.id === "row-other-business")!;
+    expect(own.status).toBe("invited");
+    expect(other.status).toBe("disabled");
+    expect(other.role).toBe("manager");
   });
 });
 
