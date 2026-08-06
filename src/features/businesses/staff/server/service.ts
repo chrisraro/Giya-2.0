@@ -162,6 +162,35 @@ export type ResolveInviteeResult = ResolvedInvitee | { ok: false; message: strin
  * pushed behind). Any failure - already registered and confirmed, rate
  * limited, malformed address - surfaces as a plain, honest `{ok: false}` with
  * the provider's own message, never a crash and never a silently-wrong id.
+ *
+ * ===========================================================================
+ * FLAGGED, UNRESOLVED (review C2): SELF-SERVE MINTING OF THIRD-PARTY ACCOUNTS
+ * ===========================================================================
+ * This function calls `auth.admin.createUser`-adjacent machinery
+ * (`generateLink` creates the account when none exists) on an email address
+ * supplied by the INVITING business, with no verification that address
+ * belongs to who the inviter says it does. Business registration
+ * (`register_business`, 0003) is self-serve with no approval gate. So: any
+ * self-registered business, through this one text field, can cause Giya to
+ * create a real `auth.users` row - and, via `handle_new_user`'s trigger
+ * (0003), a `profiles` row AND a `consumers` row - for an arbitrary
+ * third-party address that never asked for a Giya account, never signed up,
+ * and never consented to being profiled as a consumer. There is no rate
+ * limit on invites in this module, and REVOKING an invite (`revokeInvite`)
+ * does NOT delete or otherwise clean up the auth account it minted - the
+ * shadow account persists indefinitely even for a revoked, never-accepted
+ * invite.
+ *
+ * This is a genuine doc 15 (PII / consent) question, not a coding bug this
+ * function can fix unilaterally: is minting an unconfirmed account on
+ * someone else's say-so an acceptable trade for letting a legitimate "no
+ * account yet" invite work at all (the brief's required behavior #2), or
+ * does it need a rate limit, an approval step, a cleanup-on-revoke path, or
+ * an architectural change (resolve `user_id` at ACCEPT time against a
+ * nullable column instead, which needs a migration this task was told to
+ * avoid)? RECORDED HERE, per review instruction, rather than decided
+ * unilaterally - this needs product/security sign-off before this path sees
+ * real traffic, not a default this function quietly picked.
  */
 async function defaultResolveInvitee(
   supabase: SupabaseClient<Database>,
@@ -252,42 +281,180 @@ export async function inviteStaff(
     .single<BusinessStaffRow>();
 
   if (insertError !== null) {
-    if (insertError.code === UNIQUE_VIOLATION) {
-      return {
-        ok: false,
-        code: "INVITE_DUPLICATE",
-        message: "This person is already a member or already has a pending invite.",
-      };
+    if (insertError.code !== UNIQUE_VIOLATION) {
+      console.error("[businesses/staff] invite insert failed", insertError);
+      return { ok: false, message: "Could not send this invite. Try again." };
     }
-    console.error("[businesses/staff] invite insert failed", insertError);
+    // 23505 on `unique(business_id, user_id)` (0002): this person already
+    // has a row for this tenant. NOT automatically INVITE_DUPLICATE - review
+    // fix C1. Doc 32 §7.1: "Resend regenerates token", and before this fix
+    // there was no way to honour that: a revoked invite (status='disabled')
+    // or one that simply expired (status stays 'invited' forever, doc 30
+    // §2.7's 7-day TTL) permanently bricked that email against this tenant,
+    // because the unique index means a fresh INSERT can never succeed again.
+    // So: read the existing row and REACTIVATE it when it is not live,
+    // rather than refuse.
+    return reinviteExisting(supabase, business, actor, input, deps, resolved, token, expiresAt);
+  }
+
+  return commitInvite({
+    supabase,
+    business,
+    actor,
+    input,
+    deps,
+    resolved,
+    row: inserted,
+    auditAction: STAFF_AUDIT_ACTIONS.invited,
+    before: null,
+    revert: async () => {
+      // The row was JUST created, so undoing it is a hard delete rather than
+      // restoring a prior state - there is no prior state.
+      const { error } = await supabase.from("business_staff").delete().eq("id", inserted.id);
+      if (error !== null) {
+        console.error(
+          `[businesses/staff] UNAUDITED CHANGE: invite ${inserted.id} could not be recorded and could not be reverted`,
+          error,
+        );
+      }
+    },
+  });
+}
+
+/**
+ * The C1 reactivation path: `insertError.code === UNIQUE_VIOLATION` already
+ * happened, so a row for (business.id, resolved.userId) exists. Reads it,
+ * decides LIVE (genuine duplicate) vs REACTIVATABLE, and on the latter
+ * flips it back to a fresh, single-use 'invited' row.
+ *
+ * "LIVE" is deliberately narrow: an active member, or an invited row whose
+ * `invite_expires_at` has not yet passed. Everything else - disabled
+ * (revoked, or a former staff member removed and never re-added), or
+ * invited-but-expired - is fair game to reactivate. The CAS on the
+ * reactivating UPDATE (`.eq("status", existing.status)`) protects against a
+ * race where the row changed between this read and the write (e.g. accepted
+ * concurrently): a lost race reports a plain failure, never a silent
+ * overwrite of a row that just became active.
+ */
+async function reinviteExisting(
+  supabase: SupabaseClient<Database>,
+  business: Business,
+  actor: StaffActor,
+  input: InviteInput,
+  deps: StaffServiceDeps,
+  resolved: ResolvedInvitee,
+  token: string,
+  expiresAt: string,
+): Promise<ActionResult<StaffRosterItem>> {
+  const { data: existing, error: readError } = await supabase
+    .from("business_staff")
+    .select(ROSTER_COLUMNS)
+    .eq("business_id", business.id)
+    .eq("user_id", resolved.userId)
+    .maybeSingle<BusinessStaffRow>();
+
+  if (readError !== null || existing === null) {
+    console.error("[businesses/staff] could not read the existing row behind a 23505", readError);
     return { ok: false, message: "Could not send this invite. Try again." };
   }
 
-  const audit = await writeStaffAuditRow(supabase, {
-    businessId: business.id,
-    staffId: inserted.id,
-    action: STAFF_AUDIT_ACTIONS.invited,
-    actorId: actor.userId,
-    actorRole: actor.role,
-    before: null,
-    after: { role: input.role, invitedEmail: input.email, status: "invited" } as Json,
+  const stillLive =
+    existing.status === "active" ||
+    (existing.status === "invited" &&
+      (existing.invite_expires_at === null ||
+        new Date(existing.invite_expires_at).getTime() >= Date.now()));
+
+  if (stillLive) {
+    return {
+      ok: false,
+      code: "INVITE_DUPLICATE",
+      message: "This person is already a member or already has a pending invite.",
+    };
+  }
+
+  const { data: reactivated, error: writeError } = await supabase
+    .from("business_staff")
+    .update({
+      role: input.role,
+      status: "invited",
+      invited_email: input.email,
+      invite_token: token,
+      invite_expires_at: expiresAt,
+      updated_by: actor.userId,
+    })
+    .eq("id", existing.id)
+    .eq("status", existing.status)
+    .select(ROSTER_COLUMNS)
+    .single<BusinessStaffRow>();
+
+  if (writeError !== null || reactivated === null) {
+    console.error("[businesses/staff] invite reactivation failed", writeError);
+    return { ok: false, message: "Could not send this invite. Try again." };
+  }
+
+  return commitInvite({
+    supabase,
+    business,
+    actor,
+    input,
+    deps,
+    resolved,
+    row: reactivated,
+    auditAction: STAFF_AUDIT_ACTIONS.invite_resent,
+    before: { status: existing.status, role: existing.role } as Json,
+    revert: async () => {
+      const { error } = await supabase
+        .from("business_staff")
+        .update({
+          role: existing.role,
+          status: existing.status,
+          invited_email: existing.invited_email,
+          invite_token: existing.invite_token,
+          invite_expires_at: existing.invite_expires_at,
+        })
+        .eq("id", existing.id);
+      if (error !== null) {
+        console.error(
+          `[businesses/staff] UNAUDITED CHANGE: reactivation of invite ${existing.id} could not be recorded and could not be reverted`,
+          error,
+        );
+      }
+    },
+  });
+}
+
+interface CommitInviteArgs {
+  supabase: SupabaseClient<Database>;
+  business: Business;
+  actor: StaffActor;
+  input: InviteInput;
+  deps: StaffServiceDeps;
+  resolved: ResolvedInvitee;
+  row: BusinessStaffRow;
+  auditAction: (typeof STAFF_AUDIT_ACTIONS)[keyof typeof STAFF_AUDIT_ACTIONS];
+  before: Json;
+  revert: () => Promise<void>;
+}
+
+/** The tail every invite-issuing path (fresh insert, or C1's reactivation)
+ * shares: audit (revert on failure), then a best-effort send. Pulled out
+ * once there were two callers, so the write-then-audit-else-revert shape
+ * cannot drift between them. */
+async function commitInvite(args: CommitInviteArgs): Promise<ActionResult<StaffRosterItem>> {
+  const audit = await writeStaffAuditRow(args.supabase, {
+    businessId: args.business.id,
+    staffId: args.row.id,
+    action: args.auditAction,
+    actorId: args.actor.userId,
+    actorRole: args.actor.role,
+    before: args.before,
+    after: { role: args.input.role, invitedEmail: args.input.email, status: "invited" } as Json,
     reason: null,
     requestId: null,
   });
 
   if (!audit.ok) {
-    // Revert: the row was JUST created, so undoing it is a hard delete rather
-    // than restoring a prior state - there is no prior state.
-    const { error: deleteError } = await supabase
-      .from("business_staff")
-      .delete()
-      .eq("id", inserted.id);
-    if (deleteError !== null) {
-      console.error(
-        `[businesses/staff] UNAUDITED CHANGE: invite ${inserted.id} could not be recorded and could not be reverted`,
-        deleteError,
-      );
-    }
+    await args.revert();
     return {
       ok: false,
       message: "This invite could not be recorded, so it was not sent. Try again.",
@@ -296,15 +463,15 @@ export async function inviteStaff(
 
   // Best-effort, see notify.ts's header: the row (audited above) is the
   // source of truth, this is a courtesy.
-  await deps.sendInviteEmail({
-    to: input.email,
-    businessName: business.name,
-    role: input.role,
-    token,
-    newAccountSetupLink: resolved.actionLink,
+  await args.deps.sendInviteEmail({
+    to: args.input.email,
+    businessName: args.business.name,
+    role: args.input.role,
+    token: args.row.invite_token ?? "",
+    newAccountSetupLink: args.resolved.actionLink,
   });
 
-  return { ok: true, data: mapRow(inserted) };
+  return { ok: true, data: mapRow(args.row) };
 }
 
 /** Revokes a pending invite. Same target-role restriction as inviting
@@ -417,9 +584,14 @@ export async function changeRole(
     return { ok: false, code: "NOT_ALLOWED", message: "Only an owner can change a staff member's role." };
   }
   if (input.role === "owner") {
+    // NOT_ALLOWED, not OWNER_REQUIRED (review fix M13): doc 32's
+    // OWNER_REQUIRED is specifically "any action that would leave zero
+    // owners" - promoting a SECOND member to owner does not threaten that
+    // invariant (there would still be one), it is simply a different flow
+    // entirely ("ownership transfer is an atomic swap [V1] in settings").
     return {
       ok: false,
-      code: "OWNER_REQUIRED",
+      code: "NOT_ALLOWED",
       message: "Ownership cannot be reassigned here. Transfer ownership from settings instead.",
     };
   }
@@ -446,6 +618,10 @@ export async function changeRole(
     return { ok: false, message: "That staff member was not found." };
   }
   if (existing.role === "owner") {
+    // OWNER_REQUIRED IS correct here (unlike the branch above): the target
+    // row already holds the tenant's one and only 'owner' row
+    // (`business_staff_one_owner`, 0002's partial unique index), so changing
+    // it away is EXACTLY "an action that would leave zero owners".
     return {
       ok: false,
       code: "OWNER_REQUIRED",

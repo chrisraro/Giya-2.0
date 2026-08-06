@@ -27,9 +27,19 @@ function loginHref(token: string): string {
   return `/login?next=${encodeURIComponent(`/invite/${token}`)}`;
 }
 
-function signupHref(token: string): string {
-  return `/signup?next=${encodeURIComponent(`/invite/${token}`)}`;
-}
+// NOT `?next=...` (review fix I6). `/login` reads and honours `next`
+// (src/app/(auth)/login/page.tsx: `getSafeRedirect(searchParams.get("next"),
+// ...)`), so `loginHref` above genuinely round-trips. `/signup` does not -
+// it computes its own post-signup destination from the chosen role
+// (`destinationFor(role)`) and never reads a `next` param at all. Carrying
+// one here would be a dead affordance: a query string that looks like a
+// promise and does nothing. `(auth)` is off-limits to this task (another
+// task is building password reset there), so the honest fix is the on-page
+// copy below telling the invitee to come back to THIS link once they have
+// an account, rather than a param claiming a round trip that doesn't exist.
+// Wiring `next` through `/signup` is real, tracked follow-up work for
+// whichever task next touches `(auth)`.
+const SIGNUP_HREF = "/signup";
 
 export default async function InviteAcceptPage({ params }: { params: Promise<PageParams> }) {
   const { token } = await params;
@@ -87,12 +97,18 @@ export default async function InviteAcceptPage({ params }: { params: Promise<Pag
               Sign in
             </Link>
             <Link
-              href={signupHref(token)}
+              href={SIGNUP_HREF}
               className="inline-flex h-12 items-center justify-center rounded-full border border-outline px-6 text-label-l text-primary"
             >
               Create account
             </Link>
           </div>
+          {/* Honest hand-off (review fix I6): creating an account does NOT
+              return here automatically - see SIGNUP_HREF's comment. */}
+          <p className="text-body-s text-on-surface-variant">
+            After creating your account, come back to this link (or the one in
+            your invite email) to finish accepting.
+          </p>
         </div>
       ) : /* UX HINT ONLY, not the security boundary: compares email because
              that is all this render has cheaply in hand. The actual check

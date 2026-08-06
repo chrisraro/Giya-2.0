@@ -2,6 +2,7 @@
 // (which vitest does not set), so it must be mocked to a no-op for tests -
 // same precedent as src/features/rewards/server/token.test.ts and
 // src/features/integrations/meta/server/state.test.ts.
+import { readFileSync } from "node:fs";
 import { describe, it, expect, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
@@ -30,6 +31,39 @@ describe("generateInviteToken", () => {
     // Mutant: a hardcoded or seeded (non-random) token would fail this.
     const tokens = new Set(Array.from({ length: 50 }, () => generateInviteToken()));
     expect(tokens.size).toBe(50);
+  });
+});
+
+// Review fix M7: the three tests above (length, alphabet, no repeats across
+// 50 calls) all pass for a token filled by `Math.random()` instead of
+// `randomBytes` - non-cryptographic randomness is still random, still 32
+// bytes, still base64url-safe. What those tests cannot tell apart is WHICH
+// entropy SOURCE produced the bytes, and that is the entire security
+// property this module exists for (see its own header: "an attacker cannot
+// guess a live one" - `Math.random()`'s PRNG state is not cryptographically
+// unpredictable).
+//
+// A RUNTIME spy on `node:crypto` was tried first (`vi.mock("node:crypto",
+// ...)`, delegating to `importOriginal()`) and does not work in this
+// project's vitest setup: the mock factory itself runs (confirmed via a
+// debug log), but `token.ts`'s own `import { randomBytes } from
+// "node:crypto"` binding never observes the wrapper - Node built-ins are
+// evidently resolved outside whatever module graph `vi.mock` intercepts
+// here, a known class of limitation for native ESM built-ins. Rather than
+// spend further budget on vitest/pool configuration to make that work, this
+// pins the SOURCE statically instead: read the compiled TypeScript source
+// and assert it imports `randomBytes` from `"node:crypto"` and contains no
+// `Math.random` fallback. Less elegant than a runtime spy, but reliable, and
+// it catches exactly the mutant class M7 named.
+describe("generateInviteToken's entropy source (source-level, see comment above)", () => {
+  it("imports randomBytes from node:crypto and never references Math.random", () => {
+    // Mutant: swapping the import for a `Math.random()`-based fill (or any
+    // other non-crypto PRNG) changes what this file contains, which is
+    // exactly what this test reads.
+    const source = readFileSync("src/features/businesses/staff/server/token.ts", "utf8");
+
+    expect(source).toMatch(/import\s*\{\s*randomBytes\s*\}\s*from\s*"node:crypto"/);
+    expect(source).not.toMatch(/Math\.random/);
   });
 });
 

@@ -34,6 +34,11 @@ export const STAFF_AUDIT_ACTIONS = {
   invite_revoked: "staff.invite_revoked",
   invite_accepted: "staff.invite_accepted",
   role_changed: "staff.role_changed",
+  /** Doc 32 §7.1: "Resend regenerates token." A DIFFERENT row history than
+   * `invited` - the row already existed (revoked, or invited-and-expired)
+   * and this reactivates it rather than creating a fresh one. See
+   * service.ts's `inviteStaff` review fix (C1). */
+  invite_resent: "staff.invite_resent",
 } as const;
 
 export type StaffAuditVerb = keyof typeof STAFF_AUDIT_ACTIONS;

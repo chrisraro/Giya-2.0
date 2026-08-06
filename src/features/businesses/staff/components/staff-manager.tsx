@@ -42,9 +42,19 @@ function RoleBadge({ role }: { role: BusinessRole }) {
 }
 
 function StatusChip({ status }: { status: string }) {
+  // Review fix M10: "active" previously used `bg-primary-container`, which
+  // is CORAL (docs/10-architecture/16-design-system.md: "Giya Coral #E8563F
+  // | primary"), reserved for the consumer PWA's expressive surfaces
+  // ("consumer PWA (expressive): coral leads"). The business portal is
+  // "productive: teal leads" - `secondary` is Deep Teal - so every chip
+  // here stays in that family. A solid `bg-secondary` fill (not the lighter
+  // `-container` tone `RoleBadge` uses above) is what visually distinguishes
+  // "this is the status" from "this is the role" without reaching for coral
+  // or for tertiary (Mango, reserved elsewhere as reward/points language
+  // only).
   const tone =
     status === "active"
-      ? "bg-primary-container text-on-primary-container"
+      ? "bg-secondary text-on-secondary"
       : status === "invited"
         ? "border border-outline text-on-surface-variant"
         : "bg-surface-container text-on-surface-variant";

@@ -89,17 +89,28 @@ describe("a live token, signed out", () => {
     expect(screen.queryByRole("button", { name: /Accept invite/i })).not.toBeInTheDocument();
   });
 
-  it("offers sign-in and sign-up, both carrying this invite as the return path", async () => {
+  it("offers sign-in carrying this invite as the return path - /login genuinely honours next", async () => {
     await renderInvite();
 
     expect(screen.getByRole("link", { name: "Sign in" })).toHaveAttribute(
       "href",
       `/login?next=${encodeURIComponent(`/invite/${TOKEN}`)}`,
     );
-    expect(screen.getByRole("link", { name: "Create account" })).toHaveAttribute(
-      "href",
-      `/signup?next=${encodeURIComponent(`/invite/${TOKEN}`)}`,
-    );
+  });
+
+  it("review fix I6: sign-up does NOT claim a return path /signup cannot honour", async () => {
+    // /signup computes its own post-signup destination from the chosen role
+    // (destinationFor(role) in src/app/(auth)/signup/page.tsx) and never
+    // reads a `next` param - a `?next=` here would be a dead affordance, a
+    // promise the app does not keep. This pins the ABSENCE of that false
+    // promise, and the page's own on-screen copy telling the invitee how to
+    // actually get back (below) instead.
+    await renderInvite();
+
+    const signUp = screen.getByRole("link", { name: "Create account" });
+    expect(signUp).toHaveAttribute("href", "/signup");
+    expect(signUp.getAttribute("href")).not.toContain("next=");
+    expect(screen.getByText(/come back to this link/i)).toBeInTheDocument();
   });
 
   it("names the invited address so a visitor knows which account to use", async () => {

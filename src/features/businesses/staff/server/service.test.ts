@@ -66,12 +66,33 @@ let serviceBuilders: Record<string, Builder>;
 function serviceTable(name: string): Builder {
   const b = serviceBuilders[name];
   if (!b) throw new Error(`no service-role mock builder registered for table "${name}"`);
+  // Filtering-fake builders (I4's cross-tenant suite) expose `__reset`,
+  // called once per `.from(name)` - i.e. once per query chain - so their
+  // per-chain filter/patch state cannot leak from one call into the next.
+  // No-op for the plain `makeBuilder()` fakes everywhere else in this file.
+  (b as unknown as { __reset?: () => void }).__reset?.();
   return b;
 }
 
 function firstCallArg(builder: Builder, method: string): Record<string, unknown> {
   const fn = builder[method] as { mock: { calls: unknown[][] } };
   return (fn.mock.calls[0]?.[0] ?? {}) as Record<string, unknown>;
+}
+
+/**
+ * Sequences a table's `.single()`/`.maybeSingle()` results ACROSS calls, in
+ * the order the code under test issues them - needed once a single test
+ * exercises more than one query on the same table (insert, then a lookup,
+ * then an update), which the shared `__result` field cannot express since it
+ * answers every terminal call the same way. Shared between `.single` and
+ * `.maybeSingle` because service.ts mixes both within one function and the
+ * call ORDER, not which specific method, is what matters here.
+ */
+function queueResults(table: Builder, results: Array<{ data: unknown; error: unknown }>): void {
+  let i = 0;
+  const next = () => (i < results.length ? results[i++]! : results[results.length - 1]!);
+  table.single = vi.fn(async () => next());
+  table.maybeSingle = vi.fn(async () => next());
 }
 
 function baseStaffRow(overrides: Record<string, unknown> = {}) {
@@ -139,7 +160,12 @@ describe("inviteStaff: role gating", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.ok || (result as { code?: string }).code).not.toBe(true);
+    // Review fix M11: the previous version of this line
+    // (`expect(result.ok || result.code).not.toBe(true)`) could never fail -
+    // `false || "NOT_ALLOWED"` is the string "NOT_ALLOWED", which is never
+    // `=== true` regardless of what the code actually is. Asserting the code
+    // directly is what the comment above always claimed this line did.
+    expect(!result.ok && result.code).toBe("NOT_ALLOWED");
     expect(serviceTable("business_staff").insert).not.toHaveBeenCalled();
   });
 
@@ -190,14 +216,15 @@ describe("inviteStaff: writing the row", () => {
     expect((patch.invite_token as string).length).toBeGreaterThan(20);
   });
 
-  it("maps a unique-violation (23505) to INVITE_DUPLICATE, not a generic failure", async () => {
+  it("maps a unique-violation to INVITE_DUPLICATE when the existing row is still LIVE (active member)", async () => {
     // Mutant: forgetting the `error.code === "23505"` branch (or checking the
     // wrong code) would fall through to the generic message and lose the
     // caller-facing code doc 32 registers for this case.
-    serviceTable("business_staff").__result = {
-      data: null,
-      error: { code: "23505", message: "duplicate key" },
-    };
+    const table = serviceTable("business_staff");
+    queueResults(table, [
+      { data: null, error: { code: "23505", message: "duplicate key" } }, // insert
+      { data: baseStaffRow({ status: "active" }), error: null }, // existing-row lookup
+    ]);
 
     const result = await service.inviteStaff(BUSINESS, OWNER_ACTOR, {
       email: "existing@example.com",
@@ -206,6 +233,127 @@ describe("inviteStaff: writing the row", () => {
 
     expect(result.ok).toBe(false);
     expect(!result.ok && result.code).toBe("INVITE_DUPLICATE");
+    expect(table.update).not.toHaveBeenCalled();
+  });
+
+  it("maps a unique-violation to INVITE_DUPLICATE when the existing invite is still pending and NOT expired", async () => {
+    const table = serviceTable("business_staff");
+    queueResults(table, [
+      { data: null, error: { code: "23505", message: "duplicate key" } },
+      {
+        data: baseStaffRow({ status: "invited", invite_expires_at: "2099-01-01T00:00:00.000Z" }),
+        error: null,
+      },
+    ]);
+
+    const result = await service.inviteStaff(BUSINESS, OWNER_ACTOR, {
+      email: "existing@example.com",
+      role: "staff",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.code).toBe("INVITE_DUPLICATE");
+    expect(table.update).not.toHaveBeenCalled();
+  });
+
+  // ===========================================================================
+  // C1 (review fix): a unique-violation against a REVOKED or EXPIRED invite
+  // must reactivate the row, not permanently brick that email. Doc 32 §7.1:
+  // "Resend regenerates token." Before this fix, `business_staff`'s own
+  // `unique(business_id, user_id)` (0002:279) meant a SECOND invite to
+  // anyone whose first one expired (7-day TTL, doc 30 §2.7) or was revoked
+  // hit 23505 forever, reported as INVITE_DUPLICATE with no recovery path.
+  // ===========================================================================
+
+  it("reactivates a REVOKED invite (status='disabled') instead of permanently refusing it", async () => {
+    // Mutant: treating every 23505 as a hard duplicate (the pre-fix
+    // behaviour) makes this assert result.ok===false instead of true, and
+    // never issues the reactivating UPDATE at all.
+    const table = serviceTable("business_staff");
+    const disabled = baseStaffRow({ status: "disabled", invite_token: null, role: "staff" });
+    queueResults(table, [
+      { data: null, error: { code: "23505", message: "duplicate key" } }, // insert
+      { data: disabled, error: null }, // existing-row lookup
+      { data: baseStaffRow({ status: "invited", role: "staff" }), error: null }, // reactivate update
+    ]);
+
+    const result = await service.inviteStaff(BUSINESS, OWNER_ACTOR, {
+      email: "new@example.com",
+      role: "staff",
+    });
+
+    expect(result.ok).toBe(true);
+    const patch = firstCallArg(table, "update");
+    expect(patch.status).toBe("invited");
+    expect(typeof patch.invite_token).toBe("string");
+    expect((patch.invite_token as string).length).toBeGreaterThan(20);
+  });
+
+  it("reactivates an EXPIRED invite (status still 'invited', past invite_expires_at) instead of refusing it", async () => {
+    const table = serviceTable("business_staff");
+    const expired = baseStaffRow({ status: "invited", invite_expires_at: "2020-01-01T00:00:00.000Z" });
+    queueResults(table, [
+      { data: null, error: { code: "23505", message: "duplicate key" } },
+      { data: expired, error: null },
+      { data: baseStaffRow({ status: "invited" }), error: null },
+    ]);
+
+    const result = await service.inviteStaff(BUSINESS, OWNER_ACTOR, {
+      email: "new@example.com",
+      role: "staff",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(firstCallArg(table, "update").status).toBe("invited");
+  });
+
+  it("a reactivation writes exactly one audit row, action staff.invite_resent", async () => {
+    const table = serviceTable("business_staff");
+    const disabled = baseStaffRow({ status: "disabled", invite_token: null });
+    queueResults(table, [
+      { data: null, error: { code: "23505", message: "duplicate key" } },
+      { data: disabled, error: null },
+      { data: baseStaffRow({ status: "invited" }), error: null },
+    ]);
+
+    await service.inviteStaff(BUSINESS, OWNER_ACTOR, { email: "new@example.com", role: "staff" });
+
+    expect(serviceTable("audit_logs").insert).toHaveBeenCalledTimes(1);
+    expect(firstCallArg(serviceTable("audit_logs"), "insert").action).toBe("staff.invite_resent");
+  });
+
+  it("reverts a reactivation to its EXACT prior fields when the audit write fails", async () => {
+    // Mutant: reverting to a hardcoded/default state instead of the row's
+    // own previous snapshot would leave a revoked row looking 'invited', or
+    // vice versa - a corrupted, unaudited state, exactly what write-then-
+    // audit-else-revert exists to prevent.
+    const table = serviceTable("business_staff");
+    const disabled = baseStaffRow({
+      status: "disabled",
+      role: "manager",
+      invite_token: null,
+      invited_email: "old@example.com",
+      invite_expires_at: "2020-01-01T00:00:00.000Z",
+    });
+    queueResults(table, [
+      { data: null, error: { code: "23505", message: "duplicate key" } },
+      { data: disabled, error: null },
+      { data: baseStaffRow({ status: "invited" }), error: null },
+    ]);
+    serviceTable("audit_logs").insert = vi.fn(() => ({ error: { message: "boom" } }));
+
+    const result = await service.inviteStaff(BUSINESS, OWNER_ACTOR, {
+      email: "new@example.com",
+      role: "staff",
+    });
+
+    expect(result.ok).toBe(false);
+    const calls = (table.update as { mock: { calls: unknown[][] } }).mock.calls;
+    const revertPatch = calls[calls.length - 1]?.[0] as Record<string, unknown>;
+    expect(revertPatch.status).toBe("disabled");
+    expect(revertPatch.role).toBe("manager");
+    expect(revertPatch.invited_email).toBe("old@example.com");
+    expect(revertPatch.invite_token).toBeNull();
   });
 
   it("writes exactly one audit_logs row, action staff.invited", async () => {
@@ -491,14 +639,18 @@ describe("changeRole", () => {
     expect(!result.ok && result.code).toBe("NOT_ALLOWED");
   });
 
-  it("refuses to promote a target to owner (OWNER_REQUIRED backstop)", async () => {
+  it("refuses to promote a target to owner (NOT_ALLOWED - not an OWNER_REQUIRED case, M13)", async () => {
+    // Mutant this catches: using the wrong code here would tell a caller
+    // "this would leave zero owners", which is false - there would still be
+    // exactly one. Doc 32 reserves OWNER_REQUIRED for that specific
+    // invariant; this refusal is "ownership transfer is a different flow".
     const result = await service.changeRole(BUSINESS, OWNER_ACTOR, {
       staffId: "staff-row-1",
       role: "owner",
     });
 
     expect(result.ok).toBe(false);
-    expect(!result.ok && result.code).toBe("OWNER_REQUIRED");
+    expect(!result.ok && result.code).toBe("NOT_ALLOWED");
     expect(serviceTable("business_staff").update).not.toHaveBeenCalled();
   });
 
@@ -540,6 +692,206 @@ describe("changeRole", () => {
     expect(auditRow.action).toBe("staff.role_changed");
     expect(auditRow.before).toEqual({ role: "manager" });
     expect(auditRow.after).toEqual({ role: "marketing" });
+  });
+});
+
+// ===========================================================================
+// I4 (review fix): the cross-tenant fence. revokeInvite/changeRole run on a
+// SERVICE-ROLE client (RLS bypassed), so the `.eq("business_id", ...)` on
+// each read is the ENTIRE tenant fence - the subsequent write keys on
+// `.eq("id", staffId)` alone. Review found that removing that one predicate
+// from either read broke NO existing test (54/54 still passed), because the
+// generic `makeBuilder` fake used everywhere else in this file returns the
+// same canned `__result` regardless of which `.eq()` calls were actually
+// made - it cannot tell a correctly-scoped query from an unscoped one. This
+// block uses a builder that actually FILTERS a small in-memory table by
+// every `.eq()`/`.neq()` applied to it, so a query missing the business_id
+// predicate really does find (and would really mutate) the wrong tenant's
+// row - which is exactly what must never happen.
+// ===========================================================================
+
+function makeFilteringStaffTable(initialRows: BusinessStaffRowLike[]): FilteringBuilder {
+  const rows = initialRows.map((row) => ({ ...row }));
+  const builder = {} as FilteringBuilder;
+  let filters: Array<[string, unknown, boolean]> = [];
+  let pendingPatch: Record<string, unknown> | null = null;
+  let isDelete = false;
+
+  // Reset happens on `.from()` (one call per query chain - see
+  // `serviceTable()`'s `__reset` hook below), NOT on `.select()`: a real
+  // PostgREST chain often calls `.select(cols)` AFTER `.update()`/`.delete()`
+  // purely to specify which columns come back, and treating THAT `.select()`
+  // as "start a fresh read" would silently drop the pending patch - which is
+  // exactly the bug that made this fake report a false positive the first
+  // time this test was run (revoke's `.update(...).eq(...).select(...)
+  // .maybeSingle()` chain lost its patch at the `.select()` step).
+  builder.__reset = () => {
+    filters = [];
+    pendingPatch = null;
+    isDelete = false;
+  };
+  builder.select = vi.fn(() => builder);
+  builder.insert = vi.fn(() => builder);
+  builder.update = vi.fn((patch: Record<string, unknown>) => {
+    pendingPatch = patch;
+    return builder;
+  });
+  builder.delete = vi.fn(() => {
+    isDelete = true;
+    return builder;
+  });
+  builder.eq = vi.fn((key: string, value: unknown) => {
+    filters.push([key, value, true]);
+    return builder;
+  });
+  builder.neq = vi.fn((key: string, value: unknown) => {
+    filters.push([key, value, false]);
+    return builder;
+  });
+  builder.order = vi.fn(() => builder);
+  builder.limit = vi.fn(() => builder);
+
+  function matchIndex(): number {
+    return rows.findIndex((row) =>
+      filters.every(([key, value, wantEqual]) => {
+        const rowValue = (row as Record<string, unknown>)[key];
+        return wantEqual ? rowValue === value : rowValue !== value;
+      }),
+    );
+  }
+
+  async function resolve(): Promise<{ data: unknown; error: unknown }> {
+    const idx = matchIndex();
+    if (idx === -1) return { data: null, error: null };
+    if (isDelete) {
+      const [removed] = rows.splice(idx, 1);
+      return { data: removed ?? null, error: null };
+    }
+    if (pendingPatch !== null) {
+      rows[idx] = { ...rows[idx]!, ...pendingPatch };
+    }
+    return { data: rows[idx]!, error: null };
+  }
+
+  builder.single = vi.fn(resolve);
+  builder.maybeSingle = vi.fn(resolve);
+  builder.rows = rows;
+  return builder;
+}
+
+interface BusinessStaffRowLike {
+  id: string;
+  business_id: string;
+  user_id: string;
+  role: string;
+  status: string;
+  invited_email: string | null;
+  invite_token: string | null;
+  invite_expires_at: string | null;
+  created_at: string;
+}
+
+interface FilteringBuilder {
+  select: ReturnType<typeof vi.fn>;
+  insert: ReturnType<typeof vi.fn>;
+  update: ReturnType<typeof vi.fn>;
+  delete: ReturnType<typeof vi.fn>;
+  eq: ReturnType<typeof vi.fn>;
+  neq: ReturnType<typeof vi.fn>;
+  order: ReturnType<typeof vi.fn>;
+  limit: ReturnType<typeof vi.fn>;
+  single: ReturnType<typeof vi.fn>;
+  maybeSingle: ReturnType<typeof vi.fn>;
+  rows: BusinessStaffRowLike[];
+  /** Called once per `.from("business_staff")` - i.e. once per query chain.
+   * See the comment above where this is assigned. */
+  __reset: () => void;
+}
+
+const OTHER_BUSINESS = { id: "biz-OTHER", name: "A Different Shop" };
+
+describe("cross-tenant fence (I4)", () => {
+  it("revokeInvite never touches a pending invite that belongs to a DIFFERENT business", async () => {
+    // Mutant: dropping `.eq("business_id", business.id)` from revokeInvite's
+    // read (service.ts) makes this fail - the filtering table below would
+    // then match by id+status alone, find business B's row, and revoke it
+    // for a caller who is only owner of business A.
+    const rows: BusinessStaffRowLike[] = [
+      {
+        id: "staff-in-B",
+        business_id: OTHER_BUSINESS.id,
+        user_id: "someone",
+        role: "staff",
+        status: "invited",
+        invited_email: "x@example.com",
+        invite_token: "tok-B",
+        invite_expires_at: "2099-01-01T00:00:00.000Z",
+        created_at: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+    const table = makeFilteringStaffTable(rows);
+    serviceBuilders.business_staff = table as unknown as Builder;
+
+    const result = await service.revokeInvite(BUSINESS, OWNER_ACTOR, "staff-in-B");
+
+    expect(result.ok).toBe(false);
+    expect(table.rows[0]!.status).toBe("invited");
+    expect(table.rows[0]!.invite_token).toBe("tok-B");
+  });
+
+  it("changeRole never touches an active member that belongs to a DIFFERENT business", async () => {
+    // Mutant: dropping `.eq("business_id", business.id)` from changeRole's
+    // read makes this fail the same way.
+    const rows: BusinessStaffRowLike[] = [
+      {
+        id: "staff-in-B",
+        business_id: OTHER_BUSINESS.id,
+        user_id: "someone",
+        role: "manager",
+        status: "active",
+        invited_email: null,
+        invite_token: null,
+        invite_expires_at: null,
+        created_at: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+    const table = makeFilteringStaffTable(rows);
+    serviceBuilders.business_staff = table as unknown as Builder;
+
+    const result = await service.changeRole(BUSINESS, OWNER_ACTOR, {
+      staffId: "staff-in-B",
+      role: "marketing",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(table.rows[0]!.role).toBe("manager");
+  });
+
+  it("sanity check: revokeInvite DOES succeed against its own business with the same fixture shape", async () => {
+    // Proves the filtering table itself isn't just always refusing - the
+    // two tests above fail specifically because of tenant mismatch, not
+    // because this fake can never succeed.
+    const rows: BusinessStaffRowLike[] = [
+      {
+        id: "staff-in-A",
+        business_id: BUSINESS.id,
+        user_id: "someone",
+        role: "staff",
+        status: "invited",
+        invited_email: "x@example.com",
+        invite_token: "tok-A",
+        invite_expires_at: "2099-01-01T00:00:00.000Z",
+        created_at: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+    const table = makeFilteringStaffTable(rows);
+    serviceBuilders.business_staff = table as unknown as Builder;
+
+    const result = await service.revokeInvite(BUSINESS, OWNER_ACTOR, "staff-in-A");
+
+    expect(result.ok).toBe(true);
+    expect(table.rows[0]!.status).toBe("disabled");
+    expect(table.rows[0]!.invite_token).toBeNull();
   });
 });
 

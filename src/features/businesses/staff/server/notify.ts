@@ -84,8 +84,13 @@ export interface StaffInviteEmailInput {
  * from the STATE CHANGE it is announcing: the invite row is the source of
  * truth, the email is a courtesy that a mail provider or a typo can still
  * legitimately fail to deliver, and losing it must not make the whole invite
- * un-issuable (the roster still shows the pending row, and the owner can
- * resend).
+ * un-issuable (the roster still shows the pending row, and it can be
+ * re-issued once it expires or is revoked - see service.ts's `inviteStaff`
+ * / `reinviteExisting`, review fix C1). NOT yet true for a still-pending,
+ * non-expired invite: today re-inviting that email is reported
+ * INVITE_DUPLICATE rather than regenerating its token, so doc 32 §7.1's
+ * dedicated "Resend" roster action (distinct from C1's "permanently
+ * bricked after expiry/revoke" bug, which this DOES fix) is not built.
  */
 export async function sendStaffInviteEmail(input: StaffInviteEmailInput): Promise<void> {
   const origin = resolveOrigin();
