@@ -185,6 +185,17 @@ export const NOTIFICATION_KIND_REGISTRY: Record<NotificationKind, NotificationKi
   // consumer can still act (spend before the date) only if they see it in
   // time, and an inbox message they may not open for days is the wrong
   // channel for that alone.
+  //
+  // REVIEW NOTE (task 1.3, M7): `channels` names the intended shape, not a
+  // proven delivery path. `public.points_expiry_warn` (0046) writes this
+  // kind's `email` row directly from SQL (pg_cron cannot reach `raise.ts` or
+  // `enqueue()` - see that migration's header), so the row lands
+  // `status='pending'` and DURABLE, but nothing yet enqueues a `notify.email`
+  // job to actually send it. The `in_app` row IS delivered (it lands `sent`
+  // immediately). Until a worker or reconciler picks up pending
+  // `kind='points_expiring'` email rows, this entry's `email` channel
+  // describes the shape written, not a promise kept - see supabase/
+  // README.md's "Known limitations" for the tracked follow-up.
   points_expiring: {
     icon: "schedule",
     tone: "muted",

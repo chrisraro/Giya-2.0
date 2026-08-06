@@ -123,7 +123,7 @@ Fifteen suites, one per domain:
 | `rpc_activation_smoke.sql` | merchant activation (0033), 52 assertions: THE COLUMN FENCE ON `businesses` asserted both ways (an owner's session with a real `biz` claim gets 42501 writing `status`, `verified_at` or `plan`, and the same session still edits `name` and the edit lands, so the refusals are about COLUMNS and not about a policy that missed), `private.has_usable_base_rule` including the half-filled `amount_rate` row with a null rate that passes every table constraint and awards nothing, the service_role-only grant on all three RPCs, `submit_business_for_review` (owner-only by table truth, refused for a tenant with no usable rule, opens a `business_verifications` round, writes an `actor_kind='user'` audit row, and refuses a second submission), `activate_business` (mandatory reason, `support` refused, the tenant's own owner refused, ACTIVATION_NO_EARNING_RULE when the rule is deleted between submission and decision with nothing written by the refusal, then success stamping `verified_at`, closing the round as approved with `decided_by`, and writing an `actor_kind='admin'` audit row carrying the reason), `reject_business_verification` (back to draft, round closed as rejected, and the merchant reading `decision_reason` UNDER THEIR OWN SESSION), and 0033's two admin SELECT policies as a pair |
 | `rls_integration_connections_smoke.sql` | `integration_connections` (0032): THE TOKEN COLUMN FENCE, asserted as the pair that matters (an owner reading their OWN tenant row gets 42501 on `access_token_encrypted` and `refresh_token_encrypted`, and on `select *`, while every allowlisted column reads cleanly), the owner/manager role list and the marketing narrowing, cross-tenant denial, the consumer and anon matrix rows, no client write path of any kind, the service_role split (insert/update/delete stay, TRUNCATE goes), the no-truncate statement trigger, and the four check constraints: the plaintext envelope fence (a raw `EAAG...` token is refused because its first byte is not the envelope version), the error/status pairing in both directions, and the provider and status vocabularies, plus the account uniqueness rule that reconnect upserts onto |
 | `rpc_routing_breakdown_smoke.sql` | `receipt_routing_breakdown` (0035, decision D10), 14 assertions over two tenants: the four outcome buckets with queued/processing collapsing to `pending`, attribution counted once per receipt including a receipt that tripped two rules (so the reason counts exceed the review count, which is correct rather than a rounding error), D7's `ocr_operator_failure` attributed like any other reason, BACKFILL HONESTY (a review whose `parse_meta` predates `review_reasons` counts as `unattributed` and never inflates a real rule), TENANCY asserted as the pair that matters (one tenant's breakdown never carries the other's reason, and the platform-scoped `p_business_id null` call does see both), the `p_days` window filter and its clamp, and the service_role-only grant that keeps an aggregate from routing around 0017's `parse_meta` column fence |
-| `rpc_points_expiry_smoke.sql` | Task 1.3 points expiry enforcement (0042-0044), 37 assertions: doc 35 section 7's FIFO remainder formula at two granularities (`private.points_lot_remainders` per-lot, `private.points_expirable_remainder` aggregate) - a partially-consumed lot, a later untouched lot, a lot fully drained to 0, and a clawback-only consumption (no redeem) all matching hand-computed vectors; `public.points_next_expiry` (the wallet's shared read) correctly excluding an already-past-due lot; `public.expire_points` (the sweep) writing the right `expire` row, keeping the cached balance equal to the ledger sum, touching nothing for a zero-balance pair, and a second run expiring nothing more (idempotent); `public.points_expiry_warn` (the warn job) firing the 30d horizon alone for a 20-day-out lot, both the 30d AND 7d horizons in one run for a 5-day-out lot, the in_app/email channel split (`sent`/`pending`), and a second run raising nothing new (dedupe, keyed on lot `expires_at` cast back to `timestamptz` rather than compared as text - see 0044's header on why a text comparison against jsonb's ISO-8601 serialization never matches); both `cron.job` rows with their exact schedule and command; and the full I-A grant matrix (service_role only on every new `public.` surface, not even service_role on either `private.` helper) |
+| `rpc_points_expiry_smoke.sql` | Task 1.3 points expiry enforcement (0042-0046, including the review-fix pass), 60 assertions: doc 35 section 7's FIFO remainder formula ordered by EXPIRY not creation (I1) - a partially-consumed lot, a later untouched lot, a lot fully drained to 0, a clawback-only consumption, and the counter-example where a never-expiring `adjust` must be drained LAST rather than first (a null expiry sorting as `+∞`, not first); the aggregate at two `asof` values and the public wrapper agreeing with it; `public.points_next_expiry` correctly excluding an already-past-due lot; `public.expire_points` (the sweep) - SELF-CLEARING proven with a small `p_limit` (I2: a third pair is reached only once the first two clear a slot, not starved forever), the right `expire` row with the restored `x_expired_sum`/`d_drained_sum` audit fields (I5), the cached balance equal to the ledger sum, nothing for a zero-balance pair, a backfilled-already-past-due lot swept correctly (M5), and idempotency across every pair including the self-clearing trio; `public.points_expiry_warn` (the warn job) using the PROJECTED remainder at both horizons rather than the soonest lot (I3: a shadowed larger lot now fires its own combined total on the first run), the in_app/email channel split, a backfilled-already-past-due lot never warned (M5), and idempotency (dedupe on the projected figure itself, cast to `timestamptz` for the lot-expiry comparison rather than compared as text - see 0044/0046's headers on why a text comparison against jsonb's ISO-8601 serialization never matches); both `cron.job` rows with their exact schedule and command; the append-only fence's one permanent exception proven both ways (I4: the null-to-value transition succeeds and lands, every other column and every other `expires_at` transition and DELETE still raise); and the full I-A grant matrix including `public.points_expirable_remainder`, missed by the first pass (C1) |
 
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
@@ -221,7 +221,7 @@ same FIFO formula from the ledger each run - see `rpc_points_expiry_smoke.sql`
 - the other two via `for update skip locked`), so an overlapping run or a
 concurrent application write is safe.
 
-### Points expiry (0042-0044, task 1.3)
+### Points expiry (0042-0046, task 1.3 + review-fix pass)
 
 The 12-month rolling expiry published in the consumer terms and on the
 wallet is enforced by three pieces, all sharing ONE FIFO formula
@@ -231,21 +231,42 @@ wallet is enforced by three pieces, all sharing ONE FIFO formula
   row `expires_at = now() + interval '12 months'` itself (a caller-supplied
   `p_expires_at` still overrides it, but no caller sends one today) - the
   single earn-writer chokepoint, so no future writer can forget it. The
-  migration also backfills the earn row(s) that predate it, which required
-  briefly disabling `points_transactions`' append-only trigger for exactly
-  one `UPDATE` statement (see the migration header for why that is a
-  deliberate, reviewed exception and not a precedent).
-- **The sweep** (`public.expire_points`, 0043): writes one `expire` ledger row
-  per (business, consumer) pair whose past-due lots still have a positive
-  FIFO remainder, floored at 0, never driving the balance negative.
-- **The warn job** (`public.points_expiry_warn`, 0044): raises
-  `kind='points_expiring'` at the 30-day and 7-day horizons before a lot
-  expires, deduped per (pair, lot, horizon) via the notification's own `data`
-  payload. It writes directly into `public.notifications` rather than calling
-  `src/features/notifications/server/raise.ts`, because pg_cron cannot reach
-  TypeScript - the `in_app` row is a complete delivery, the `email` row is
-  durable but unsent (nothing enqueues a `notify.email` job for it yet; see
-  0044's header for the honest accounting of that gap).
+  migration backfills the earn row(s) that predate it under a PERMANENT,
+  narrow exception to the append-only fence (0042's own header, review fix
+  I4): the trigger function permits exactly one transition, `expires_at`
+  moving from null to a value with nothing else on the row changing, forever
+  - not a disable/re-enable pair around the one statement, which would have
+  left the fence down (however briefly) for every write, not just this one.
+- **The FIFO formula orders by EXPIRY, not creation** (0045, review fix I1):
+  a lot with no expiry (a future `adjust`/`referral_bonus`, doc 35 section 8)
+  sorts as `+∞` and is drained LAST, never first - getting this backwards
+  would expire points a redemption had already, honestly, spent.
+- **The sweep** (`public.expire_points`, 0043/0045): writes one `expire`
+  ledger row per (business, consumer) pair whose past-due lots still have a
+  positive FIFO remainder, floored at 0, never driving the balance negative.
+  Its candidate scan is SELF-CLEARING (0045, review fix I2): the exact
+  condition (`private.points_expirable_remainder(...) > 0`), not merely "a
+  past-due row exists", so a fully-drained pair drops out of candidacy and a
+  small `p_limit` cannot starve pairs beyond it forever. Its `expire` row
+  carries `x_expired_sum`/`d_drained_sum` alongside `remainder` (0045, review
+  fix I5) - doc 35 section 7's own snapshot shape, restored: since no
+  consumption links are stored anywhere, those two sums are the only record
+  of what a given sweep saw.
+- **The warn job** (`public.points_expiry_warn`, 0044/0046): raises
+  `kind='points_expiring'` using the PROJECTED remainder at the 30-day and
+  7-day horizons (0046, review fix I3) - the same formula the sweep uses, at
+  `now()+30d`/`now()+7d` - not "the soonest lot's own date", which could
+  shadow a larger, later lot and leave it with no real lead time at all.
+  Deduped on `(pair, horizon, the projected figure itself)`: an unchanged
+  figure on a later run is skipped, a changed one is sent again, under a
+  `for update skip locked` lock (0046, review fix M1) so two overlapping runs
+  cannot both pass the dedupe check for the same pair. It writes directly
+  into `public.notifications` rather than calling `src/features/
+  notifications/server/raise.ts`, because pg_cron cannot reach TypeScript -
+  the `in_app` row is a complete delivery, the `email` row is durable but
+  unsent (nothing enqueues a `notify.email` job for it yet; see 0044's header
+  for the honest accounting of that gap, and `src/features/notifications/
+  kinds.ts`'s registry comment on the same point).
 
 The wallet's own "what expires when" line (`public.points_next_expiry`) reads
 the identical formula, so the number a consumer sees is the number the sweep
@@ -444,6 +465,8 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0042_points_expiry_stamping.sql | 20260806041646 | 0042_points_expiry_stamping |
 | 0043_points_expiry_engine.sql | 20260806041706 | 0043_points_expiry_engine |
 | 0044_points_expiry_warn.sql | 20260806041731 | 0044_points_expiry_warn |
+| 0045_points_expiry_fifo_order_and_self_clearing.sql | 20260806050141 | 0045_points_expiry_fifo_order_and_self_clearing |
+| 0046_points_expiry_warn_projected_remainder.sql | 20260806050158 | 0046_points_expiry_warn_projected_remainder |
 
 **These versions are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`.**
 Every migration was applied in file order in a single pass, so unlike the

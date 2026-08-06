@@ -1,4 +1,4 @@
-﻿// GENERATED FILE: Supabase types for the LIVE project zlfxfzlnklqhajacngxf.
+// GENERATED FILE: Supabase types for the LIVE project zlfxfzlnklqhajacngxf.
 // NOT dcnpuvtbftpbcjcvfnlt, which is retired but still exists and still
 // answers its keys. See supabase/README.md "Project history".
 // Regenerate after migrations (MCP generate_typescript_types). Do not edit by hand.

@@ -54,6 +54,16 @@ const TRANSACTION_ICON: Record<string, string> = {
  * estimate. Absent when there is nothing left to expire for this pair
  * (rendered as no second line at all, matching the balance row's own
  * "nothing to show" posture elsewhere on this page).
+ *
+ * KNOWN WINDOW (review M4): `points_next_expiry` deliberately excludes a lot
+ * once its `expires_at` has passed (that lot is `expire_points`' job, not the
+ * wallet's own read - see 0043's comment on the predicate). Between the
+ * instant a lot passes due and the next 02:10 Manila sweep, this line simply
+ * omits it: the balance total above still includes those points (the sweep
+ * has not run yet), but this caption stops naming them. Accepted rather than
+ * narrowed: the alternative (showing an already-past date) reads as more
+ * confusing than a caption that quietly moves on to the NEXT lot, and the
+ * window is bounded to at most one day.
  */
 function NextExpiryLine({ nextExpiry }: { nextExpiry: NextExpiryDTO | null }) {
   if (nextExpiry === null) return null;

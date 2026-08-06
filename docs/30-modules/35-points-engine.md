@@ -136,7 +136,9 @@ For each live `loyalty`/`membership` campaign's `loyalty_programs`: qualifying i
 
 **Worked example:** balance 970. Claim "Free Milk Tea" (`points_cost=500`, `remaining` 50→49, `claim_expiry_days=30`): redeem txn `-500`, `balance_after=470`. (a) Staff validates day 3 → `redemptions` row, claim `redeemed`; final balance 470. (b) Never shown: day 30 sweep → claim `expired`, reversal txn `+500`, `balance_after=970`, `remaining` 49→50.
 
-## 7. Points expiry [V1 enforcement]
+## 7. Points expiry
+
+Enforced as of task 1.3 (`supabase/migrations/0042`-`0046`): `award_receipt_points` stamps `expires_at` on every positive earn row, `public.expire_points` (daily, 02:10 Manila) sweeps the FIFO remainder below, `public.points_expiry_warn` (daily, 02:25 Manila) raises `kind='points_expiring'` at the 30d/7d horizons, and the wallet's `public.points_next_expiry` reads the identical formula. See `supabase/README.md`'s "Points expiry" section for the shipped shape and its known limitations (the warn job's `email` channel is written but not yet delivered).
 
 Earn rows carry `expires_at` (set from MVP, §3). Consumption is **implicit FIFO — bookkeeping by arithmetic, not per-row allocation**. No consumption links are stored; the sweep derives the expirable remainder from ledger sums. This is correct because expiry order equals creation order: all positive rows in a pair share one TTL policy at write time, so `expires_at` is monotone in `created_at` (rows with null `expires_at` sort as +∞ and never expire; the policy-change caveat is in "Schema deltas proposed").
 

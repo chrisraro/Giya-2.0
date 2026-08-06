@@ -232,6 +232,85 @@ revoke execute on function public.award_receipt_points(uuid, integer, jsonb, uui
 grant execute on function public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz, boolean, jsonb)
   to service_role;
 
+-- ---------------------------------------------------------------- the append-only fence, widened by exactly one permanent transition
+-- Review fix (task 1.3, I4): the first version of this migration disabled
+-- `points_transactions_append_only` for the backfill statement below and
+-- re-enabled it immediately after, arguing "there is no other way to backfill
+-- an append-only column." That claim was false, and this repo already proves
+-- it false: 0026/0030's `notifications_read_at_only` is the SAME problem
+-- (a table that must stay immutable except for one specific, legitimate,
+-- recurring transition) solved the other way - by teaching the trigger
+-- FUNCTION to permit exactly that transition, rather than by taking the whole
+-- fence down around the write. That is what this migration now does instead.
+--
+-- WHY THIS IS BETTER THAN DISABLE/ENABLE, on both of the reviewer's points:
+--   1. The fence is never down for an instant. `ALTER TABLE ... DISABLE
+--      TRIGGER` has a window, however brief, during which ANY update to this
+--      table - not just this migration's own statement - would silently
+--      succeed. The narrow-guard function is live and enforcing at all times;
+--      there is no window, so there is nothing to reason about the runner's
+--      transaction wrapping FOR. (The previous header's claim that `DISABLE
+--      TRIGGER`'s `ShareRowExclusiveLock` was "what made it safe" was true as
+--      far as it went, but it was an unstated, accidental safety property of
+--      a mechanism chosen for the wrong reason - not a justification for
+--      choosing that mechanism.)
+--   2. The allowance is PERMANENT and DOCUMENTED, not a disable/enable pair a
+--      future author can point to as precedent for turning the money fence
+--      off for their own, different write. Anyone who tries to UPDATE a
+--      column this trigger does not name, or tries to move `expires_at`
+--      between two non-null values, or tries to clear it back to null, is
+--      refused - forever, by the same mechanism that already refuses every
+--      other edit.
+--
+-- Every other column stays exactly as immutable as 0012 made it. The only
+-- transition this permits, ever, is `expires_at` moving from null to a
+-- non-null value with nothing else on the row changing - the shape of a
+-- historical stamp being recorded for the first time, never a correction to
+-- what was already known (corrections remain compensating entries per 0012's
+-- own rule, entered as new rows).
+create or replace function private.points_transactions_append_only()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if TG_OP = 'DELETE' then
+    raise exception 'points_transactions is append-only';
+  end if;
+
+  -- TG_OP = 'UPDATE'. `is distinct from` throughout (not `<>`), matching
+  -- 0026/0030's own idiom: several of these columns are nullable and
+  -- `null <> null` is null, which would let a null-to-null "no-op" slip past
+  -- a `<>` guard undetected on the columns that must not move at all.
+  if old.id            is distinct from new.id
+     or old.business_id  is distinct from new.business_id
+     or old.consumer_id  is distinct from new.consumer_id
+     or old.type         is distinct from new.type
+     or old.points       is distinct from new.points
+     or old.balance_after is distinct from new.balance_after
+     or old.receipt_id   is distinct from new.receipt_id
+     or old.claim_id     is distinct from new.claim_id
+     or old.campaign_id  is distinct from new.campaign_id
+     or old.rule_snapshot is distinct from new.rule_snapshot
+     or old.reverses_id  is distinct from new.reverses_id
+     or old.adjust_reason is distinct from new.adjust_reason
+     or old.actor_id     is distinct from new.actor_id
+     or old.created_at   is distinct from new.created_at
+     or old.created_by   is distinct from new.created_by
+     -- The one permitted transition: expires_at null -> non-null. Both halves
+     -- are required: `old.expires_at is not null` catches an attempt to
+     -- CHANGE an already-stamped value; `new.expires_at is null` catches an
+     -- attempt to CLEAR one back out.
+     or old.expires_at is not null
+     or new.expires_at is null then
+    raise exception
+      'points_transactions is append-only (the one exception: stamping expires_at from null to a value, nothing else)';
+  end if;
+
+  return new;
+end
+$$;
+
 -- ---------------------------------------------------------------- backfill
 -- The live earn row(s) predating this migration: expires_at is null today
 -- because nothing ever stamped it (task brief, live-verified). The 12-month
@@ -249,27 +328,30 @@ grant execute on function public.award_receipt_points(uuid, integer, jsonb, uuid
 -- migration (or a future migration touching the same rows) never re-stamps a
 -- row this statement already fixed.
 --
--- THE TRIGGER MUST BE DISABLED FOR THIS ONE STATEMENT. 0012's
--- `points_transactions_append_only` trigger raises unconditionally on ANY
--- update, by ANY role, including the table owner running this migration -
--- that is the whole point of the trigger (fence 2 of the three the table
--- carries, belt-and-suspenders alongside the privilege revoke). A backfill
--- migration is exactly the narrow, reviewed, one-time exception that
--- justifies disabling it for the single statement below and re-enabling it
--- immediately after, in the SAME migration transaction - nothing else in this
--- file or any future one gets a window where the guard is down, and the
--- guard is back on before this transaction commits. This is not a
--- reusable escape hatch; it is what "corrections are compensating entries,
--- never edits" (0012) still requires be true of every OTHER write to this
--- table forever - THIS row is stamping in a fact (the policy's effective
--- date) that was always true of it and simply was not recorded yet, not
--- changing what it earned, when, or for whom.
-alter table public.points_transactions disable trigger points_transactions_append_only;
-
+-- No DISABLE/ENABLE around this statement (see the header above): the
+-- trigger function replaced above already permits exactly this transition,
+-- at every moment including this one, so there is no separate step to take
+-- and no multi-statement window whose atomicity depends on the runner - a
+-- money-table fence should not need one.
+--
+-- REVIEW NOTE (M5), stated explicitly rather than left implicit: a row old
+-- enough that `created_at + 12 months` is already in the past gets stamped
+-- with a PAST `expires_at` by this exact statement, is picked up directly by
+-- `public.expire_points` (0045) on its next run, and NEVER passes through
+-- `public.points_expiry_warn` (0046) at all - that job only looks at lots
+-- whose `expires_at` is still in the future (0046's candidate scan;
+-- `points_next_expiry`'s own predicate makes the identical call for the
+-- wallet, see 0043). A very old backfilled balance is therefore swept with
+-- zero advance notice. Deliberate, not an oversight: the warning's entire
+-- job is to give lead time before something that HASN'T happened yet, and a
+-- backfilled row's whole point is that the 12-month clock already ran out
+-- while nobody was stamping it - manufacturing a grace period after the
+-- fact would let a stale, already-expired-by-the-published-policy balance
+-- dodge the very rule the terms and the wallet have stated all along. No
+-- grace period is granted. See `rpc_points_expiry_smoke.sql`'s dedicated
+-- fixture for a live proof of this exact case.
 update public.points_transactions
    set expires_at = created_at + interval '12 months'
  where type = 'earn'
    and points > 0
    and expires_at is null;
-
-alter table public.points_transactions enable trigger points_transactions_append_only;
