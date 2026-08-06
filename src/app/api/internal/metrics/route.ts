@@ -102,7 +102,14 @@ const MIN_METRICS_TOKEN_LENGTH = 16;
 function readMetricsToken(): string | undefined {
   const raw = process.env.METRICS_TOKEN;
   if (raw === undefined) return undefined;
-  return raw.trim().length >= MIN_METRICS_TOKEN_LENGTH ? raw : undefined;
+  // Trim on the way OUT, not just for the length check. `readBearerToken`
+  // returns the provided token trimmed, so returning `raw` untrimmed here
+  // makes the two sides asymmetric: a METRICS_TOKEN carrying a trailing
+  // newline - from a .env heredoc, a dashboard paste, or `supabase secrets
+  // set` - would make the CORRECT bearer 401 forever, with no way to tell it
+  // apart from a wrong one.
+  const trimmed = raw.trim();
+  return trimmed.length >= MIN_METRICS_TOKEN_LENGTH ? trimmed : undefined;
 }
 
 function readBearerToken(request: Request): string | null {

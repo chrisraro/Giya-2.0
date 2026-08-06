@@ -115,6 +115,20 @@ describe("when METRICS_TOKEN is configured but too short to trust", () => {
     expect(response.status).toBe(404);
     expect(mocks.loadMetrics).not.toHaveBeenCalled();
   });
+
+  it("matches a configured token that carries trailing whitespace", async () => {
+    // A trailing newline is the most common way this variable gets set wrong:
+    // .env heredocs, dashboard pastes and `supabase secrets set` all produce
+    // one. The length floor trimmed but the accessor returned the raw value,
+    // while the bearer side trims - so the CORRECT token answered 401
+    // forever and was indistinguishable from a wrong one.
+    vi.stubEnv("METRICS_TOKEN", `${TOKEN}
+`);
+
+    const response = await callRoute({ authorization: `Bearer ${TOKEN}` });
+
+    expect(response.status).toBe(200);
+  });
 });
 
 describe("when METRICS_TOKEN is configured", () => {
