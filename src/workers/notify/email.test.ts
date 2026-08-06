@@ -358,6 +358,37 @@ describe("preferences are re-checked at send time", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  // Review fix (task 1.2, N6): nothing stops one person from being BOTH a
+  // business owner and a consumer (their own `consumers` row from shopping
+  // elsewhere, or at their own business). Before this fix, that owner's
+  // consumer-facing `email_enabled=false` toggle fell through to suppress
+  // campaign_budget_exhausted too - a consumer preference muting a
+  // staff-facing, business-operational alert. Doc 30 section 5.5 treats
+  // staff-facing kinds as transactional: the toggle must not reach them.
+  it("DOES email a staff-facing kind even when the recipient's OWN consumers row has email_enabled=false", async () => {
+    const { client, updates } = supabaseDouble({
+      rows: [
+        rejectionRow({
+          kind: "campaign_budget_exhausted",
+          title: "A campaign paused itself",
+          body: "Capped Promo reached its points budget and has been paused automatically.",
+          data: { route: "/business/campaigns", params: { campaign_id: "camp-1" } },
+        }),
+      ],
+      profile: { is_suspended: false, consumers: { email_enabled: false } },
+    });
+    const send = sendDouble();
+
+    const result = await runNotifyEmail(
+      { job_id: "job-1", notification_ids: ["n1"] },
+      { supabase: client, send, ...deps() },
+    );
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ sent: 1 });
+    expect(updates[0]?.patch).toMatchObject({ status: "sent" });
+  });
+
   it("records a missing address rather than sending nowhere", async () => {
     const { client, updates } = supabaseDouble();
     const send = sendDouble();

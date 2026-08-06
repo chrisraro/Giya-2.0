@@ -1317,6 +1317,14 @@ export const AWARD_ERROR_HANDLING: Record<string, AwardErrorSeverity> = {
   // rather than stranding the receipt or minting past a budget a concurrent
   // request already exhausted.
   CAMPAIGN_BUDGET_RACE: "warn",
+  // Review fix (task 1.2, N5): synthetic, never raised by any RPC. Only
+  // `awardPoints`'s own catch around `awardPointsInner` produces this
+  // message, when that function's "NEVER THROWS" contract is somehow
+  // violated. Documented here so it is a first-class member of this
+  // taxonomy rather than a bare literal `refuseRpc` would otherwise look up
+  // and silently default to "error" for anyway - the explicit entry is what
+  // makes the default the DOCUMENTED severity rather than a coincidence.
+  AWARD_INTERNAL_ERROR: "error",
 };
 
 /**
@@ -1401,11 +1409,21 @@ export async function awardPoints(input: {
   receiptId: string;
   plan: AwardPlan;
 }): Promise<AwardResult> {
-  // Review fix (task 1.2, M9): wrapped so a broken "never throws" contract
+  // Review fix (task 1.2, M9/N5): wrapped so a broken "never throws" contract
   // somewhere inside `awardPointsInner` cannot silently skip the exhaustion
   // check below. This function's own doc says "NEVER THROWS, for either
   // caller" - if that promise is ever violated by a future change, the
   // pause/notify check still runs rather than being skipped along with it.
+  //
+  // N5: the caught error is routed through the SAME `refuseRpc` every other
+  // refusal in this module uses, rather than a hand-built result literal -
+  // so AWARD_INTERNAL_ERROR gets the same `reject_note` breadcrumb
+  // (`award_failed:AWARD_INTERNAL_ERROR`) and the same severity lookup
+  // (AWARD_ERROR_HANDLING above) as every other code, instead of silently
+  // proceeding to the consumer notification unrecorded. The real thrown
+  // value is logged separately, first, because `refuseRpc` only ever sees
+  // the synthetic `{message: "AWARD_INTERNAL_ERROR"}` it is handed below,
+  // never the actual exception/stack trace.
   let result: AwardResult;
   try {
     result = await awardPointsInner(input);
@@ -1414,7 +1432,12 @@ export async function awardPoints(input: {
       `[receipts/award] awardPointsInner threw unexpectedly for receipt ${input.receiptId}; this violates its own "never throws" contract`,
       error,
     );
-    result = { kind: "refused", code: "AWARD_INTERNAL_ERROR", severity: "error" };
+    result = await refuseRpc({
+      deps: input.deps,
+      receiptId: input.receiptId,
+      error: { message: "AWARD_INTERNAL_ERROR" },
+      notePrefix: "award_failed",
+    });
   }
   // Doc 34 section 5, task 1.2: the post-commit exhaustion pause. Runs AFTER
   // every path above has settled (awarded, refused, zero-point, or a race

@@ -286,13 +286,22 @@ async function suppressionReason(
   // (0002), not a consumer-only one.
   if (data.is_suspended) return "recipient is suspended";
 
+  // Review fix (task 1.2, N6): checked BEFORE either consumer-shaped
+  // suppression below, unconditionally. Doc 30 section 5.5 treats a
+  // staff-facing kind as a transactional business alert, not a consumer
+  // preference - and an owner who ALSO happens to hold a `consumers` row
+  // (nothing prevents one person from being both) must not have
+  // `campaign_budget_exhausted` muted by THAT row's `email_enabled` toggle,
+  // any more than a staff profile with no `consumers` row at all should be
+  // suppressed by "recipient is not a consumer" (review I4, below). Both are
+  // the same mismatch in opposite directions; this bypasses both at once.
+  if (STAFF_FACING_KINDS.has(kind)) return null;
+
   if (data.consumers === null) {
-    // A profile with no consumers row is staff. Review fix (task 1.2, I4):
-    // doc 30 section 5.3 now registers ONE staff-facing kind that emails
-    // (`campaign_budget_exhausted`) - everything else on this channel is
-    // still consumer-only, so a staff profile there is a MISMATCH, not the
-    // expected shape, and stays suppressed.
-    return STAFF_FACING_KINDS.has(kind) ? null : "recipient is not a consumer";
+    // A profile with no consumers row is staff, and every kind that reaches
+    // here is consumer-only (the one staff-facing kind was already handled
+    // above), so this remains a mismatch worth suppressing.
+    return "recipient is not a consumer";
   }
 
   // Doc 30 section 5.5 exempts TRANSACTIONAL email from `email_enabled`, and

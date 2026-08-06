@@ -15,6 +15,8 @@
 
 1. **TDD.** Red first. Each task names its test files; implementer reports test output. Full suite green (baseline 3820) before DONE.
 2. **Money path:** ledger writes ONLY via SECURITY DEFINER RPCs. New RPCs/migrations carry the three-layer fence (RLS + privilege revokes + raising triggers) and pgTAP tests.
+   - **Every new `public.` SECURITY DEFINER function needs pgTAP grant assertions in the same commit** — `anon`/`authenticated` denied, `service_role` allowed — and any `private.` helper it wraps asserted as not executable even by `service_role`. Correct grants in the migration are not enough; the assertion is what catches a future misgrant. Pattern: `rpc_award_smoke.sql`'s I-A block. This was an Important review finding on both T1.1 and T1.2 — do not make it a third.
+   - **Never meter a per-campaign budget with `sum(points) where campaign_id = X`.** `points_transactions.points` is the whole-receipt total and `campaign_id` names only the primary campaign. Use the attribution helpers from 0041 (`campaign_points_awarded`, `campaign_customer_earn_count`), which read the campaign's own contribution out of `rule_snapshot`.
 3. **Migrations:** applied live to `zlfxfzlnklqhajacngxf` via MCP, mirrored in `supabase/migrations/`, recorded in `supabase/README.md`. Next number: 0037.
 4. **RSC boundary:** no functions crossing into `"use client"`.
 5. **Design system:** MD3 tokens (`text-title-m`, `bg-surface-container`, `rounded-md3-*`, `material-symbols-rounded`), skeleton `loading.tsx`, `EmptyState`, `motion/react` gated by `useReducedMotion`. UI tasks run under impeccable.

@@ -70,6 +70,30 @@
 -- is configured, not only `max_total_points`), and this migration only fixes
 -- the stale comment that misdescribed the guard as already covering it.
 --
+-- PERFORMANCE, NAMED HONESTLY (review N2, not fixed here). The naive formula
+-- this replaces was an index lookup on `pt_campaign_idx` (business_id,
+-- campaign_id-scoped). `private.campaign_earn_contribution` reads
+-- `rule_snapshot`'s jsonb arrays per row instead, which no index on this
+-- table currently covers, so `campaign_points_awarded`/
+-- `campaign_customer_earn_count` are each an O(all earn rows for the
+-- business) scan - not O(rows for this campaign). Doc 34 section 6's
+-- stacking means a business can accumulate many earn rows quickly, and this
+-- runs UP TO THREE TIMES per receipt (the TS-side advisory read in
+-- `resolveCampaignBudgets`, the RPC's own authoritative re-check in step 4c
+-- - the second and third of those while `receipts`, `business_customers` AND
+-- now `campaigns` are all held `for update`) plus once more, unlocked, from
+-- `pauseExhaustedCampaigns` post-commit. Correctness was the binding
+-- constraint for this task, not this cost, and no index change ships here.
+-- The cheapest bound identified, for whoever picks this up: restrict both
+-- aggregate queries to `pt.created_at >= (select starts_at from
+-- public.campaigns where id = p_campaign_id)` (or the campaign's own
+-- `created_at` as a safe fallback when `starts_at` is null) - a campaign can
+-- have no earn rows before it existed, and that predicate alone makes
+-- `pt_biz_created_idx (business_id, created_at desc)` selective again
+-- without a new index. A dedicated partial/expression index on the
+-- attributed campaign ids inside `rule_snapshot` would close the rest of the
+-- gap but is a larger, separate change.
+--
 -- Source docs:
 --   * docs/30-modules/34-campaign-engine.md section 5 (amended alongside
 --     this migration for the correct attribution formula)

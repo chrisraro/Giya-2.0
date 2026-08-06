@@ -160,6 +160,11 @@ function createFakeSupabase(input: {
   campaignPointsAwardedError?: FakeError;
   campaignCustomerEarnCount?: number | Record<string, number>;
   campaignCustomerEarnCountError?: FakeError;
+  // N5: simulates `awardPointsInner`'s "never throws" contract being violated
+  // by something underneath it (here, the award_receipt_points RPC call
+  // itself throwing instead of resolving with `{data, error}`), so
+  // `awardPoints`'s own catch-and-recover wrapper has something to catch.
+  awardRpcThrows?: Error;
 }): FakeSupabase {
   const ops: FakeOp[] = [];
   const rpcCalls: Array<{ name: string; args: unknown }> = [];
@@ -250,6 +255,9 @@ function createFakeSupabase(input: {
             ? lookup
             : (lookup !== undefined && campaignId !== undefined ? lookup[campaignId] : undefined) ?? 0;
         return Promise.resolve({ data: value, error: null });
+      }
+      if (name === "award_receipt_points" && input.awardRpcThrows !== undefined) {
+        throw input.awardRpcThrows;
       }
       if (name === "award_receipt_points" && awardRpcQueue !== undefined && awardRpcQueue.length > 0) {
         return Promise.resolve(awardRpcQueue.shift() as FakeResult);
@@ -1101,6 +1109,55 @@ describe("awardPoints", () => {
 });
 
 // ===========================================================================
+// awardPoints: AWARD_INTERNAL_ERROR contract (review N5)
+//
+// `awardPointsInner`'s own doc says "NEVER THROWS, for either caller" -
+// `awardPoints` wraps it in a try/catch (review M9) precisely so a violation
+// of that contract cannot skip the post-commit exhaustion check. N5's finding
+// was that the catch branch stopped there: no `reject_note` breadcrumb, and
+// `AWARD_INTERNAL_ERROR` sat outside `AWARD_ERROR_HANDLING`, so a genuine
+// internal failure proceeded to the consumer notification completely
+// unrecorded. These tests pin the fix: the caught error is routed through the
+// SAME `refuseRpc` every other refusal in this module uses.
+// ===========================================================================
+
+describe("awardPoints: AWARD_INTERNAL_ERROR contract (N5)", () => {
+  it("annotates the receipt with the same award_failed: breadcrumb refuseRpc writes for every other code", async () => {
+    const supabase = createFakeSupabase({ awardRpcThrows: new Error("some contract violation") });
+
+    const result = await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan(),
+    });
+
+    expect(result).toEqual({ kind: "refused", code: "AWARD_INTERNAL_ERROR", severity: "error" });
+    const updates = supabase.opsFor("receipts", "update");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.payload).toEqual({ reject_note: "award_failed:AWARD_INTERNAL_ERROR" });
+  });
+
+  it("classifies AWARD_INTERNAL_ERROR as severity 'error' in the documented taxonomy", () => {
+    expect(AWARD_ERROR_HANDLING.AWARD_INTERNAL_ERROR).toBe("error");
+  });
+
+  it("still runs the post-commit exhaustion pause when awardPointsInner throws", async () => {
+    const supabase = createFakeSupabase({ awardRpcThrows: new Error("boom") });
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({ maxTotalPointsCampaignIds: ["01980000-0000-7000-8000-0000000000ca"] }),
+    });
+
+    expect(pauseExhaustedCampaignsMock).toHaveBeenCalledWith(
+      { supabase: supabase.client },
+      ["01980000-0000-7000-8000-0000000000ca"],
+    );
+  });
+});
+
+// ===========================================================================
 // awardPoints: campaign budget checks + post-commit exhaustion pause
 // (doc 34 section 5, task 1.2)
 // ===========================================================================
@@ -1937,8 +1994,16 @@ describe("award RPC error handling (0018)", () => {
     "CAMPAIGN_BUDGET_RACE",
   ] as const;
 
-  it("maps every message 0018 raises, and nothing it does not", () => {
-    expect(Object.keys(AWARD_ERROR_HANDLING).sort()).toEqual([...MIGRATION_ERRORS].sort());
+  it("maps every message 0018 raises, and nothing it does not (plus the one synthetic, TS-side code)", () => {
+    // N5: AWARD_INTERNAL_ERROR is never raised by any migration - it is
+    // `awardPoints`'s own synthetic code for when `awardPointsInner` violates
+    // its "never throws" contract - so it is asserted as the one deliberate
+    // exception to "and nothing it does not" rather than folded silently into
+    // MIGRATION_ERRORS above, which stays a verified-line-by-line match to
+    // 0018/0023/0037/0040's actual `raise exception` strings.
+    expect(Object.keys(AWARD_ERROR_HANDLING).sort()).toEqual(
+      [...MIGRATION_ERRORS, "AWARD_INTERNAL_ERROR"].sort(),
+    );
   });
 
   it("treats RECEIPT_ALREADY_AWARDED as benign and annotates nothing", async () => {

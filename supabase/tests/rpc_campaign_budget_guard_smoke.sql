@@ -32,7 +32,7 @@ begin;
 
 set local search_path = public, extensions;
 
-select plan(27);
+select plan(34);
 
 -- ---------------------------------------------------------------- fixtures
 insert into auth.users (id, aud, role, email, raw_user_meta_data)
@@ -548,7 +548,49 @@ select is(
   1,
   'exactly one award_receipt_points overload exists (the dropped 6-arg form is genuinely gone)');
 
--- 27. campaigns M, L and S are all untouched by this suite (auto-pause is
+-- 27-33 (review N1, blocking). 0041's two NEW public security-definer
+-- surfaces get the SAME grant scrutiny as `award_receipt_points` and
+-- `public.fixed_per_visit_already_paid` before them (rpc_award_smoke.sql's
+-- own I-A block): the public wrapper is service-role only, and the private
+-- helper it wraps is not directly reachable even by service_role (it is
+-- only ever called from inside a SECURITY DEFINER context - this wrapper,
+-- or award_receipt_points itself).
+select ok(
+  not has_function_privilege('anon',
+    'public.campaign_points_awarded(uuid, uuid)', 'EXECUTE'),
+  'anon cannot execute public.campaign_points_awarded');
+
+select ok(
+  not has_function_privilege('authenticated',
+    'public.campaign_points_awarded(uuid, uuid)', 'EXECUTE'),
+  'authenticated cannot execute public.campaign_points_awarded');
+
+select ok(
+  has_function_privilege('service_role',
+    'public.campaign_points_awarded(uuid, uuid)', 'EXECUTE'),
+  'service_role can execute public.campaign_points_awarded');
+
+select ok(
+  not has_function_privilege('anon',
+    'public.campaign_customer_earn_count(uuid, uuid, uuid)', 'EXECUTE'),
+  'anon cannot execute public.campaign_customer_earn_count');
+
+select ok(
+  not has_function_privilege('authenticated',
+    'public.campaign_customer_earn_count(uuid, uuid, uuid)', 'EXECUTE'),
+  'authenticated cannot execute public.campaign_customer_earn_count');
+
+select ok(
+  has_function_privilege('service_role',
+    'public.campaign_customer_earn_count(uuid, uuid, uuid)', 'EXECUTE'),
+  'service_role can execute public.campaign_customer_earn_count');
+
+select ok(
+  not has_function_privilege('service_role',
+    'private.campaign_points_awarded(uuid, uuid)', 'EXECUTE'),
+  'service_role cannot execute the private campaign_points_awarded helper directly');
+
+-- 34. campaigns M, L and S are all untouched by this suite (auto-pause is
 --     TypeScript post-commit, not this RPC).
 select is(
   (select count(*)::int from public.campaigns
