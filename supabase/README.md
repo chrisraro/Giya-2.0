@@ -780,7 +780,7 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0055_campaigns_sweep_skip_visibility.sql | 20260806093311 | 0055_campaigns_sweep_skip_visibility |
 | *(not in this worktree - task 2.2)* | 20260806095729 | 0056_balance_check |
 | *(not in this worktree - task 2.2)* | 20260806104108 | 0057_balance_check_review_fixes |
-| 0059_job_health_alerts.sql | 20260806110554 | 0058_job_health_alerts |
+| 0060_job_health_alerts.sql | 20260806110554 | 0058_job_health_alerts |
 | *(not in this worktree - task 2.2)* | 20260806111225 | 0058_balance_check_deployment_correction |
 | *(not in this worktree - task 2.2)* | 20260806114840 | 0059_balance_check_trigger_privilege_fix |
 | 0061_job_health_terminal_failures.sql | 20260806120833 | 0061_job_health_terminal_failures |
@@ -815,7 +815,7 @@ Notes:
   0058. Both are applied live, at distinct timestamps, in the order shown
   above; only the FIRST one's filename was renamed (to `0059`, body
   byte-identical to what ran) so a merged file set has a defined replay
-  order. See `supabase/migrations/0059_job_health_alerts.sql`'s own top note
+  order. See `supabase/migrations/0060_job_health_alerts.sql`'s own top note
   for the full account - the same drift-gets-written-down rule 0011b and the
   0042/0047 incident both established.
 - **0020 makes `receipts` a Realtime table.** Before it, the `supabase_realtime`

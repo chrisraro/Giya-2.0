@@ -51,7 +51,7 @@ import { estimateMaxGapMinutes } from "./cron-interval";
 // what "do not build a second email path" actually forbids.
 //
 // -----------------------------------------------------------------------------
-// DEDUPE: see supabase/migrations/0059_job_health_alerts.sql's header for the
+// DEDUPE: see supabase/migrations/0060_job_health_alerts.sql's header for the
 // full argument (filed as 0059, applied live as 0058_job_health_alerts - see
 // that file's own top note on the ledger-name mismatch). Short version: the
 // key is the job's own name, because that is the one part of "this job is

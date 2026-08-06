@@ -11,11 +11,14 @@
 --
 -- This file was authored as `0058_job_health_alerts.sql` and APPLIED LIVE
 -- under that name: `supabase_migrations.schema_migrations` carries
--- `20260806110554 | 0058_job_health_alerts`. It was renamed to 0060 on merge (via an intermediate 0059, which task 2.2 then also claimed)
--- because task 2.2's deployment correction was authored concurrently in a
--- separate checkout and also took 0058 (`20260806111225 |
--- 0058_balance_check_deployment_correction`), and a file set with two 0058s
--- has no defined replay order.
+-- `20260806110554 | 0058_job_health_alerts`.
+--
+-- It was then renamed twice. First to 0059, because task 2.2's deployment
+-- correction was authored concurrently in a separate checkout and also took
+-- 0058 (`20260806111225 | 0058_balance_check_deployment_correction`). Then to
+-- 0060, because task 2.2's NEXT pass took 0059
+-- (`20260806114840 | 0059_balance_check_trigger_privilege_fix`). Each time,
+-- a file set with two of the same number has no defined replay order.
 --
 -- Both are applied live, with distinct version timestamps, in the order
 -- job-health-alerts then balance-check-correction. Supabase keys on the
