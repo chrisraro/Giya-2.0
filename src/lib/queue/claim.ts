@@ -87,10 +87,11 @@ const RECLAIM_TIMEOUT_MULTIPLIER = 2;
  * Doc 39's own design for this predates `jobs.heartbeat_at`: Redis `SET
  * {env}:jobs:hb:{job_id} EX 60`, refreshed every `HEARTBEAT_INTERVAL_MS`
  * (20s) - a TTL that survives two missed refreshes and expires only on the
- * third. 0029's column comment ports the storage from Redis to Postgres while
- * saying outright that "the Redis TTL semantics (EX 60, refreshed every 20s)
- * are right for the 20-second refresh"; this constant is that TTL, carried
- * the rest of the way.
+ * third. The `EX 60` figure is doc 39 line 45's, cited above. 0029's column
+ * comment then ports the storage from Redis to Postgres, noting that "doc 39
+ * puts the beat in Redis with a TTL and that is right for the 20-second
+ * refresh" - it does not restate the TTL value itself. This constant carries
+ * doc 39's TTL the rest of the way.
  *
  * `RECLAIM_TIMEOUT_MULTIPLIER * maxDurationSeconds` is the WRONG window for a
  * job that is actively heartbeating: `ocr.process` heartbeats every 20s until
@@ -268,9 +269,22 @@ export async function claimJob(input: ClaimJobInput): Promise<ClaimResult> {
  *   judged against `HEARTBEAT_STALE_MS` (60s), because a live heartbeat is
  *   the fresher and more direct signal doc 39 designed it to be: a worker
  *   heartbeating every `HEARTBEAT_INTERVAL_MS` is provably alive within
- *   seconds of its last refresh, and provably dead within `HEARTBEAT_STALE_MS`
- *   of it going quiet, independent of how long the queue's own `maxDuration`
- *   budget is.
+ *   seconds of its last refresh, and - after `HEARTBEAT_STALE_MS` of silence -
+ *   overwhelmingly likely to be dead, independent of the queue's own
+ *   `maxDuration` budget.
+ *
+ *   "Likely", not "provably". The fallback arm below inherits a genuine
+ *   proof: `2 * maxDuration` is past the point Vercel itself kills the
+ *   invocation, so a reclaim there cannot race a live worker. The live arm
+ *   has no such guarantee, because it rests on the refreshes succeeding -
+ *   which is precisely the thing a heartbeat cannot assume about itself.
+ *   Three consecutive failed `UPDATE`s, or 60s of event-loop starvation,
+ *   and this arm will reclaim a worker that is still running. That trade is
+ *   deliberate and is doc 39's own design (60s of exposure beats 120s of
+ *   wasted `held` responses on a dead row), but it is an inference, not a
+ *   proof, and the difference matters downstream: see `finishJob`, which
+ *   filters on `id` alone and was previously protected by the guarantee this
+ *   arm gives up.
  *
  *   Everything else - no `heartbeat_at` at all, or one still equal to
  *   `started_at` because no refresh has landed yet - falls back to
