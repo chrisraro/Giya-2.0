@@ -7,16 +7,10 @@ import { AuthCard } from "@/components/auth/auth-card";
 import { Captcha, CAPTCHA_ENABLED } from "@/components/auth/captcha";
 import { TextField } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
-import { createClient } from "@/lib/supabase/client";
-import { withMinDelay } from "@/lib/auth/timing";
 
 const EMAIL_RE = /^\S+@\S+\.\S+$/;
 
-// Floor under the resetPasswordForEmail round trip so a known address (which
-// may involve minting a token and handing off to the mail provider) and an
-// unknown one (which can short-circuit) are not distinguishable by how long
-// the request took. See src/lib/auth/timing.ts.
-const MIN_RESPONSE_DELAY_MS = 800;
+const RATE_LIMIT_MESSAGE = "Too many requests. Please wait a moment and try again.";
 
 export default function ForgotPasswordPage() {
   const [email, setEmail] = React.useState("");
@@ -47,39 +41,57 @@ export default function ForgotPasswordPage() {
 
     setFormError("");
     setSubmitting(true);
-    const supabase = createClient();
-    // Deliberately not branching on the outcome here, in either direction:
-    // Supabase's own recovery endpoint answers alike for a registered and
-    // an unregistered address, and this page must not reintroduce the leak
-    // by treating a rejected promise (network hiccup, provider error) any
-    // differently from a resolved one. try/catch exists only to stop a
-    // thrown network error from crashing the page - the catch block is
-    // empty on purpose, since surfacing it would itself be a second, louder
-    // channel for the same leak this page exists to close.
+
+    // The actual Supabase call - and the rate limit and timing floor that
+    // guard it - live server-side in
+    // src/app/api/v1/auth/forgot-password/route.ts, which is the only thing
+    // that can be gated by this repo's limiter (src/lib/rate-limit.ts); a
+    // browser calling Supabase directly never touches it. `response` stays
+    // null on a thrown network error rather than letting the page crash.
+    let response: Response | null = null;
     try {
-      await withMinDelay(
-        () =>
-          supabase.auth.resetPasswordForEmail(email, {
-            redirectTo: `${window.location.origin}/auth/callback?next=/reset-password`,
-            ...(captchaToken && { captchaToken }),
-          }),
-        MIN_RESPONSE_DELAY_MS,
-      );
+      response = await fetch("/api/v1/auth/forgot-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, ...(captchaToken && { captchaToken }) }),
+      });
     } catch {
-      // Swallowed intentionally - see comment above.
+      // Falls through to the generic confirmation below - see comment there.
     }
+
     setSubmitting(false);
     // Each hCaptcha token is single-use: reset the widget after every
-    // submit so a retry (from the confirmation screen's own "back to sign
-    // in" flow, or a future resend) gets a fresh token.
+    // submit so a retry gets a fresh token.
     captchaRef.current?.resetCaptcha();
     setCaptchaToken("");
+
+    // A 429 from OUR OWN limiter is the one outcome this page is allowed to
+    // show differently. Being throttled says nothing about whether `email`
+    // has an account: the route's two budgets are keyed by caller IP and by
+    // the raw address itself, checked BEFORE Supabase is ever asked, so a
+    // known and an unknown address hit the exact same limiter the exact
+    // same way. Surfacing "you're going too fast" is therefore not the leak
+    // this page exists to prevent.
+    //
+    // Everything else - 200, any other status the route might ever answer
+    // with, or the fetch above throwing outright - collapses to the same
+    // confirmation, for the same reason the route itself never branches on
+    // Supabase's own answer: there is no other outcome here that is safe to
+    // describe differently.
+    if (response?.status === 429) {
+      setFormError(RATE_LIMIT_MESSAGE);
+      return;
+    }
+
     setSentTo(email);
   }
 
   if (sentTo) {
     return (
-      <AuthCard title="Check your email" subtitle="If an account exists, we sent password reset instructions to:">
+      <AuthCard
+        title="Check your email"
+        subtitle="If that address has an account, we've sent a link to:"
+      >
         <p className="text-center text-body-l text-on-surface">{sentTo}</p>
         <p className="text-center text-body-s text-on-surface-variant">
           Open the link on this device to choose a new password. If you do not see it, check your

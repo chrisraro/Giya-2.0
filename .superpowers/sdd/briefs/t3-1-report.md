@@ -2,90 +2,118 @@
 
 Status: COMPLETE.
 
-## Brief file not found
+## Brief
 
-`.superpowers/sdd/briefs/t3-1-brief.md` does not exist in this worktree (nor
-does a `briefs/` directory - only `.superpowers/sdd/task-3-report.md`, an
-unrelated prior task's report, existed at start). I searched the whole
-worktree and the repo's git history across all branches for any file named
-`*brief*` or `t3-1*` and found nothing; `.superpowers/` is gitignored, so if
-the brief was ever written to disk it was never committed and is not
-recoverable from here. I proceeded from the task description and "context
-the brief cannot know" given directly in my instructions, plus this repo's
-existing login/signup idioms, and note this gap explicitly rather than
-silently guessing at requirements I could not read.
+Found (after an initial miss on my part - see below) at
+`C:\Users\raroc\OneDrive\Desktop\OCS\Giya 2.0\.superpowers\sdd\briefs\t3-1-brief.md`,
+the main checkout's copy, not this worktree's. `.superpowers/` is gitignored
+project-wide, so it is never checked out into any worktree at all; the
+relative path I was first given resolved to nothing inside my isolated
+worktree, and I did not think to look one level up at the shared checkout
+before proceeding on the task description alone. Corrected mid-task per the
+coordinator; this report and everything below it (specifically the rate
+limiting section) reflects the real brief, read in full.
 
 ## Commits (in this worktree, not pushed)
 
 1. `43dab78` fix(auth): point the login page's Forgot password link at the recovery flow
 2. `9309f27` feat(auth): add a timing-normalizing wrapper for enumeration-sensitive calls
-3. `67e17af` feat(auth): add the forgot-password page
+3. `67e17af` feat(auth): add the forgot-password page (later revised - see below)
 4. `5c9e03b` feat(auth): add the reset-password page
+5. `17acc84` docs(product): T3.1 password recovery report (the pre-brief version; superseded by this one)
+6. *(pending)* feat(auth): rate-limit forgot-password and move the Supabase call server-side
 
 Worktree: `C:\Users\raroc\OneDrive\Desktop\OCS\Giya 2.0\.claude\worktrees\agent-a83ed56a39ac1fab0`
 
-## What was built
+## What changed after reading the real brief
 
-- `src/app/(auth)/login/page.tsx` - one-line fix: `href="#"` -> `href="/forgot-password"`.
-- `src/lib/auth/timing.ts` (+ `timing.test.ts`) - `withMinDelay(operation, minMs)`, a generic wrapper that makes an async call settle no sooner than `minMs` after it started, whether it resolves or rejects.
-- `src/app/(auth)/forgot-password/page.tsx` (+ `page.test.tsx`) - email-only form. Calls `supabase.auth.resetPasswordForEmail`, wrapped in `withMinDelay(..., 800)`, and always ends on the same "Check your email" confirmation regardless of outcome.
-- `src/app/(auth)/reset-password/page.tsx` (+ `page.test.tsx`) - the landing page after the emailed link. Checks for a session on mount (none -> expired-link message + link to `/forgot-password`; present -> new-password form). On success, signs out the recovery session and shows a confirmation with a link to `/login`.
-- `src/app/auth/callback/route.ts` - **not modified**. It already does a generic `exchangeCodeForSession(code)` + redirect-to-`next` for signup confirmation and OAuth; `resetPasswordForEmail`'s `redirectTo` points at this same route with `?next=/reset-password`, and it works unchanged. An expired/already-used recovery link fails the exchange and falls through to the route's existing `/login?error=confirm` branch, which is why "Forgot password" being wired up matters: that's the recovery path the login page's existing notice ("...Sign in or request a new one.") points a user back toward.
+The brief's requirement 4 - rate limiting via `src/lib/rate-limit.ts`/`defineHandler` - could not be satisfied by my first pass's design: `forgot-password/page.tsx` called `supabase.auth.resetPasswordForEmail` directly from the browser, and a direct browser-to-Supabase call can never be gated by this repo's own limiter, which only wraps Route Handlers. So this revision moves that call server-side:
 
-Nothing in `supabase/**` was touched, and none of the other excluded paths (`src/lib/ai`, `src/lib/queue`, `src/features/admin`, `src/features/rewards`, `src/lib/auth/suspension.ts`) were touched.
+- **New: `src/app/api/v1/auth/forgot-password/route.ts`** (+ `route.test.ts`, 11 tests) - a `defineHandler`-built POST route. This is now the only thing that calls `supabase.auth.resetPasswordForEmail`. It owns: body validation (zod), both rate-limit checks, the enumeration-neutral try/catch, and the `withMinDelay` timing floor (moved here from the page, since this is where the actual variable-latency call now happens).
+- **Rewritten: `src/app/(auth)/forgot-password/page.tsx`** (+ `page.test.tsx`) - no longer imports `@/lib/supabase/client` or `@/lib/auth/timing` at all. It now `fetch()`s the route above and treats every response identically (confirmation screen) with exactly one exception: a `429` from the route, which gets a distinct "Too many requests" message and keeps the user on the form. This is not a new enumeration channel - the reasoning is below.
+- **Unchanged from the first pass**: `reset-password/page.tsx`, `src/lib/auth/timing.ts` (now consumed by the route instead of the page - same module, same tests, new caller), the login page fix, `/auth/callback`.
 
-## Enumeration resistance: how I actually established it, not asserted it
+## Rate limiting: the key I chose, and why it's two keys, not one
 
-**Body.** `forgot-password/page.tsx`'s submit handler never inspects the `error` field `resetPasswordForEmail` returns, and the `try { ... } catch { /* swallowed */ }` around the call means even an outright rejected promise (network failure) takes the exact same code path to the same `sentTo` state. There is no branch anywhere in the file that a known-vs-unknown response could steer differently - I verified this isn't true "by construction" hand-waving with a mechanical test: `page.test.tsx`'s "shows the exact same confirmation when Supabase answers with an error..." test renders the page twice (once with a resolved-no-error mock, once with a resolved-with-`AuthError`-message mock) and diffs the **entire rendered HTML** of the confirmation card (`.closest("div")?.innerHTML`) between the two runs, asserting byte-for-byte equality, plus a separate assertion that the raw Supabase error text never appears anywhere in the DOM. A second test does the same for an outright-rejected promise.
+**Two independent budgets, both enforced, request refused if either is exhausted:**
 
-**Timing.** `withMinDelay` pads the `resetPasswordForEmail` round trip to a floor of 800ms measured from when the call started, using `Date.now()` and a `finally` block so the floor applies identically whether the operation resolves or rejects. This is the concrete answer to "how did you establish indistinguishable timing": I did not just add a delay and assume it worked - `src/lib/auth/timing.test.ts` uses `vi.useFakeTimers()` to prove, deterministically, that (a) a call resolving in 0ms is held back until exactly 1000ms (test's own `minMs`), (b) a call that itself takes longer than the floor gets zero extra delay (not `elapsed + minMs`), and (c) a rejecting call is held back exactly as long as a resolving one and still rethrows the original error untouched. `forgot-password/page.test.tsx` then re-proves the same property one level up, at the actual page: with fake timers, the confirmation text is asserted absent at 799ms and present at 800ms after a mocked-instant `resetPasswordForEmail`.
+- **Per-IP**: 10 requests / 10 minutes (`keyBy: "ip"`, wired through `defineHandler`'s own `rateLimit` config - this is the one that can use the built-in slot, since IP is known before the body is parsed).
+- **Per-address**: 3 requests / 15 minutes, checked manually inside the handler via a direct `checkRateLimit()` call, keyed on the trimmed+lowercased email. This canNOT go through `defineHandler`'s built-in `rateLimit` config: doc 13's pipeline runs rate limiting (step 5) *before* body parsing (step 6), and the address only exists in the body. That ordering is why this is a second, separate call rather than one composite `(ip, email)` key.
 
-This is a best-effort mitigation, not a proof of zero timing leakage: it normalizes the one variable this app controls (how long the browser waits before rendering the result), not network jitter, TLS handshake variance, or Supabase's own infrastructure-level timing outside the request/response the app sees. 800ms is comfortably larger than the difference I'd expect between GoTrue's "user not found, short-circuit" path and its "mint a token, call the mail provider" path, but I have no measurement of that gap from this sandboxed worktree (no live Supabase project reachable) to size the floor against real numbers - it's a considered guess, stated as one.
+The coordinator's framing is exactly right and is why one key is not enough:
+- **Per-IP alone** would never stop an attacker who simply rotates IPs (VPN/proxy/botnet) - each new IP gets a fresh budget while the same victim's inbox keeps absorbing hits.
+- **Per-address alone** would never stop the opposite attack: one source spraying recovery email at many *different* addresses (an enumeration sweep, or the "email-amplification vector against arbitrary third parties" the brief names) - no single address ever gets hit enough times to trip its own limit.
 
-## Password fields
+So both run, and either can refuse the request. Per-IP is set generous (10/10min) specifically so a shared NAT (office, campus, household) is never realistically the one that trips it - that's the trade-off the coordinator flagged, and I resolved it by making the IP budget deliberately loose and leaning on the address budget (which has no such shared-caller problem) to do the tighter work of protecting a specific inbox.
 
-`reset-password` has one "New password" field (`PasswordField`, `autoComplete="new-password"`), matching signup's pattern exactly (signup has no confirm-password field either) rather than inventing a second field the rest of the codebase doesn't use anywhere.
+**A `429` is not an enumeration leak.** Both budgets are keyed on the caller (IP) or the raw submitted address, checked *before* Supabase is ever asked whether that address has an account - a known and an unknown address hit the identical limiter, the identical way. So `forgot-password/page.tsx` is allowed to show a `429` differently from everything else without reopening the hole this whole feature exists to close; every other outcome (200, any other status, or the fetch throwing outright) still collapses to the one confirmation screen, exactly as before.
 
-`reset-password` deliberately has **no captcha** - unlike `forgot-password` (a public, unauthenticated, bot-reachable form) and login/signup, reaching this page's form at all already requires a valid session established by clicking a real emailed link, which is a much stronger gate than a captcha provides. `forgot-password` does gate on `CAPTCHA_ENABLED`, mirroring login/signup's widget-reset-after-submit behavior exactly.
+**What "refuses at the threshold" is proven by, and by whom.** My new route tests mock `checkRateLimit` (matching the existing pattern in `src/app/api/v1/health/route.test.ts`) and prove *wiring*: the route asks the limiter with the right key/limit/window for both dimensions, and honors a `{ok: false}` answer by refusing before calling Supabase. The actual threshold arithmetic (count <= limit passes, count > limit refuses) is proven once, already, generically, in `src/lib/rate-limit.test.ts` ("allows requests up to the limit" / "blocks once the count exceeds the limit") - pre-existing, untouched by this task. I did not duplicate that proof; I proved the part that's actually new here, which is the two-independent-budgets composition.
 
-## Tests: 22 new, every assertion's mutant run mechanically
+## Enumeration resistance (updated for the new architecture)
 
-Baseline before this task: 215 files / 4433 tests, all green (confirmed by running `npx vitest run` before starting). After: **218 files / 4449 tests, all green** (`npx vitest run`, full suite, 125s). Also clean: `npx eslint .` (one pre-existing unrelated warning in `exhaustion.test.ts`, not touched by this task), and `npm run build`'s TypeScript pass ("Finished TypeScript in 48s", zero errors) - the build's later "collect page data" step fails on a **pre-existing** condition unrelated to this work: this worktree has no `.env.local`, so `NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_ANON_KEY` are unset, and the failing page is `/api/v1/businesses/[businessId]/integrations/meta/callback`, which this task never touched.
+**Body.** The route's handler never branches on Supabase's `{error}` field, and wraps the call in `try { } catch { /* swallowed */ }` so a rejected promise takes the identical path to the identical response - this needed its own try/catch rather than relying on `defineHandler`'s generic-500 fallback, because that fallback still answers with a *different status* (500 vs 200), which is itself a signal. Proven mechanically: `route.test.ts`'s "returns a byte-identical body whether Supabase answers with success or an error" test calls the route twice (mocked success, then mocked `AuthError`) and asserts `errorJson.data` deep-equals `successJson.data`, plus that the raw Supabase message never appears anywhere in the serialized response. A second test proves the same for an outright rejection.
 
-For every test file I added or edited, I followed red-before-green (confirmed the test failed against the actual missing/wrong code before writing the fix), and for the assertions that carry real risk of passing for the wrong reason, I hand-edited the source to a named mutant, reran the exact test file, watched it fail, then restored the correct source and reran to confirm green again. All of the below were run this way, not inferred:
+The page, one layer up, no longer even sees Supabase's answer - it only sees the route's response, which is already uniform. Its own test proves the same shape at that layer: rendering the page against a `200` and against a `500` from the route produces byte-identical confirmation-screen HTML (`page.test.tsx`, "shows the same confirmation for a plain success and for an unexpected non-429 status").
 
-**`src/lib/auth/timing.test.ts`**
-- Test: fast-resolving op is padded to `minMs`. Mutant "no-op passthrough" (delay removed entirely) -> failed as expected.
-- Test: op slower than `minMs` gets no extra wait. Mutant "always wait full `minMs`" (ignore elapsed) -> failed as expected.
-- Test: fast-rejecting op still padded, original error rethrown unchanged. Mutant "swallow rejection, return `undefined`" -> failed as expected.
+**Timing.** Unchanged mechanism, moved location: `withMinDelay` (`src/lib/auth/timing.ts`, its own 3 tests, all still passing, untouched) now wraps the call inside the route rather than inside the page, applied *after* both rate-limit checks succeed - deliberately not applied to the 429 path, since a refusal for being over budget has nothing to do with whether the address exists, so there's no enumeration reason to slow it down (and a real reason not to: it would only make a legitimate caller's rate-limit message feel worse). `route.test.ts` proves both halves with fake timers: the happy path is held back to the 800ms floor even when the mocked Supabase call resolves instantly, and the rate-limited path resolves immediately, unpadded.
 
-**`src/app/(auth)/forgot-password/page.test.tsx`**
-- Test: empty submit shows "Email is required", never calls the API. Mutant "remove the empty-email guard" -> failed as expected.
-- Test: valid submit calls `resetPasswordForEmail` with the entered email + expected `redirectTo`, shows confirmation.
-- Test: **error response produces byte-identical confirmation HTML to a success response, and the raw error text never appears** (the core enumeration assertion). Mutant "reintroduce enumeration: destructure `{error}` and `setFormError(error.message)` on the error branch" -> failed (caught by this test, and also by the rejection test below, since the mutant also dropped the `try/catch`).
-- Test: rejected promise (network failure) still produces the same confirmation, error text never leaks. Same mutant as above also caught this one independently.
-- Test: minimum-delay floor holds the confirmation back even when Supabase answers instantly (fake timers, page-level). Mutant "bypass `withMinDelay`, call `resetPasswordForEmail` directly" -> failed as expected.
-- Test: captcha gating - blocks submit until verified, then calls the API with the token, resets the widget. Mutant "drop the `CAPTCHA_ENABLED` gate" -> failed as expected.
+This remains a best-effort mitigation, not a proof of zero timing leakage - it normalizes the one thing this app controls (how long the *server* waits before answering), not network jitter between browser and this app's own server, or Supabase's infrastructure-level timing beyond the single request/response this code sees.
 
-**`src/app/(auth)/reset-password/page.test.tsx`**
-- Test: no session -> expired-link message + link to `/forgot-password`, no form rendered. Mutant "skip the session check, always set status to ready" -> failed as expected.
-- Test: session present -> renders the new-password form.
-- Test: empty submit shows "Password is required", never calls `updateUser`.
-- Test: successful submit calls `updateUser({password})`, then `signOut()`, then shows "Password updated" with a link to `/login`. Mutant "drop the `signOut()` call" -> failed as expected.
-- Test: `updateUser` error is shown inline, `signOut` is NOT called, form stays mounted (this is intentionally the one place in the whole feature that DOES surface the raw Supabase message, since the caller already holds a valid session at this point and it's ordinary password-policy UX, not an enumeration leak). Mutant "drop the `if (error)` branch, always proceed to signOut/done" -> failed as expected.
+**800ms is a considered guess, not a measurement**, exactly as flagged: I have no live Supabase project reachable from this sandbox to measure the real gap between GoTrue's "address not found, short-circuit" path and its "mint a token, hand off to the mail provider" path. What would turn this from a guess into a number: run both cases against the actual project (a known test account vs. a throwaway unregistered address), time `resetPasswordForEmail`'s round trip for each over a representative sample, and set the floor to comfortably exceed the **p99** of the slower (known-address) case - p99 rather than p50 or a mean, because the floor has to survive the tail, not the typical case, or an unlucky slow response on the known-address path would still poke above the floor and become visible. I did not have the access to run that measurement here.
+
+## `reset-password` has no captcha - deliberate, not an oversight
+
+Restated as the coordinator asked: reaching `reset-password`'s form at all requires a valid session, which only exists after clicking a real, emailed recovery link (`/auth/callback` exchanges the link's code for that session before ever redirecting here - see `src/app/auth/callback/route.ts`, unmodified). That is a strictly stronger gate against automated abuse than a captcha widget would add on top, so this page intentionally has none, unlike `forgot-password` (public, unauthenticated, bot-reachable, and now also rate-limited) and login/signup (which both gate on `CAPTCHA_ENABLED`).
+
+## Tests: 33 new across this task, every assertion's mutant run mechanically
+
+Baseline before this task: 215 files / 4433 tests, all green. Final: **219 files / 4460 tests, all green** (`npx vitest run`, full suite, ~116s). `npx eslint .`: clean except one pre-existing, unrelated warning in `src/features/campaigns/server/exhaustion.test.ts` (not touched by this task). `npx tsc --noEmit`: **exactly 3 known errors** (in `scripts/generate-md3-tokens.test.ts` x2 and `src/features/rewards/server/token.test.ts` x1) - none in any file this task touched, matching the brief's stated baseline exactly. `npm run build`'s TypeScript pass compiles clean; the later "collect page data" step fails on a pre-existing condition unrelated to this work - this worktree has no `.env.local`, so `NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_ANON_KEY` are unset at that step, and the failing page (`/api/v1/businesses/[businessId]/integrations/meta/callback`) is nothing this task touched.
+
+Every mutant below was actually applied to the real source file, run against the real test file, watched fail, then reverted and re-verified green - not inferred.
+
+**`src/lib/auth/timing.ts` / `timing.test.ts`** (unchanged from the first pass, now consumed by the route instead of the page)
+- Fast-resolving op padded to `minMs`. Mutant: delay removed entirely (no-op passthrough) → failed as expected.
+- Op slower than `minMs` gets zero extra wait. Mutant: always wait the full `minMs` regardless of elapsed → failed as expected.
+- Fast-rejecting op still padded, original error rethrown unchanged. Mutant: swallow the rejection, return `undefined` → failed as expected.
+
+**`src/app/api/v1/auth/forgot-password/route.test.ts`** (new)
+- Valid submit calls `resetPasswordForEmail` with the normalized address + `redirectTo`, returns 200 with a generic message.
+- Byte-identical body for a Supabase success vs. a Supabase error, raw error text never present (the core enumeration assertion). Mutant: destructure `{error}` and return `error.message` on the error branch → caught by this test AND by the rejection test below (the mutant also removed the try/catch that both depend on).
+- 200 with the generic body even when `resetPasswordForEmail` rejects outright. Same mutant as above caught this independently.
+- 422 on a malformed email, `resetPasswordForEmail` never called. Mutant: drop the format `.regex()` from the zod schema → failed as expected.
+- IP budget: `checkRateLimit` called with `{key: ".../ip:...", limit: 10, windowSeconds: 600}`; 429 without calling Supabase when over budget. Mutant: drop the `rateLimit` config from `defineHandler` entirely → caught by both tests in this group (and incidentally shifted which call the "address over budget" test's mock intercepted, which is itself evidence the two checks are genuinely sequential and independent).
+- Address budget: `checkRateLimit` called with `{key: "...victim@b.com...", limit: 3, windowSeconds: 900}`, independent of the IP check; 429 without calling Supabase when the address alone is over budget, even with a fresh IP; address is normalized (trim+lowercase) before keying so `"  Victim@B.com  "` and `"victim@b.com"` share a budget. Mutant: drop the manual `checkRateLimit()` call for the address entirely → caught by all three tests in this group.
+- Timing: response held back to 800ms floor even when Supabase answers instantly; NOT held back when refused by the rate limiter. Mutant: bypass `withMinDelay`, call `resetPasswordForEmail` directly → caught by the floor test.
+
+**`src/app/(auth)/forgot-password/page.test.tsx`** (rewritten for the new fetch-based design)
+- Empty submit → validation error, `fetch` never called.
+- Valid submit POSTs `{email}` (JSON) to `/api/v1/auth/forgot-password`, shows the confirmation.
+- Byte-identical confirmation HTML for a `200` and for an unexpected `500` from the route, so nothing about the route's answer leaks through the page either. Mutant: add a `response.ok` branch that shows a different error message on any non-2xx, non-429 status → caught by this test.
+- Same confirmation when `fetch` itself throws (network failure), error text never rendered.
+- `429` specifically shows a distinct "Too many requests" message and stays on the form. Mutant: drop the `response?.status === 429` branch entirely → caught by this test.
+- Captcha: blocks submit until verified, then POSTs `{email, captchaToken}`, resets the widget. Mutant: drop `captchaToken` from the request body → caught by this test.
+
+**`src/app/(auth)/reset-password/page.test.tsx`** (unchanged from the first pass - not in scope for rate limiting, since it requires an existing session and sends no email)
+- No session → expired-link message + link to `/forgot-password`, no form rendered. Mutant: skip the session check, always set status to ready → failed as expected.
+- Session present → renders the new-password form.
+- Empty submit → validation error, `updateUser` never called.
+- Successful submit calls `updateUser({password})`, then `signOut()`, then shows "Password updated" with a link to `/login`. Mutant: drop the `signOut()` call → failed as expected.
+- `updateUser` error shown inline, `signOut` NOT called, form stays mounted (this is intentionally the one place in the whole feature that surfaces a raw Supabase message - the caller already holds a valid session, so it's ordinary password-policy UX, not an enumeration leak). Mutant: drop the `if (error)` branch, always proceed to signOut/done → failed as expected.
 
 **`src/components/auth/auth.test.tsx`**
-- Test: "Forgot password" link's `href` is `/forgot-password`, not `#`. This one's mutant is the original bug itself - I ran this test against the actual pre-fix code first (red), then applied the one-line fix (green); I did not additionally hand-mutate it since the red/green cycle against the real bug already is the mechanical proof.
+- "Forgot password" link's `href` is `/forgot-password`, not `#`. Mutant is the original bug itself: red against the real pre-fix `href="#"`, green after the one-line fix.
 
-Tests not mutation-tested: pure rendering assertions (e.g. "renders an email field and a send-link CTA", "renders the new-password form") - these have no interesting mutant beyond "delete the JSX," which every other test in the same file would also catch, so I did not spend a cycle on them individually.
+Not mutation-tested: pure rendering assertions ("renders an email field and a send-link CTA", "renders the new-password form") - no interesting mutant beyond "delete the JSX," which every other test in the same file already catches.
 
 ## Design-system compliance
 
-Both new pages reuse existing components only (`AuthCard`, `TextField`, `PasswordField`, `Captcha`, `Button` with `size="touch"` = 48px), so MD3 tokens, 48px touch targets, and the reduced-motion structural rule are inherited for free - I did not write any new CSS or `animation:` declaration. Verified with `grep` that neither new page/test file contains `animation:` or an em dash.
+All three surfaces (the two pages, unchanged in this regard, plus the new route which has no UI) reuse existing components only (`AuthCard`, `TextField`, `PasswordField`, `Captcha`, `Button` with `size="touch"` = 48px), so MD3 tokens, 48px touch targets, and the reduced-motion structural rule are inherited for free - no new CSS or `animation:` declaration anywhere. Verified with `grep` that none of the new/touched files contain `animation:` or an em dash.
 
 ## Concerns
 
-1. **No brief to check against.** I could not diff my implementation against the actual acceptance criteria for T3.1 since the brief file was missing - see above. If the real brief specified something I did not build (e.g. a resend-link affordance on the confirmation screen, a specific copy deck, rate limiting beyond Supabase's own), it isn't here.
-2. **800ms timing floor is a considered guess, not a measurement** - see the timing section above. If Supabase's own known-vs-unknown latency gap on this project ever exceeds 800ms (e.g. a slow email provider), the floor would need raising; I have no live project in this sandbox to measure against.
-3. **`reset-password` has no captcha**, reasoned about above; flag this if the brief wanted one anyway.
-4. Did not add rate limiting beyond whatever Supabase's own GoTrue rate limits provide for the `recover` endpoint - out of scope per "do not touch `supabase/**`," and app-level rate limiting wasn't mentioned in the context I was given.
+1. **800ms timing floor is a considered guess, not a measurement** - see above for exactly what would turn it into one (a live p99 against the real project).
+2. **`reset-password` has no captcha** - deliberate, reasoned above; flag if the brief's author wanted one anyway despite the session-gate argument.
+3. **Rate-limit thresholds (10/10min per IP, 3/15min per address) are my own judgment call**, not derived from any documented traffic baseline for this route (it's brand new, so there is none yet). If real usage shows either threshold wrong in either direction, they're two constants in one file to retune.
+4. Resend/email-template note from the brief: confirmed by inspection - `resetPasswordForEmail` goes through `supabase.auth`, not through this repo's Resend registry (`src/lib/emails/**` was not touched, no new template added).
+5. I did not verify against a live Supabase project that `resetPasswordForEmail`'s `redirectTo` + PKCE `code` round-trips correctly through `/auth/callback` end-to-end in production, since this worktree has no reachable project; I'm relying on the same mechanism this app's existing signup-confirmation and OAuth flows already use unmodified, which is documented in `src/app/auth/callback/route.ts`'s own comments as generic over the caller.
