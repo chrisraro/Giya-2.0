@@ -102,7 +102,7 @@ is transaction-wrapped (`begin ... rollback`) and leaves no data behind:
 psql "$DATABASE_URL" -f supabase/tests/rls_identity_smoke.sql
 ```
 
-Twenty-three suites, one per domain (review fix, task 2.1: the prior count of "Nineteen" - itself already a correction attempt - was still wrong; four existing suites had never been added as table rows at all: `receipt_escalation_smoke.sql`, `rls_jobs_smoke.sql`, `rls_merchant_aliases_smoke.sql`, `rpc_campaign_budget_guard_smoke.sql`, restored below in their migration order rather than appended, so this table reads in the same order the suites were written):
+Twenty-four suites, one per domain (review fix, task 2.1: the prior count of "Nineteen" - itself already a correction attempt - was still wrong; four existing suites had never been added as table rows at all: `receipt_escalation_smoke.sql`, `rls_jobs_smoke.sql`, `rls_merchant_aliases_smoke.sql`, `rpc_campaign_budget_guard_smoke.sql`, restored below in their migration order rather than appended, so this table reads in the same order the suites were written):
 
 | file | covers |
 |---|---|
@@ -129,6 +129,7 @@ Twenty-three suites, one per domain (review fix, task 2.1: the prior count of "N
 | `rpc_campaign_budget_guard_smoke.sql` | the campaign budget race guard in `award_receipt_points` (0040/0041, task 1.2 + review fix C1), 34 assertions: CORRECT PER-CAMPAIGN ATTRIBUTION from each earn row's own `rule_snapshot` entries - never a naive `sum(points) where campaign_id = X`, which is wrong in both directions the moment a campaign stacks as a non-primary contributor (review C1); `max_total_points` as a running cap shared across every consumer, closed race-safely by locking the campaigns row before re-checking the total (the same cross-consumer race 0015 hardened for `claim_reward`); `per_customer_limit` armed at award time on its own, not only when `max_total_points` is also set (review I1); a budget with room for exactly one more contribution and two sequential awards - the second raises `CAMPAIGN_BUDGET_RACE`, and a corrected retry (the value `award.ts`'s own recovery sends) succeeds; a clawed-back contribution stops counting against the budget; a vanished/unknown campaign id in the array is skipped, not fatal; and omitting `p_campaign_budget_checks` entirely (every caller before task 1.2) enforces nothing, byte-identical to 0038's prior behaviour |
 | `rpc_points_expiry_smoke.sql` | Task 1.3 points expiry enforcement (0042-0048, both review-fix passes), 67 assertions: doc 35 section 7's FIFO remainder formula ordered by EXPIRY not creation (I1) - a partially-consumed lot, a later untouched lot, a lot fully drained to 0, a clawback-only consumption, and the counter-example where a never-expiring `adjust` must be drained LAST rather than first (a null expiry sorting as `+∞`, not first); the aggregate at two `asof` values and the public wrapper agreeing with it; `public.points_next_expiry` correctly excluding an already-past-due lot; `public.expire_points` (the sweep) - SELF-CLEARING proven with a small `p_limit` (I2: a third pair is reached only once the first two clear a slot, not starved forever), the right `expire` row with the restored `x_expired_sum`/`d_drained_sum` audit fields (I5), the cached balance equal to the ledger sum, nothing for a zero-balance pair, a backfilled-already-past-due lot swept correctly (M5), and idempotency across every pair including the self-clearing trio; `public.points_expiry_warn` (the warn job) using the PROJECTED remainder at both horizons rather than the soonest lot (original I3: a shadowed larger lot fires its own combined total on the first run), ordered by URGENCY - soonest in-window expiry, not UUID - so a p_limit of 1 notifies a 2-days-out pair over a UUID-earlier 25-days-out one (re-review N2), deduped on the WINDOW-STABLE soonest-lot date rather than the moving projected figure, proven by literally aging the ledger between runs to simulate a day passing: a growing aggregate (300->500) produces no duplicate, only a genuine change of the soonest lot does (re-review N3), the restored date in both the copy ("expire by...") and the `data.expires_on` payload (re-review N4), the in_app/email channel split, a backfilled-already-past-due lot never warned (M5), and idempotency; both `cron.job` rows with their exact schedule and command; the append-only fence's one permanent exception (now correctly homed in 0047, not rewriting 0042's history) proven both ways (I4: the null-to-value transition succeeds and lands, every other column and every other `expires_at` transition and DELETE still raise), with its column allowlist pinned exactly (re-review N7); and the full I-A grant matrix including `public.points_expirable_remainder`, missed by the first pass (C1) |
 | `rpc_campaigns_sweep_smoke.sql` | Task 2.1 `campaigns.sweep` (0053, review-fixed twice by 0054 and 0055), 33 assertions: doc 34's T3 (`scheduled -> active` at `starts_at`) and T7 (`active|paused -> ended` at `ends_at`) as ONE `public.sweep_campaigns` function with two independent candidate scans; a due scheduled campaign on an ACTIVE business activates with a `campaign.activated` audit row (`actor_kind='system'`, `after.trigger='sweep'` - the app's own vocabulary from `src/features/campaigns/server/audit.ts`, never a parallel verb); a not-yet-due scheduled campaign and both an already-`ended` and an already-`archived` campaign are left completely untouched with no audit row; an `active` campaign AND a `paused` campaign both past `ends_at` are ended with `campaign.ended` recording the correct source status in `before`, PROVEN AGAIN on a business the T3 skip case has already made suspended (T7 is unconditional and a fixture now pins that rather than leaving it asserted only by construction); G1 (business standing) gates T3 alone - a due scheduled campaign on a SUSPENDED business is SKIPPED (stays `scheduled`, no audit row, no error) and then genuinely activates once the business is set back to `active`, proving the skip re-checks live standing rather than caching a verdict; GENUINE SELF-CLEARING under a TIGHT `p_limit=1` (0054 review fix I1/I2, the actual 0045-shaped bug 0053 shipped with: a `p_limit=200`/8-fixture "second run is 0" check cannot distinguish "left candidacy" from "still occupying a slot doing no work" the way a small-limit starvation probe can - a permanently-ineligible `'closed'`-business campaign sorted first by `starts_at` no longer starves a later, gate-passing one out of the budget); `private.campaigns_sweep_ineligible_count()` (0055 review fix I1: 0054's own I1+I3 interaction silently dropped skip visibility to zero for the ordinary case) returning exactly the one due-but-ineligible campaign in play, fully revoked from every role including `service_role`; the widened `campaigns_active_window_idx` (now covering `paused`, which 0012's original predicate excluded); the `cron.job` row's exact schedule (`*/5 * * * *`) and command; no `points_transactions` row written by any of it; and the service_role-only grant |
+| `rpc_balance_check_smoke.sql` | Task 2.2 `integrity.balance_check` (0056), 35 assertions: the three-layer fence on the new `balance_check_findings` table (RLS enabled with zero policies, client roles fully revoked, `service_role` left SELECT-only so even the service role cannot write a finding except through the function itself, and the no-truncate statement trigger firing for a role that still holds the privilege); the I-A grant matrix on `public.balance_check`; a genuinely drifted pair (a cached balance set to 650 against a 500 ledger sum, constructed directly since no real writer produces this) correctly flagged `drifted=true` with both numbers recorded, alongside a clean pair and a RICH five-row/four-type ledger pair both correctly flagged clean - proven against a LIVE, SHARED database by reading the pre-existing candidate count dynamically rather than a hardcoded literal; the drifted pair's cached balance and the ledger's row count both UNCHANGED after the check (detection only, never auto-corrected); `p_limit=0` as a no-op; GENUINE ROTATION under a TIGHT `p_limit=1` across four successive calls - three fresh pairs are checked one at a time in their deterministic consumer-id order with zero repeats, then the fourth call is proven to land on a pair OUTSIDE that trio (the cursor rotating back into the older candidate pool, robust to whatever else is already live in `business_customers` rather than asserting on one hardcoded pair); and the `cron.job` row's exact schedule (`40 18 * * *`) and command |
 
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
@@ -219,13 +220,16 @@ raised.
 | `points.expiry_sweep` | `10 18 * * *` | `public.expire_points(200)` | Doc 39's registered slot (02:10 Manila), right after the daily rollup (01:40). Points expire on a flat 12-month clock (0042), so a day's latency on the sweep is negligible against that TTL - daily is the doc-registered cadence and there is no tighter invariant to protect the way claims' sub-day TTL argues for hourly. |
 | `points.expiry_warn` | `25 18 * * *` | `public.points_expiry_warn(200)` | Doc 39's registered slot (02:25 Manila), immediately after the expiry sweep itself, so a lot the sweep just expired can never also be warned about in the same run. |
 | `campaigns.sweep` | `*/5 * * * *` | `public.sweep_campaigns(200)` | Doc 34 section 3's own cadence for this queue ("every 5 minutes"), driving both the T3 (`scheduled -> active` at `starts_at`) and T7 (`active|paused -> ended` at `ends_at`) transitions. Tighter than the daily points-expiry cadence because a campaign's schedule is merchant-authored down to the minute (a "starts at 9am" promo), unlike a flat 12-month expiry clock; looser than a per-campaign timer because doc 34's own latency contract is "state visible within one sweep interval (~6 minutes)" and consumer-facing liveness additionally checks `isCampaignLive`'s window, so sweep lag can never show an expired promo as claimable in the meantime. |
+| `integrity.balance_check` | `40 18 * * *` | `public.balance_check(500)` | Doc 39's registered slot for the SAMPLE cadence (02:40 Manila), right after the points-expiry pair (02:10/02:25). Doc 39 also registers a separate weekly FULL cadence; task 2.2's rotating-cursor design (see below) reaches every pair deterministically within `ceil(pair_count / 500)` days on its own, which is what the weekly full pass existed to guarantee for a random-sample design, so one daily schedule replaces both of doc 39's cadences rather than needing a second `cron.schedule` call. |
 
-All five jobs run as `postgres`, which owns every function and so retains
-EXECUTE independently of the `service_role`-only grants. All five functions
+All six jobs run as `postgres`, which owns every function and so retains
+EXECUTE independently of the `service_role`-only grants. All six functions
 are idempotent (`points.expiry_sweep`/`points.expiry_warn` by recomputing the
-same FIFO formula from the ledger each run - see `rpc_points_expiry_smoke.sql`
-- the other three via `for update skip locked`), so an overlapping run or a
-concurrent application write is safe.
+same FIFO formula from the ledger each run, `integrity.balance_check` by
+recomputing the same comparison each run and upserting - see
+`rpc_points_expiry_smoke.sql` / `rpc_balance_check_smoke.sql` - the other
+three via `for update skip locked`), so an overlapping run or a concurrent
+application write is safe.
 
 ### Points expiry (0042-0048, task 1.3 + two review-fix passes)
 
@@ -428,6 +432,87 @@ only a comment" is how the 0047 incident below began. No revert was needed
 (0053's header reads correctly after that edit), but every correction to
 0053 or 0054 from here on goes in a companion migration - 0055 is that
 migration for 0054's own I1/I3 interaction.
+
+### Balance check (0056, task 2.2)
+
+`public.balance_check(p_limit integer default 500)` proves the invariant six
+SECURITY DEFINER writers (`award_receipt_points`, `claim_reward`,
+`cancel_claim`, `expire_claims`, `expire_points`, `clawback_receipt_points`)
+each maintain in their own transaction but that nothing had ever CHECKED:
+`business_customers.points_balance` still equals
+`sum(points_transactions.points)` for that pair. Doc 35 section 13 and doc 39
+name this job; only `0029_jobs.sql`'s header mentioned it before now, in
+passing.
+
+**Persistence.** A new table, `public.balance_check_findings`, one row per
+`(business_id, consumer_id)` pair, upserted - not an append-only log, by
+deliberate analogy to `business_customers` itself, since the useful fact is
+"what did the LAST check see", not a growing pile of identical clean
+results. `drifted` is a generated column so "wrong" is defined once. Fenced
+like `jobs` (0029): RLS enabled with zero policies, every client privilege
+revoked, and `service_role` left SELECT-only - even the service role cannot
+write a finding directly, only `public.balance_check` can (SECURITY DEFINER,
+owned by the table owner, which bypasses that exact revoke). A no-truncate
+statement trigger is the third fence, matching `audit_logs`/`jobs`.
+
+**Detection only.** The function never writes `points_transactions` or
+`business_customers` - an automatic "fix" would destroy the evidence a human
+needs, and if the LEDGER were the wrong side, auto-correcting the cache would
+launder that error into looking like the truth. A drifted finding is an
+incident; doc 35 section 13's runbook is a human-audited `adjust` ledger
+entry, never this job.
+
+**Self-clearing, done differently than 0045/0054.** Those two sweeps drop a
+resolved candidate from contention FOREVER once fixed. A balance check
+cannot: a pair that is clean today can drift again tonight, so the whole
+point is to keep looking. Self-clearing here means genuine ROTATION instead -
+an oldest-checked-first cursor (`balance_check_findings.checked_at`, with a
+never-checked pair sorting first via `coalesce(..., -infinity)`) so no single
+pair can occupy every `p_limit` slot forever. The timestamp is written with
+`clock_timestamp()`, never `now()` (frozen for the whole transaction - see
+`rpc_campaigns_sweep_smoke.sql`'s own header) and never `statement_timestamp()`
+either: caught live, a batch of semicolon-separated statements delivered in
+ONE protocol message - exactly what the MCP `execute_sql` tool this suite was
+verified through sends - shares a SINGLE `statement_timestamp()` across every
+statement in that batch, which silently collapsed four sequential
+`balance_check(1)` calls onto the same "last looked at" value during this
+task's own TDD loop. `clock_timestamp()` is the one Postgres documents as
+changing "even within a single SQL command", independent of statement or
+transaction boundaries. Proven with a `p_limit=1` four-call sequence in
+`rpc_balance_check_smoke.sql`, the same shape `rpc_points_expiry_smoke.sql`
+and `rpc_campaigns_sweep_smoke.sql` use for their own starvation fixes: three
+fresh pairs are reached one at a time with zero repeats, then a fourth call
+is proven to land OUTSIDE that trio - the cursor rotating back into the
+older pool rather than re-selecting what it just finished.
+
+**Zero false positives by construction.** Every writer above inserts its
+`points_transactions` row(s) and updates `business_customers.points_balance`
+in ONE transaction, so under READ COMMITTED a concurrent writer's commit is
+either entirely invisible to a snapshot or entirely visible - never half of
+one. `balance_check`'s candidate scan, its ledger-sum computation and its
+upsert are ONE `with` statement (one snapshot), so it inherits that
+atomicity directly; no `for update` lock is taken anywhere, none is needed
+for a read that structurally cannot be torn, and the constraint against
+writing the money tables rules one out regardless.
+
+**Schedule.** One daily job (`40 18 * * *`, 02:40 Manila, doc 39's own
+sample-cadence slot) replaces doc 39's separate nightly-sample/weekly-full
+split: the rotating cursor reaches every pair deterministically within
+`ceil(pair_count / 500)` days on its own, which is exactly what the weekly
+full pass existed to guarantee for a random-sample design.
+
+Covered by `rpc_balance_check_smoke.sql`, 35 assertions (the table's own
+three-layer fence and the I-A grant matrix; a genuinely drifted pair
+detected and two clean pairs - one with a five-row, four-transaction-type
+ledger - correctly left clean; the drifted pair's cached balance and the
+ledger row count both unchanged after the run; `p_limit=0` as a no-op; and
+the four-call rotation proof). Verified live on 2026-08-06 against a
+SHARED, already-populated `business_customers` table: assertions read the
+pre-existing candidate count dynamically rather than asserting a hardcoded
+literal, and the rotation proof only asserts "outside the just-rotated
+trio", not a specific pair - both were review findings against the first
+draft of this suite, caught by running it against real live data rather
+than an assumed-empty table.
 
 ### What the receipts sweep does and does not do
 
@@ -655,6 +740,17 @@ outcome is visible; the push is owed to the notifications slice.
   DEFINER`) and revoked from every role including `service_role`, so it
   never appears in the definer-callable warnings at all; `sweep_campaigns`
   itself keeps its `service_role`-only grant across the `create or replace`.
+- Migration 0056 (task 2.2: `balance_check`, the new `balance_check_findings`
+  table, the `integrity.balance_check` cron job) added one new INFO-level
+  lint - `rls_enabled_no_policy` on `public.balance_check_findings` - which
+  is the deliberate deny-all posture stated in the table's own header
+  (identical, accepted precedent: `public.jobs`, 0029). No new WARN or ERROR
+  of any level. `public.balance_check` does not appear in the
+  authenticated-callable definer warnings, because EXECUTE is granted to
+  `service_role` only and it pins `search_path = ''`. The freshly-built
+  `balance_check_findings_drifted_idx` shows as "has not been used" on the
+  performance advisor, the same expected non-finding 0053 noted for its own
+  new index.
 
 ### `cancel_claim` (0050-0051, task 1.4 + review-fix pass)
 
@@ -776,6 +872,7 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0053_campaigns_sweep.sql | 20260806084550 | 0053_campaigns_sweep |
 | 0054_campaigns_sweep_review_fixes.sql | 20260806091451 | 0054_campaigns_sweep_review_fixes |
 | 0055_campaigns_sweep_skip_visibility.sql | 20260806093311 | 0055_campaigns_sweep_skip_visibility |
+| 0056_balance_check.sql | 20260806095729 | 0056_balance_check |
 
 **Rows 0001-0035 are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`; rows 0036-0049 were applied later, and 0042-0049 on 2026-08-06.** The
 sentence below describes the replay only. It does NOT describe 0042-0049: one
