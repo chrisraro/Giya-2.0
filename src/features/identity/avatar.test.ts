@@ -17,6 +17,7 @@ import {
   AVATAR_OWNER_SEGMENT_INDEX,
   newAvatarObjectPath,
   objectPathFromPublicUrl,
+  oversizePhotoMessage,
 } from "./avatar";
 
 // THE AGREEMENT TEST (brief constraint 3).
@@ -288,6 +289,22 @@ describe("the configured Server Action body limit admits the file the app accept
     expect(source.match(/^import\s/m)).toBeNull();
     expect(source.match(/^export .* from /m)).toBeNull();
     expect(source).not.toMatch(/\brequire\s*\(/);
+  });
+
+  it("CRITICAL: the oversize sentence quotes the ceiling it is actually enforcing", () => {
+    // Found by a surviving mutant. Both call sites are pinned to
+    // `oversizePhotoMessage()` (actions.test.ts and profile-edit-form.test.tsx
+    // each assert exact equality against it), which proves they AGREE - but two
+    // sides agreeing on the same wrong number is still wrong, and changing the
+    // helper to say "4 MB" left both of those assertions green because they
+    // compare against the helper itself.
+    //
+    // This is the third side of that triangle: the sentence versus the constant
+    // it describes. A consumer told "larger than 4 MB" about an 8 MB ceiling has
+    // been given a number they cannot act on.
+    const quoted = oversizePhotoMessage().match(/(\d+)\s*MB/);
+    expect(quoted).not.toBeNull();
+    expect(Number(quoted?.[1]) * 1024 * 1024).toBe(AVATAR_MAX_UPLOAD_BYTES);
   });
 
   it("CRITICAL: is comfortably above the 4-6MB phone photo the comment promises", () => {
