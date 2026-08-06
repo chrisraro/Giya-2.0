@@ -28,6 +28,20 @@
    covered this one). If you copy a pattern, open the original's test file and
    copy the assertions that fence it.
 
+   **When correctness depends on two files agreeing, assert the agreement, not
+   each side.** A cookie is deleted only by a `Set-Cookie` whose *identity
+   tuple* — name, `Path`, `Domain` — matches the one that set it; everything
+   else on the header is decoration. T3.1 shipped a clear that asserted
+   `name=;` and `max-age=0` and nothing else, so `Path=/reset-password`,
+   an omitted `Path`, and an added `Domain` **all passed a green suite while
+   deleting nothing** — reopening the exact reuse window the fix existed to
+   close. The mint side was equally unpinned in the other direction. Neither
+   file's test could express the property, because the property lives
+   *between* them; the fix is a test that owns the relationship. Generalise
+   past cookies: emitting the right-looking artifact is not evidence that the
+   artifact did its job. Assert the effect, and where you cannot reach the
+   effect, assert the identity that produces it.
+
    Name the mutant concretely: "delete `and pt.business_id = c.business_id` → these four assertions fail", not "tested the filter".
 
 1. **TDD.** Red first. Each task names its test files; implementer reports test output. Full suite green (baseline 3820) before DONE.
