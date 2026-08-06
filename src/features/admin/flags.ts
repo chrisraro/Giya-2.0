@@ -70,9 +70,14 @@ interface FlagRow {
   is_enabled: boolean;
   rollout: unknown;
   updated_at: string;
+  /** Read so a failed-audit revert (review finding #7) can restore the
+   * PRIOR actor, not leave the row attributed to the actor whose toggle
+   * was rolled back. Not part of `FeatureFlagItem` - the screen has no use
+   * for it, this is bookkeeping for the revert path alone. */
+  updated_by: string | null;
 }
 
-const FLAG_COLUMNS = "key, description, is_enabled, rollout, updated_at";
+const FLAG_COLUMNS = "key, description, is_enabled, rollout, updated_at, updated_by";
 
 function toFlagItem(row: FlagRow): FeatureFlagItem {
   return {
@@ -258,7 +263,12 @@ export async function toggleFeatureFlag(
 
   if (auditError !== null) {
     console.error("[admin/flags] audit write failed for flag toggle", auditError);
-    await revertToggle(deps, input.key, current.is_enabled);
+    await revertToggle(deps, {
+      key: input.key,
+      writtenIsEnabled: input.isEnabled,
+      priorIsEnabled: current.is_enabled,
+      priorUpdatedBy: current.updated_by,
+    });
     return fail("AUDIT_WRITE_FAILED", "The flag was not changed because it could not be recorded.");
   }
 
@@ -271,19 +281,62 @@ export async function toggleFeatureFlag(
  * `jobs.ts#revertReplay` and `admin/consequences.ts#revert` perform, and for
  * the identical reason: a state change with no audit trail behind it is the
  * one outcome doc 15 forbids outright.
+ *
+ * Review finding #7, two fixes over the first version:
+ *
+ *   1. GUARDED, not unconditional. The forward write (above) carries a CAS
+ *      predicate on the row's PRIOR value for exactly this reason - "a race
+ *      between two admins loses cleanly" - and an unguarded revert threw
+ *      that property away the moment it fired: it could clobber a THIRD
+ *      admin's change made in the (however brief) window between this
+ *      toggle's write and its own failed audit insert. Guarded here on
+ *      `writtenIsEnabled` - the value THIS toggle wrote - so the revert
+ *      only proceeds if the row still holds it. If it does not, a newer
+ *      change already landed and is preserved; this function logs that
+ *      distinctly rather than silently doing nothing.
+ *   2. RESTORES `updated_by`, not only `is_enabled`. Without this, a row
+ *      whose toggle was rolled back stayed attributed to the actor who
+ *      attempted it, which is a false record in the opposite direction
+ *      from the one the revert exists to prevent: the CURRENT state is
+ *      correct, but who last legitimately touched it is not.
  */
-async function revertToggle(deps: AdminFlagsDeps, key: string, priorIsEnabled: boolean): Promise<void> {
-  const { error } = await deps.supabase
+async function revertToggle(
+  deps: AdminFlagsDeps,
+  input: {
+    key: string;
+    /** The value this toggle wrote - the revert's CAS guard. */
+    writtenIsEnabled: boolean;
+    priorIsEnabled: boolean;
+    priorUpdatedBy: string | null;
+  },
+): Promise<void> {
+  const { data: reverted, error } = await deps.supabase
     .from("feature_flags")
-    .update({ is_enabled: priorIsEnabled })
-    .eq("key", key);
+    .update({ is_enabled: input.priorIsEnabled, updated_by: input.priorUpdatedBy })
+    .eq("key", input.key)
+    .eq("is_enabled", input.writtenIsEnabled)
+    .select("key")
+    .maybeSingle<{ key: string }>();
 
   if (error !== null) {
     console.error(
-      `[admin/flags] UNAUDITED CHANGE: the toggle of flag "${key}" could not be recorded and could not be reverted`,
+      `[admin/flags] UNAUDITED CHANGE: the toggle of flag "${input.key}" could not be recorded and could not be reverted`,
       error,
     );
     return;
   }
-  console.warn(`[admin/flags] the toggle of flag "${key}" was reverted (audit write failed)`);
+
+  if (reverted === null) {
+    // The CAS guard did not match: someone else already changed this row
+    // again since our own (unaudited) write. Their change is newer and is
+    // left standing - reverting it would destroy a DIFFERENT, unrelated
+    // toggle that has nothing to do with this one's failed audit write.
+    console.warn(
+      `[admin/flags] the toggle of flag "${input.key}" could not be reverted: a newer change already ` +
+        `landed on it. The unaudited write from this attempt is gone; the newer state is preserved.`,
+    );
+    return;
+  }
+
+  console.warn(`[admin/flags] the toggle of flag "${input.key}" was reverted (audit write failed)`);
 }

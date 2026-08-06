@@ -253,7 +253,7 @@ describe("checkAiBudget", () => {
       now: new Date("2026-08-06T00:00:00.000Z"),
     });
 
-    expect(redisGet).toHaveBeenCalledWith(`test:ai:budget:${NO_BUSINESS_BUCKET}:2026-08-06`);
+    expect(redisGet).toHaveBeenCalledWith(`test:ai:budget:${NO_BUSINESS_BUCKET}:20260806`);
     expect(result).toEqual({ allowed: false, capMicros: 1_000, spentMicros: 999 });
     // Named mutant: keep the OLD `if (input.businessId === null) return
     // {allowed: true, capMicros: Infinity, ...}` short-circuit. Killed - a
@@ -510,12 +510,40 @@ describe("recordAiSpend", () => {
       now: new Date("2026-08-06T04:00:00.000Z"), // 2026-08-06 12:00 Manila
     });
 
-    expect(incrby).toHaveBeenCalledWith(`test:ai:budget:${BUSINESS_ID}:2026-08-06`, 873);
-    expect(expireNx).toHaveBeenCalledWith(`test:ai:budget:${BUSINESS_ID}:2026-08-06`, expect.any(Number));
+    expect(incrby).toHaveBeenCalledWith(`test:ai:budget:${BUSINESS_ID}:20260806`, 873);
+    expect(expireNx).toHaveBeenCalledWith(`test:ai:budget:${BUSINESS_ID}:20260806`, expect.any(Number));
     // Named mutant: call `expireNx` unconditionally with `EXPIRE` semantics
     // instead of `expireNx` (would push the window out on every call rather
     // than only the first). Killed by asserting the specific function
     // (`expireNx`, mocked separately from a plain `expire`) was called.
+  });
+
+  // Review finding #5: the key doc 38 section 1 describes is `{yyyymmdd}`,
+  // undashed - `manilaBudgetDay` itself returns `YYYY-MM-DD` (asserted
+  // separately, above), so this is the one assertion proving the Redis KEY
+  // actually matches what the doc claims verbatim, not merely that the day
+  // arithmetic is right.
+  it("strips the dashes from the day when building the Redis key, matching doc 38's undashed {yyyymmdd} verbatim", async () => {
+    incrby.mockResolvedValue(1);
+    expireNx.mockResolvedValue(true);
+
+    await recordAiSpend({
+      businessId: BUSINESS_ID,
+      costMicros: 1,
+      now: new Date("2026-08-06T04:00:00.000Z"),
+    });
+
+    const [key] = incrby.mock.calls[0] as [string, number];
+    expect(key).toBe(`test:ai:budget:${BUSINESS_ID}:20260806`);
+    // The trailing segment specifically (not the whole key - BUSINESS_ID
+    // itself is a dashed uuid, so a whole-key "no dashes" assertion would
+    // be vacuously wrong).
+    expect(key.split(":").at(-1)).toBe("20260806");
+    expect(key.split(":").at(-1)).not.toContain("-");
+    // Named mutant: pass `manilaBudgetDay(...)`'s dashed output straight
+    // into `redisKey` without stripping it (i.e. revert `budgetRedisKey` to
+    // its pre-fix form). Killed by the trailing-segment assertion above -
+    // it would read "2026-08-06" instead of "20260806".
   });
 
   it("records a null-business call against the shared unmatched-business bucket (review finding I2), not a no-op", async () => {
@@ -528,7 +556,7 @@ describe("recordAiSpend", () => {
       now: new Date("2026-08-06T04:00:00.000Z"), // 2026-08-06 12:00 Manila
     });
 
-    expect(incrby).toHaveBeenCalledWith(`test:ai:budget:${NO_BUSINESS_BUCKET}:2026-08-06`, 500);
+    expect(incrby).toHaveBeenCalledWith(`test:ai:budget:${NO_BUSINESS_BUCKET}:20260806`, 500);
     // Named mutant: keep the OLD `if (businessId === null) return` early
     // exit. Killed - spend on an unmatched-business call would then never
     // be recorded anywhere, so `checkAiBudget`'s pooled cap (see the test

@@ -27,7 +27,11 @@ interface FlagFixture {
   is_enabled: boolean;
   rollout: unknown;
   updated_at: string;
+  updated_by: string | null;
 }
+
+const ORIGINAL_ACTOR_ID = "99999999-9999-4999-8999-999999999999";
+const THIRD_ADMIN_ID = "33333333-3333-4333-8333-333333333333";
 
 function flag(overrides: Partial<FlagFixture> = {}): FlagFixture {
   return {
@@ -36,6 +40,7 @@ function flag(overrides: Partial<FlagFixture> = {}): FlagFixture {
     is_enabled: true,
     rollout: {},
     updated_at: "2026-08-06T00:00:00.000Z",
+    updated_by: ORIGINAL_ACTOR_ID,
     ...overrides,
   };
 }
@@ -46,16 +51,27 @@ interface WorldOptions {
   adminReadError?: { message: string } | null;
   flagListError?: { message: string } | null;
   flagReadError?: { message: string } | null;
-  /** Applies to the CAS write (the `.select().maybeSingle()` shaped call). */
+  /** Applies to the FORWARD CAS write only (the first `.update()` call this
+   * toggle issues against `feature_flags`). */
   writeError?: { message: string; code?: string } | null;
   auditError?: { message: string } | null;
-  /** Applies to the plain (no-select) revert write only. */
+  /** Applies to the REVERT write only (the second `.update()` call, issued
+   * only when the audit insert failed). Distinguished from `writeError` by
+   * CALL ORDER, not by shape - both writes are now the identical
+   * `.eq(...).eq(...).select(...).maybeSingle()` chain shape (review
+   * finding #7 made the revert CAS-guarded too), so shape can no longer
+   * tell them apart the way it could before that fix. */
   revertError?: { message: string } | null;
   /** Mutates the store AFTER this call's pre-write read but as part of the
-   * CAS write attempt itself - the race the `.eq("is_enabled", prior)`
+   * FORWARD write attempt itself - the race the `.eq("is_enabled", prior)`
    * predicate has to catch. Fires once, then set back to `undefined`
    * (declared explicitly in the type, `exactOptionalPropertyTypes`). */
   raceBeforeWrite?: ((store: Map<string, FlagFixture>) => void) | undefined;
+  /** Mutates the store AFTER the forward write but BEFORE the revert's own
+   * CAS write - review finding #7's "a third admin changes it again before
+   * the revert runs" race. Fires once, only ever consulted by the SECOND
+   * `.update()` call (the revert). */
+  raceBeforeRevert?: ((store: Map<string, FlagFixture>) => void) | undefined;
 }
 
 interface FakeResult {
@@ -63,19 +79,18 @@ interface FakeResult {
   error: unknown;
 }
 
-/** A thenable `.eq(...).eq(...).select().maybeSingle()` chain over the
- * in-memory flag store, matching both shapes flags.ts issues against
- * `feature_flags`: the CAS toggle write (two `.eq`s, `.select()`,
- * `.maybeSingle()`) and the plain revert write (one `.eq("key", ...)`,
- * awaited directly with no `.select()`). */
+/** A thenable `.eq(...).eq(...).select(...).maybeSingle()` chain over the
+ * in-memory flag store. `updateIndex` (0 = the forward CAS write, 1 = the
+ * revert, assigned by call ORDER in `createWorld` below) is what picks the
+ * error channel and the race hook now that both writes share one shape. */
 class UpdateChain implements PromiseLike<FakeResult> {
   private readonly filters: Array<{ column: string; value: unknown }> = [];
-  private selected = false;
 
   constructor(
     private readonly store: Map<string, FlagFixture>,
     private readonly patch: Record<string, unknown>,
     private readonly options: WorldOptions,
+    private readonly updateIndex: number,
   ) {}
 
   eq(column: string, value: unknown): this {
@@ -84,7 +99,6 @@ class UpdateChain implements PromiseLike<FakeResult> {
   }
 
   select(): this {
-    this.selected = true;
     return this;
   }
 
@@ -102,22 +116,22 @@ class UpdateChain implements PromiseLike<FakeResult> {
   }
 
   private resolve(): FakeResult {
-    // The revert path is the plain, no-`.select()` shape - a distinct error
-    // channel from the CAS write's.
-    if (!this.selected) {
-      if (this.options.revertError !== undefined && this.options.revertError !== null) {
-        return { data: null, error: this.options.revertError };
-      }
-    } else if (this.options.writeError !== undefined && this.options.writeError !== null) {
-      return { data: null, error: this.options.writeError };
+    const isRevert = this.updateIndex === 1;
+    const scriptedError = isRevert ? this.options.revertError : this.options.writeError;
+    if (scriptedError !== undefined && scriptedError !== null) {
+      return { data: null, error: scriptedError };
     }
 
     const keyFilter = this.filters.find((f) => f.column === "key");
     if (keyFilter === undefined) return { data: null, error: null };
 
-    if (this.selected && this.options.raceBeforeWrite !== undefined) {
+    if (!isRevert && this.options.raceBeforeWrite !== undefined) {
       this.options.raceBeforeWrite(this.store);
       this.options.raceBeforeWrite = undefined;
+    }
+    if (isRevert && this.options.raceBeforeRevert !== undefined) {
+      this.options.raceBeforeRevert(this.store);
+      this.options.raceBeforeRevert = undefined;
     }
 
     const row = this.store.get(String(keyFilter.value));
@@ -129,7 +143,7 @@ class UpdateChain implements PromiseLike<FakeResult> {
     if (!matches) return { data: null, error: null };
 
     Object.assign(row, this.patch);
-    return { data: this.selected ? { ...row } : null, error: null };
+    return { data: { ...row }, error: null };
   }
 }
 
@@ -173,8 +187,9 @@ function createWorld(options: WorldOptions = {}) {
             };
           },
           update(patch: Record<string, unknown>) {
+            const updateIndex = updateCalls.length;
             updateCalls.push(patch);
-            return new UpdateChain(store, patch, options);
+            return new UpdateChain(store, patch, options, updateIndex);
           },
         };
       }
@@ -512,6 +527,70 @@ describe("toggleFeatureFlag: the write and the audit row", () => {
     // Named mutant: report AUDIT_WRITE_FAILED without reverting the row
     // (drop the `await revertToggle(...)` call). Killed - the row would
     // still read `false`, an unaudited change no reader can account for.
+  });
+
+  // Review finding #7 (part 1): the revert must restore `updated_by` to
+  // the PRIOR actor, not leave the row attributed to the actor whose
+  // toggle was rolled back.
+  it("restores updated_by to the prior actor when reverting a failed toggle (review finding #7)", async () => {
+    const world = createWorld({
+      adminRole: "super_admin",
+      flags: [flag({ is_enabled: true, updated_by: ORIGINAL_ACTOR_ID })],
+      auditError: { message: "connection reset" },
+    });
+
+    await toggleFeatureFlag(
+      { key: "ai_parse_assist", isEnabled: false, actorId: ADMIN_ID, reason: REASON, requestId: "r1" },
+      world.deps,
+    );
+
+    expect(world.store.get("ai_parse_assist")?.updated_by).toBe(ORIGINAL_ACTOR_ID);
+    // Named mutant: revert `is_enabled` only, leaving `updated_by` at
+    // whatever the forward (failed) write set it to. Killed - the row
+    // would stay attributed to `ADMIN_ID`, a false record of who last
+    // legitimately touched a flag that ADMIN_ID's own toggle never
+    // actually took effect on.
+  });
+
+  // Review finding #7 (part 2): the revert is CAS-guarded on the value
+  // THIS toggle wrote, so it cannot clobber a newer change a third admin
+  // made in the window between the forward write and the failed audit
+  // insert.
+  it("does not clobber a third admin's newer change when reverting (review finding #7, CAS-guarded)", async () => {
+    const world = createWorld({
+      adminRole: "super_admin",
+      flags: [flag({ is_enabled: true, updated_by: ORIGINAL_ACTOR_ID })],
+      auditError: { message: "connection reset" },
+      // Fires only for the SECOND update call (the revert): a third admin
+      // already turned the flag back on again, attributed to themselves,
+      // before this toggle's revert runs.
+      raceBeforeRevert: (store) => {
+        const row = store.get("ai_parse_assist");
+        if (row !== undefined) {
+          row.is_enabled = true;
+          row.updated_by = THIRD_ADMIN_ID;
+        }
+      },
+    });
+
+    const outcome = await toggleFeatureFlag(
+      { key: "ai_parse_assist", isEnabled: false, actorId: ADMIN_ID, reason: REASON, requestId: "r1" },
+      world.deps,
+    );
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.code).toBe("AUDIT_WRITE_FAILED");
+    // The third admin's change survives untouched - reverting it would
+    // destroy a DIFFERENT toggle that has nothing to do with this one's
+    // failed audit write.
+    expect(world.store.get("ai_parse_assist")?.is_enabled).toBe(true);
+    expect(world.store.get("ai_parse_assist")?.updated_by).toBe(THIRD_ADMIN_ID);
+    // Named mutant: drop the `.eq("is_enabled", writtenIsEnabled)` CAS
+    // predicate from the revert's update chain (revert unconditionally).
+    // Killed - without it, the revert would overwrite the third admin's
+    // `is_enabled: true, updated_by: THIRD_ADMIN_ID` with the original
+    // actor's prior state, silently erasing a change this toggle's own
+    // failure has no business touching.
   });
 
   it("does not throw when the audit write fails AND the revert itself fails", async () => {

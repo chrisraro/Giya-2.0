@@ -295,11 +295,24 @@ export function manilaBudgetDay(instant: Date): string {
  */
 const NO_BUSINESS_BUCKET = "unmatched";
 
-/** Doc 38 section 1's key shape, verbatim: `{env}:ai:budget:{business_id}:
+/**
+ * Doc 38 section 1's key shape, verbatim: `{env}:ai:budget:{business_id}:
  * {yyyymmdd}`. `redisKey` supplies the `{env}` prefix. `scopeKey` is either
- * a real business id or `NO_BUSINESS_BUCKET`. */
+ * a real business id or `NO_BUSINESS_BUCKET`.
+ *
+ * Review finding #5: `{yyyymmdd}` in the doc has no separators, but
+ * `manilaBudgetDay` returns `YYYY-MM-DD` (the useful, readable shape for a
+ * function whose day arithmetic is worth getting right on its own, and
+ * whose own doc and tests are written against that format). This function
+ * is the one place those two facts have to reconcile, so the dashes are
+ * stripped HERE, at the Redis key boundary, rather than either changing
+ * `manilaBudgetDay`'s public shape or leaving the two silently diverged.
+ * Doc 38 section 1 describes an hourly Postgres reconciliation job that
+ * does not exist yet; when it does, it (and any ops runbook grepping the
+ * documented key shape) needs to find `20260806`, not `2026-08-06`.
+ */
 function budgetRedisKey(scopeKey: string, day: string): string {
-  return redisKey("ai", "budget", scopeKey, day);
+  return redisKey("ai", "budget", scopeKey, day.replaceAll("-", ""));
 }
 
 /** A little over a day: the key only ever needs to answer for the CURRENT
