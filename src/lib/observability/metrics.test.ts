@@ -23,6 +23,8 @@ import type { MetricsDeps } from "./metrics";
 interface CountOp {
   table: "jobs";
   status: string;
+  countMode: string | undefined;
+  head: boolean | undefined;
 }
 
 interface RpcOp {
@@ -31,7 +33,7 @@ interface RpcOp {
 }
 
 interface FakeResponses {
-  /** status -> count (or an error when omitted from this map and errorStatuses includes it) */
+  /** status -> count (or an error when that status is listed in countErrorStatuses) */
   counts?: Partial<Record<string, number>>;
   countErrorStatuses?: string[];
   sweepRows?: Array<{
@@ -57,9 +59,14 @@ function createDeps(responses: FakeResponses): {
 
   const supabase = {
     from: (table: string) => ({
-      select: () => ({
+      select: (_columns: string, options?: { count?: string; head?: boolean }) => ({
         eq: (_column: string, status: string) => {
-          countOps.push({ table: table as "jobs", status });
+          countOps.push({
+            table: table as "jobs",
+            status,
+            countMode: options?.count,
+            head: options?.head,
+          });
           if (responses.countErrorStatuses?.includes(status)) {
             return Promise.resolve({ count: null, error: { message: "boom" } });
           }
@@ -85,7 +92,7 @@ describe("loadMetrics", () => {
     expect(result).toBeNull();
   });
 
-  it("counts jobs by every one of doc 39's five statuses", async () => {
+  it("counts jobs by every one of doc 39's five statuses, as a HEAD count", async () => {
     const { deps, countOps } = createDeps({
       counts: { queued: 3, running: 1, succeeded: 100, failed: 2, dead: 0 },
     });
@@ -100,6 +107,25 @@ describe("loadMetrics", () => {
       dead: 0,
     });
     expect(countOps.map((op) => op.status).sort()).toEqual([...JOB_STATUSES].sort());
+    expect(countOps.every((op) => op.head === true)).toBe(true);
+  });
+
+  // I5: `jobs` has no retention sweep, so an EXACT count over the one status
+  // with no reason to stay small (`succeeded` - every job that ever finished
+  // cleanly, forever) is a full-table-scan cost that grows without bound.
+  // The other four are expected to stay small in a healthy system (that is
+  // what makes them worth alerting on precisely), so they stay exact.
+  it("counts the ever-growing succeeded bucket as estimated, and the small/actionable ones exact", async () => {
+    const { deps, countOps } = createDeps({});
+
+    await loadMetrics(deps);
+
+    const modeByStatus = Object.fromEntries(countOps.map((op) => [op.status, op.countMode]));
+    expect(modeByStatus.succeeded).toBe("estimated");
+    expect(modeByStatus.queued).toBe("exact");
+    expect(modeByStatus.running).toBe("exact");
+    expect(modeByStatus.failed).toBe("exact");
+    expect(modeByStatus.dead).toBe("exact");
   });
 
   it("reports the dead-letter count as the same number as the dead status tally", async () => {
@@ -111,12 +137,43 @@ describe("loadMetrics", () => {
     expect(result?.jobs.deadLetterCount).toBe(result?.jobs.byStatus.dead);
   });
 
-  it("returns null, not a partial report, when any status count fails to read", async () => {
-    const { deps } = createDeps({ countErrorStatuses: ["dead"] });
+  // I5: the old behaviour discarded the ENTIRE jobs report - including a
+  // successfully-read `dead` count - the moment any ONE status failed. That
+  // is backwards: a failure under load (the likeliest time for a count to
+  // time out) must not also delete the one number (dead-letter depth) an
+  // operator needs most at exactly that moment.
+  it("reports a failed status count as null WITHOUT discarding the other, successfully-read counts", async () => {
+    const { deps } = createDeps({
+      counts: { queued: 3, running: 1, failed: 2, dead: 9 },
+      countErrorStatuses: ["succeeded"],
+    });
 
     const result = await loadMetrics(deps);
 
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result?.jobs.byStatus).toEqual({
+      queued: 3,
+      running: 1,
+      succeeded: null,
+      failed: 2,
+      dead: 9,
+    });
+    // The DLQ number survives the unrelated failure - the whole point.
+    expect(result?.jobs.deadLetterCount).toBe(9);
+  });
+
+  it("reports the dead-letter count as null when specifically the dead count fails, without touching the others", async () => {
+    const { deps } = createDeps({
+      counts: { queued: 3, running: 1, succeeded: 100, failed: 2 },
+      countErrorStatuses: ["dead"],
+    });
+
+    const result = await loadMetrics(deps);
+
+    expect(result?.jobs.byStatus.dead).toBeNull();
+    expect(result?.jobs.deadLetterCount).toBeNull();
+    expect(result?.jobs.byStatus.queued).toBe(3);
+    expect(result?.jobs.byStatus.succeeded).toBe(100);
   });
 
   it("calls sweep_job_health with the documented window", async () => {
@@ -182,11 +239,25 @@ describe("loadMetrics", () => {
     ]);
   });
 
-  it("returns null when the sweep_job_health read fails", async () => {
-    const { deps } = createDeps({ sweepError: { message: "function does not exist" } });
+  // I5: a sweep_job_health failure and a jobs-count failure are independent
+  // data sources hitting independent tables/functions; one failing must not
+  // blank out the other.
+  it("reports sweepJobHealth as null when its RPC fails, WITHOUT discarding the jobs counts", async () => {
+    const { deps } = createDeps({
+      counts: { queued: 3, running: 1, succeeded: 100, failed: 2, dead: 1 },
+      sweepError: { message: "function does not exist" },
+    });
 
     const result = await loadMetrics(deps);
 
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result?.sweepJobHealth).toBeNull();
+    expect(result?.jobs.byStatus).toEqual({
+      queued: 3,
+      running: 1,
+      succeeded: 100,
+      failed: 2,
+      dead: 1,
+    });
   });
 });

@@ -239,7 +239,13 @@ describe("getServerEnv", () => {
     expect(getServerEnv().METRICS_TOKEN).toBe("a".repeat(24));
   });
 
-  it("rejects a METRICS_TOKEN shorter than 16 characters (a typo must not silently weaken it)", async () => {
+  it("does NOT reject a short METRICS_TOKEN - the strength floor lives in the route, not this schema", async () => {
+    // I1: a `.min()` here would make getServerEnv() throw for a truncated
+    // METRICS_TOKEN, and getServerEnv() is called by unrelated code
+    // (src/lib/redis.ts, src/lib/queue/publish.ts,
+    // src/features/rewards/server/token.ts) that has nothing to do with
+    // metrics. readMetricsToken() in
+    // src/app/api/internal/metrics/route.ts.test.ts pins the actual floor.
     vi.resetModules();
     stubClientEnv();
     stubRequiredServerEnv();
@@ -247,7 +253,8 @@ describe("getServerEnv", () => {
 
     const { getServerEnv } = await import("./env");
 
-    expect(() => getServerEnv()).toThrow(/METRICS_TOKEN/);
+    expect(() => getServerEnv()).not.toThrow();
+    expect(getServerEnv().METRICS_TOKEN).toBe("short");
   });
 
   it("memoizes: a second call returns the same object without re-parsing", async () => {

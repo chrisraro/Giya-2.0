@@ -259,7 +259,24 @@ const serverEnvSchema = z.object({
   // doc 52 has a QStash schedule invoking this probe every minute, so that
   // failure mode would page on a schedule. Reading process.env directly means
   // an absent or broken METRICS_TOKEN can only ever affect this one route.
-  METRICS_TOKEN: z.string().min(16).optional(),
+  //
+  // DELIBERATELY NO `.min()` HERE, unlike most of the optional secrets above.
+  // A `.min(16)` would not only fail to protect this route (which never goes
+  // through getServerEnv()) - it would actively endanger every OTHER caller
+  // of getServerEnv(): src/lib/redis.ts (rate limiting and the idempotency
+  // gate behind most of /api/v1), src/features/rewards/server/token.ts
+  // (redemption signing), and src/lib/queue/publish.ts all call it, and
+  // getServerEnv() throws for the WHOLE object the moment any one field
+  // fails its schema. A truncated or typo'd METRICS_TOKEN paste - a field
+  // those callers never read - would take all of them down, which is exactly
+  // the "took out all eight business portal routes at once" incident
+  // src/lib/supabase/service.ts's header warns about, just triggered by a
+  // different field. The strength floor belongs next to the one reader that
+  // actually enforces it: readMetricsToken() in
+  // src/app/api/internal/metrics/route.ts, mirroring how service.ts
+  // re-validates SUPABASE_SERVICE_ROLE_KEY's length locally instead of
+  // trusting a schema no code path for it goes through.
+  METRICS_TOKEN: z.string().optional(),
 });
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;

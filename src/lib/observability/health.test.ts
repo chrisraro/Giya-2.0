@@ -3,15 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // getHealth(): the aggregate behind GET /api/v1/health (doc 52's synthetic
 // uptime probe target). Every check below goes through an injected
 // `fetchImpl` rather than the real network - this module talks to Postgres
-// (PostgREST), Redis (Upstash REST) and QStash entirely over `fetch`, the
-// same "no SDK, plain REST" shape as src/lib/redis.ts and
-// src/lib/queue/publish.ts.
+// (PostgREST) and Redis (Upstash REST) entirely over `fetch`, the same "no
+// SDK, plain REST" shape as src/lib/redis.ts, and asks
+// src/lib/queue/publish.ts's own `isQueueConfigured()` whether QStash is
+// configured at all rather than re-deriving that predicate.
 //
-// The leak test at the bottom is the one that matters most (t2-3-brief.md):
-// a health check is the one endpoint EVERY unauthenticated caller and every
-// external uptime monitor can reach, so nothing it reports may ever let a
-// dependency failure's raw text (a connection string, a key fragment, a
-// driver's error message) reach the response body.
+// The leak tests are the ones that matter most (t2-3-brief.md): a health
+// check is the one endpoint EVERY unauthenticated caller and every external
+// uptime monitor can reach, so nothing it reports may ever let a dependency
+// failure's raw text (a connection string, a key fragment, a driver's error
+// message) reach the response body - including on the non-2xx HTTP branch,
+// which a THROWN-error-only leak test cannot exercise at all.
 
 vi.mock("server-only", () => ({}));
 
@@ -25,12 +27,16 @@ vi.mock("@/lib/env", () => ({
   },
 }));
 
+const mocks = vi.hoisted(() => ({ isQueueConfigured: vi.fn() }));
+vi.mock("@/lib/queue/publish", () => ({ isQueueConfigured: mocks.isQueueConfigured }));
+
 const { checkDatabase, checkRedis, checkQueue, getHealth } = await import("./health");
 
-function jsonResponse(body: unknown, ok = true, status = 200): Response {
+function jsonResponse(body: unknown, ok = true, status = 200, headers: Record<string, string> = {}): Response {
   return {
     ok,
     status,
+    headers: { get: (name: string) => headers[name.toLowerCase()] ?? headers[name] ?? null },
     json: async () => body,
     text: async () => JSON.stringify(body),
   } as unknown as Response;
@@ -38,6 +44,7 @@ function jsonResponse(body: unknown, ok = true, status = 200): Response {
 
 beforeEach(() => {
   vi.unstubAllEnvs();
+  mocks.isQueueConfigured.mockReturnValue(false);
 });
 
 afterEach(() => {
@@ -46,7 +53,7 @@ afterEach(() => {
 });
 
 describe("checkDatabase", () => {
-  it("reports ok with an integer latency when PostgREST answers", async () => {
+  it("reports ok with an integer latency when PostgREST answers with an array", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse([{ id: "1" }]));
 
     const result = await checkDatabase({ fetchImpl, timeoutMs: 1000 });
@@ -74,8 +81,28 @@ describe("checkDatabase", () => {
     expect(result.status).toBe("down");
   });
 
-  it("reports degraded, not down, when PostgREST answers but with a non-2xx status", async () => {
+  // I2: a hard dependency answering with a non-2xx status (paused project,
+  // pooler exhausted, anon key revoked) cannot serve requests, and a
+  // synthetic monitor whose job is to page on exactly that state must not
+  // see "degraded" (which never flips the overall 200/503).
+  it("reports down, not degraded, when PostgREST answers with a non-2xx status", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ message: "boom" }, false, 500));
+
+    const result = await checkDatabase({ fetchImpl, timeoutMs: 1000 });
+
+    expect(result.status).toBe("down");
+  });
+
+  it("reports down on a 401/403 (anon key revoked or rotated)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ message: "JWT invalid" }, false, 401));
+
+    const result = await checkDatabase({ fetchImpl, timeoutMs: 1000 });
+
+    expect(result.status).toBe("down");
+  });
+
+  it("reports degraded (reachable, unexpected answer) on a 2xx whose body is not the expected array", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ unexpected: true }, true, 200));
 
     const result = await checkDatabase({ fetchImpl, timeoutMs: 1000 });
 
@@ -104,6 +131,29 @@ describe("checkRedis", () => {
     expect(result.status).toBe("down");
   });
 
+  // I2
+  it("reports down, not degraded, when the token is revoked (a non-2xx status)", async () => {
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ error: "Unauthorized" }, false, 401));
+
+    const result = await checkRedis({ fetchImpl, timeoutMs: 1000 });
+
+    expect(result.status).toBe("down");
+  });
+
+  it("reports degraded on a 2xx whose body does not carry PONG", async () => {
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ result: "unexpected" }));
+
+    const result = await checkRedis({ fetchImpl, timeoutMs: 1000 });
+
+    expect(result.status).toBe("degraded");
+  });
+
   it("reports down when the credentials are not configured at all", async () => {
     vi.stubEnv("UPSTASH_REDIS_REST_URL", "");
     vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "");
@@ -117,9 +167,30 @@ describe("checkRedis", () => {
 });
 
 describe("checkQueue", () => {
-  it("returns null (omitted) when QStash is not configured", async () => {
-    vi.stubEnv("QSTASH_URL", "");
-    vi.stubEnv("QSTASH_TOKEN", "");
+  it("returns null (omitted) when isQueueConfigured() says the queue is not configured", async () => {
+    mocks.isQueueConfigured.mockReturnValue(false);
+    vi.stubEnv("QSTASH_URL", "https://qstash-us-east-1.upstash.io");
+    vi.stubEnv("QSTASH_TOKEN", "a".repeat(20));
+    const fetchImpl = vi.fn();
+
+    const result = await checkQueue({ fetchImpl, timeoutMs: 1000 });
+
+    expect(result).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  // I4: isQueueConfigured() (src/lib/queue/publish.ts) also requires
+  // QSTASH_CALLBACK_ORIGIN. A deployment with URL+TOKEN but no callback
+  // origin has every enqueue() silently skip publishing - this check must
+  // agree with that and treat the queue as unconfigured too, never probe it
+  // directly off URL+TOKEN presence alone.
+  it("defers entirely to isQueueConfigured(), never re-deriving 'configured' from URL+TOKEN alone", async () => {
+    mocks.isQueueConfigured.mockReturnValue(false);
+    // URL and TOKEN are BOTH set, simulating a deployment missing only
+    // QSTASH_CALLBACK_ORIGIN - isQueueConfigured() would say false for this
+    // exact case in production, and this check must match it.
+    vi.stubEnv("QSTASH_URL", "https://qstash-us-east-1.upstash.io");
+    vi.stubEnv("QSTASH_TOKEN", "a".repeat(20));
     const fetchImpl = vi.fn();
 
     const result = await checkQueue({ fetchImpl, timeoutMs: 1000 });
@@ -129,6 +200,7 @@ describe("checkQueue", () => {
   });
 
   it("reports ok when QStash is configured and reachable", async () => {
+    mocks.isQueueConfigured.mockReturnValue(true);
     vi.stubEnv("QSTASH_URL", "https://qstash-us-east-1.upstash.io");
     vi.stubEnv("QSTASH_TOKEN", "a".repeat(20));
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse([]));
@@ -138,10 +210,23 @@ describe("checkQueue", () => {
     expect(result?.status).toBe("ok");
   });
 
-  it("reports down when QStash is configured but unreachable", async () => {
+  it("reports down when QStash is configured but the request throws", async () => {
+    mocks.isQueueConfigured.mockReturnValue(true);
     vi.stubEnv("QSTASH_URL", "https://qstash-us-east-1.upstash.io");
     vi.stubEnv("QSTASH_TOKEN", "a".repeat(20));
     const fetchImpl = vi.fn().mockRejectedValue(new Error("timeout"));
+
+    const result = await checkQueue({ fetchImpl, timeoutMs: 1000 });
+
+    expect(result?.status).toBe("down");
+  });
+
+  // I2
+  it("reports down, not degraded, on a non-2xx status (revoked token, QStash outage)", async () => {
+    mocks.isQueueConfigured.mockReturnValue(true);
+    vi.stubEnv("QSTASH_URL", "https://qstash-us-east-1.upstash.io");
+    vi.stubEnv("QSTASH_TOKEN", "a".repeat(20));
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ error: "unauthorized" }, false, 401));
 
     const result = await checkQueue({ fetchImpl, timeoutMs: 1000 });
 
@@ -161,8 +246,7 @@ describe("getHealth", () => {
   it("answers 200 with an ok status per dependency when everything is up", async () => {
     vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
     vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
-    vi.stubEnv("QSTASH_URL", "");
-    vi.stubEnv("QSTASH_TOKEN", "");
+    mocks.isQueueConfigured.mockReturnValue(false);
 
     const result = await getHealth({ fetchImpl: allUpFetch(), timeoutMs: 1000 });
 
@@ -175,8 +259,7 @@ describe("getHealth", () => {
   it("answers 503 when the database is down", async () => {
     vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
     vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
-    vi.stubEnv("QSTASH_URL", "");
-    vi.stubEnv("QSTASH_TOKEN", "");
+    mocks.isQueueConfigured.mockReturnValue(false);
 
     const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
       if (url.includes("upstash.io")) return jsonResponse({ result: "PONG" });
@@ -189,11 +272,26 @@ describe("getHealth", () => {
     expect(result.dependencies.database?.status).toBe("down");
   });
 
+  it("answers 503 when the database answers with a non-2xx status (paused project, pooler exhausted)", async () => {
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
+    mocks.isQueueConfigured.mockReturnValue(false);
+
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("upstash.io")) return jsonResponse({ result: "PONG" });
+      return jsonResponse({ code: "PGRST301" }, false, 503);
+    });
+
+    const result = await getHealth({ fetchImpl, timeoutMs: 1000 });
+
+    expect(result.httpStatus).toBe(503);
+    expect(result.dependencies.database?.status).toBe("down");
+  });
+
   it("reflects a down Redis in its own status and in the overall 503", async () => {
     vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
     vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
-    vi.stubEnv("QSTASH_URL", "");
-    vi.stubEnv("QSTASH_TOKEN", "");
+    mocks.isQueueConfigured.mockReturnValue(false);
 
     const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
       if (url.includes("upstash.io")) throw new Error("connect ECONNREFUSED");
@@ -206,11 +304,12 @@ describe("getHealth", () => {
     expect(result.httpStatus).toBe(503);
   });
 
-  it("includes the queue only when QStash is configured, and a down queue also flips the overall status", async () => {
+  it("includes the queue only when isQueueConfigured() is true, and a down queue also flips the overall status", async () => {
     vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
     vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
     vi.stubEnv("QSTASH_URL", "https://qstash-us-east-1.upstash.io");
     vi.stubEnv("QSTASH_TOKEN", "a".repeat(20));
+    mocks.isQueueConfigured.mockReturnValue(true);
 
     const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
       if (url.includes("qstash")) throw new Error("connect ECONNREFUSED");
@@ -229,6 +328,7 @@ describe("getHealth", () => {
     vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
     vi.stubEnv("QSTASH_URL", "https://qstash-us-east-1.upstash.io");
     vi.stubEnv("QSTASH_TOKEN", "a".repeat(20));
+    mocks.isQueueConfigured.mockReturnValue(true);
 
     const result = await getHealth({ fetchImpl: allUpFetch(), timeoutMs: 1000 });
 
@@ -240,18 +340,19 @@ describe("getHealth", () => {
   });
 
   // -------------------------------------------------------------------------
-  // THE LEAK TEST. See t2-3-brief.md: "Leaks nothing: no connection strings,
+  // THE LEAK TESTS. See t2-3-brief.md: "Leaks nothing: no connection strings,
   // no key fragments, no schema names, no version numbers of upstream
-  // services, no error text from the driver." This is checked against every
-  // failure mode at once, and against the raw serialized response body, not
-  // against a hand-picked field - a leak in a field this test does not know
-  // to check is still a leak.
+  // services, no error text from the driver." Checked against every failure
+  // mode at once, and against the raw serialized response, not a hand-picked
+  // field - a leak in a field these tests do not know to check is still a
+  // leak.
   // -------------------------------------------------------------------------
-  it("never lets a dependency's raw error text, a credential or a connection string reach the body", async () => {
+  it("never lets a THROWN error's raw text, a credential or a connection string reach the body", async () => {
     vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
     vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
     vi.stubEnv("QSTASH_URL", "https://qstash-us-east-1.upstash.io");
     vi.stubEnv("QSTASH_TOKEN", "a".repeat(20));
+    mocks.isQueueConfigured.mockReturnValue(true);
 
     const secrets = [
       ANON_KEY,
@@ -277,8 +378,71 @@ describe("getHealth", () => {
       expect(serialized).not.toContain(secret);
     }
 
-    // The shape itself is closed: only status and latencyMs per dependency,
-    // nothing else can carry a leak through later either.
+    for (const check of Object.values(result.dependencies)) {
+      expect(Object.keys(check).sort()).toEqual(["latencyMs", "status"]);
+    }
+  });
+
+  // I3: every dependency above was exercised only via a THROWN fetch, which
+  // never reaches the `!response.ok` branch inside each probe - a mutation
+  // that added response detail (`url -> status + body`) on exactly that
+  // branch passed all of the tests above, including the previous version of
+  // this one. This test drives each dependency through a REAL non-2xx HTTP
+  // response carrying realistic upstream bodies and headers (a PostgREST
+  // error object naming a schema/relation, an Upstash "Unauthorized" body, a
+  // `Server`/`sb-` style header), and checks the same closed-shape and
+  // no-substring guarantees against THAT branch specifically. It also
+  // doubles as I2's regression pin: before that fix, every one of these
+  // non-2xx responses classified as "degraded", which never flips the
+  // overall 200/503 - a synthetic monitor whose entire job is to page on
+  // these exact states would have stayed green throughout.
+  it("never lets a non-2xx dependency response's body or headers reach the result, and reports it down", async () => {
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "a".repeat(20));
+    vi.stubEnv("QSTASH_URL", "https://qstash-us-east-1.upstash.io");
+    vi.stubEnv("QSTASH_TOKEN", "a".repeat(20));
+    mocks.isQueueConfigured.mockReturnValue(true);
+
+    const postgrestErrorBody = {
+      code: "PGRST301",
+      message: 'JWT expired for role "authenticated" on schema "receipts_private"',
+      hint: "relation \"receipts_private.audit_logs\" access denied",
+      details: null,
+    };
+    const upstashErrorBody = { error: "Unauthorized" };
+    const leakySecrets = [
+      "PGRST301",
+      "receipts_private",
+      "audit_logs",
+      "authenticated",
+      "Unauthorized",
+      "sb-gateway-1a2b3c",
+      "PostgREST/12.2.0",
+    ];
+    const leakyHeaders = { server: "PostgREST/12.2.0", "x-sb-gateway-version": "sb-gateway-1a2b3c" };
+
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("qstash")) {
+        return jsonResponse(upstashErrorBody, false, 401, leakyHeaders);
+      }
+      if (url.includes("upstash.io")) {
+        return jsonResponse(upstashErrorBody, false, 401, leakyHeaders);
+      }
+      return jsonResponse(postgrestErrorBody, false, 503, leakyHeaders);
+    });
+
+    const result = await getHealth({ fetchImpl, timeoutMs: 1000 });
+    const serialized = JSON.stringify(result);
+
+    for (const secret of leakySecrets) {
+      expect(serialized).not.toContain(secret);
+    }
+
+    expect(result.dependencies.database?.status).toBe("down");
+    expect(result.dependencies.redis?.status).toBe("down");
+    expect(result.dependencies.queue?.status).toBe("down");
+    expect(result.httpStatus).toBe(503);
+
     for (const check of Object.values(result.dependencies)) {
       expect(Object.keys(check).sort()).toEqual(["latencyMs", "status"]);
     }

@@ -27,10 +27,17 @@ import type { Database } from "@/lib/supabase/types";
 // src/features/admin/queue.ts use: a `deps` parameter that defaults to a real
 // service-role client, injectable in tests, null when the key is absent.
 //
-// FAILURE SHAPE, inherited from those same modules: `null` means "could not be
-// read" and is never rendered as zero or as an empty report. An empty `jobs`
-// table and an unreadable one must never look the same to an operator staring
-// at a dashboard during an incident.
+// FAILURE SHAPE. `loadMetrics()` itself returns `null` only when the
+// service-role client is unavailable at all (no key configured) - the route
+// maps that to 503. Below that top level, EVERY field degrades
+// independently: a status count that fails to read, or the sweep_job_health
+// RPC failing, reports `null` for exactly that field rather than discarding
+// the rest of the report. This is deliberate and the opposite of "all or
+// nothing" - see loadJobsByStatus()'s own comment for the incident this
+// avoids: a table-scan timeout on `succeeded` (the one status with no
+// retention sweep and no reason to be fast) must never take the `dead` count
+// down with it, because the DLQ number is exactly what an operator needs
+// when the platform is already under enough load for a count to time out.
 //
 // -----------------------------------------------------------------------------
 // WHY THIS IS SAFE TO SHOW `last_error` VERBATIM (unlike src/lib/observability/
@@ -47,7 +54,13 @@ import type { Database } from "@/lib/supabase/types";
 export const JOB_STATUSES = ["queued", "running", "succeeded", "failed", "dead"] as const;
 export type JobStatus = (typeof JOB_STATUSES)[number];
 
-export type JobsDepthByStatus = Readonly<Record<JobStatus, number>>;
+/**
+ * `number` when the count read succeeded, `null` when it did not - NEVER
+ * rendered as 0, matching every sibling module's "null means unreadable"
+ * convention. See the module header on why this is per-status rather than
+ * all-or-nothing.
+ */
+export type JobsDepthByStatus = Readonly<Record<JobStatus, number | null>>;
 
 export interface SweepJobHealthRow {
   readonly jobname: string;
@@ -63,9 +76,12 @@ export interface SweepJobHealthRow {
 export interface MetricsReport {
   readonly jobs: {
     readonly byStatus: JobsDepthByStatus;
-    readonly deadLetterCount: number;
+    /** Mirrors `byStatus.dead` - `null` exactly when that one count failed. */
+    readonly deadLetterCount: number | null;
   };
-  readonly sweepJobHealth: readonly SweepJobHealthRow[];
+  /** `null` when the `sweep_job_health` RPC itself failed to read - the jobs
+   * fields above are independent of this and still populate normally. */
+  readonly sweepJobHealth: readonly SweepJobHealthRow[] | null;
 }
 
 /**
@@ -90,15 +106,45 @@ export function defaultMetricsDeps(): MetricsDeps | null {
 }
 
 /**
+ * `count: "exact"` runs a real `COUNT(*)` under the read's `WHERE`; `count:
+ * "estimated"` uses Postgres's planner statistics instead (PostgREST: exact
+ * for low numbers, `EXPLAIN`-derived for high ones) - fast regardless of
+ * table size, at the cost of precision.
+ *
+ * `jobs` has NO retention sweep yet (0029's own comment says so), and this
+ * probe runs on doc 52's per-minute schedule with a <500ms budget for the
+ * WHOLE metrics probe. `jobs_queue_status_idx` is `(queue, status,
+ * scheduled_at)` - leading column `queue`, not `status` - so a bare `WHERE
+ * status = ...` with no queue predicate cannot range-scan it; only
+ * `status='dead'` gets index help at all, from the dedicated partial index
+ * `jobs_dead_idx (queue, finished_at desc) where status = 'dead'`. An exact
+ * count without index support is still fine for `queued`/`running`/`failed`:
+ * those three are the ones doc 39's own alerting keys on staying SMALL in a
+ * healthy system (an hourly sweep clears `queued`/`running` quickly; `failed`
+ * is "a job between attempts", not a resting state) - a sequential scan over
+ * a small set is cheap regardless of missing index support, and precision
+ * matters for exactly the numbers an alert fires on. `succeeded` is the one
+ * status with NO reason to stay small (every job that ever finished cleanly,
+ * forever) and no operational decision needs its EXACT count, so it is the
+ * one counted `"estimated"`.
+ */
+const COUNT_MODE_BY_STATUS: Readonly<Record<JobStatus, "exact" | "estimated">> = {
+  queued: "exact",
+  running: "exact",
+  succeeded: "estimated",
+  failed: "exact",
+  dead: "exact",
+};
+
+/**
  * One status's depth, via a HEAD count (`notifications/server/repo.ts`'s
  * `getMyUnreadNotificationCount` pattern): the count comes back in a response
- * header, no rows cross the wire, and it runs against `jobs_dead_idx` for
- * `status='dead'` (0029) and `jobs_queue_status_idx` for the rest.
+ * header, no rows cross the wire.
  */
 async function countJobsByStatus(deps: MetricsDeps, status: JobStatus): Promise<number | null> {
   const { count, error } = await deps.supabase
     .from("jobs")
-    .select("id", { count: "exact", head: true })
+    .select("id", { count: COUNT_MODE_BY_STATUS[status], head: true })
     .eq("status", status);
 
   if (error !== null) {
@@ -108,18 +154,18 @@ async function countJobsByStatus(deps: MetricsDeps, status: JobStatus): Promise<
   return count ?? 0;
 }
 
-async function loadJobsByStatus(deps: MetricsDeps): Promise<JobsDepthByStatus | null> {
-  const counts = await Promise.all(JOB_STATUSES.map((status) => countJobsByStatus(deps, status)));
-  // Any single failed count makes the WHOLE depth report unreadable - a depth
-  // report with one status silently missing is a worse lie than no report,
-  // because "queued: 3" next to a blank "dead" reads as "no dead jobs".
-  if (counts.some((value) => value === null)) return null;
-
-  const byStatus = {} as Record<JobStatus, number>;
-  JOB_STATUSES.forEach((status, index) => {
-    byStatus[status] = counts[index] as number;
-  });
-  return byStatus;
+/**
+ * Every status's depth, each one independently `null` on its own failure.
+ * NEVER discards a working count because a sibling status failed - see the
+ * module header. `Promise.all` here is safe for that property because
+ * `countJobsByStatus` never rejects; it already reduces its own failure to
+ * `null` before this resolves.
+ */
+async function loadJobsByStatus(deps: MetricsDeps): Promise<JobsDepthByStatus> {
+  const entries = await Promise.all(
+    JOB_STATUSES.map(async (status) => [status, await countJobsByStatus(deps, status)] as const),
+  );
+  return Object.fromEntries(entries) as JobsDepthByStatus;
 }
 
 async function loadSweepJobHealth(deps: MetricsDeps): Promise<SweepJobHealthRow[] | null> {
@@ -145,10 +191,12 @@ async function loadSweepJobHealth(deps: MetricsDeps): Promise<SweepJobHealthRow[
 }
 
 /**
- * The whole `/api/internal/metrics` payload, or `null` when it could not be
- * read (no service-role key, or either underlying read failed). The route
- * maps `null` to 503 DEPENDENCY_UNAVAILABLE rather than rendering a partial
- * or zeroed report.
+ * The whole `/api/internal/metrics` payload, or `null` only when it could
+ * not be attempted at all (no service-role key configured). The route maps
+ * THAT `null` to 503 DEPENDENCY_UNAVAILABLE. Below this level nothing is
+ * all-or-nothing: `jobs.byStatus` reports per-status, and `sweepJobHealth`
+ * reports its own success independently of the jobs counts - see the module
+ * header.
  */
 export async function loadMetrics(
   deps: MetricsDeps | null = defaultMetricsDeps(),
@@ -159,8 +207,6 @@ export async function loadMetrics(
     loadJobsByStatus(deps),
     loadSweepJobHealth(deps),
   ]);
-
-  if (byStatus === null || sweepJobHealth === null) return null;
 
   return {
     jobs: { byStatus, deadLetterCount: byStatus.dead },

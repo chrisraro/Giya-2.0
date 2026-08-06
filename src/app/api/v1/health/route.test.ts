@@ -12,6 +12,7 @@ vi.mock("server-only", () => ({}));
 const mocks = vi.hoisted(() => ({
   getUser: vi.fn(),
   getHealth: vi.fn(),
+  checkRateLimit: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -20,11 +21,10 @@ vi.mock("@/lib/supabase/server", () => ({
 
 vi.mock("@/lib/observability/health", () => ({ getHealth: mocks.getHealth }));
 
-// defineHandler's module graph reaches src/lib/redis.ts (idempotency +
-// rate-limit helpers) even though this route configures neither. That module
-// reads @/lib/env at call time, which throws without real Supabase env vars
-// - so it is stubbed the same way src/app/api/v1/geocode/route.test.ts stubs
-// it, to keep this suite about the HTTP contract and not about env wiring.
+// The route now configures rateLimit (I6), so defineHandler genuinely calls
+// this rather than merely importing its module graph.
+vi.mock("@/lib/rate-limit", () => ({ checkRateLimit: mocks.checkRateLimit }));
+
 vi.mock("@/lib/redis", () => ({
   redisKey: (...parts: string[]) => `test:${parts.join(":")}`,
 }));
@@ -40,6 +40,34 @@ beforeEach(() => {
   // No session cookie on a health probe - a route that required one would be
   // wrong, and this pins that GET never depends on auth succeeding.
   mocks.getUser.mockResolvedValue({ data: { user: null } });
+  mocks.checkRateLimit.mockResolvedValue({ ok: true, remaining: 29, resetSeconds: 60 });
+});
+
+describe("cost-amplification ceiling (I6)", () => {
+  beforeEach(() => {
+    mocks.getHealth.mockResolvedValue({
+      httpStatus: 200,
+      dependencies: { database: { status: "ok", latencyMs: 1 }, redis: { status: "ok", latencyMs: 1 } },
+    });
+  });
+
+  it("is rate-limited per caller IP, not per session (there is none)", async () => {
+    await callRoute();
+
+    expect(mocks.checkRateLimit).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 30, windowSeconds: 60 }),
+    );
+  });
+
+  it("answers 429 without calling getHealth() once the caller is over budget", async () => {
+    mocks.checkRateLimit.mockResolvedValue({ ok: false, remaining: 0, resetSeconds: 12 });
+
+    const response = await callRoute();
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("12");
+    expect(mocks.getHealth).not.toHaveBeenCalled();
+  });
 });
 
 describe("when every dependency is up", () => {
