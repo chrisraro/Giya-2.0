@@ -22,6 +22,18 @@ const NOT_SIGNED_IN: ActionResult<never> = {
   code: "UNAUTHENTICATED",
 };
 
+// Review fix M4: cancelClaim used to short-circuit with the CLAIM copy above
+// while service.mapCancelError's own UNAUTHENTICATED entry (only reachable
+// defensively, if the RPC itself somehow saw no session) said "...to manage
+// your claims." - two different sentences for the identical condition, with
+// the worse one winning because this check runs first. This is the one
+// actually reachable from a signed-out tap, so it gets the right verb.
+const NOT_SIGNED_IN_CANCEL: ActionResult<never> = {
+  ok: false,
+  message: "Please sign in to manage your claims.",
+  code: "UNAUTHENTICATED",
+};
+
 function firstIssueMessage(error: z.ZodError): string {
   return error.issues[0]?.message ?? "Invalid input.";
 }
@@ -102,7 +114,7 @@ export async function cancelClaim(
     data: { user },
   } = await supabase.auth.getUser();
 
-  if (!user) return NOT_SIGNED_IN;
+  if (!user) return NOT_SIGNED_IN_CANCEL;
 
   const parsed = cancelClaimInputSchema.safeParse(input);
   if (!parsed.success) {

@@ -134,6 +134,10 @@ For each live `loyalty`/`membership` campaign's `loyalty_programs`: qualifying i
 
 **Claim expiry sweep** (queue `claims.expiry_sweep`, hourly, driven by `reward_claims_expiry_idx`): for each `status='claimed'` with `expires_at <= now()` — set `status='expired'`; insert `points_transactions` `type='reversal'`, `points = +points_spent`, `reverses_id = points_txn_id`, `claim_id` set; restore balance; increment `rewards.remaining` (if tracked, capped by `rewards_remaining_lte_total`); notify `kind='reward_claim_expired'` [V1].
 
+**Consumer cancel** (`public.cancel_claim(p_claim_id)`, RPC-only — no REST route, called directly from the server action per `../10-architecture/13-api-standards.md`'s RPC-vs-REST split, the same posture the sweep above already has): the consumer's own way to reverse a `status='claimed'` row on demand instead of waiting for the sweep — task 1.4, closing doc `00-product/03-loyalty-benchmarks.md` Key Finding 1 ("points debited on intent and never returned"). Locks the claim row FOR UPDATE first (same position `validate_redemption` locks it, so the two cannot both win a race on the same claim); guards ownership (`consumer_id = auth.uid()`, else `403 FORBIDDEN` — doc 13: shared with "claim not found", never distinguished) and status (`409 CLAIM_ALREADY_REDEEMED` if a redemption already won the race, `409 CLAIM_ALREADY_CANCELLED` if already cancelled — idempotent, no double reversal — `422 CLAIM_INVALID_STATE` for any other non-`claimed` status, i.e. already `expired`). On success: identical reversal to the sweep above (same `type='reversal'` shape, restored balance, restored inventory) via the shared `private.reverse_claim_ledger` helper both this RPC and the sweep call, plus `reward_claims.status='cancelled'`, `cancelled_reason='consumer_cancelled'`. `validate_redemption` (the counter-side half of this same race) gained a matching `CLAIM_ALREADY_CANCELLED` branch in the same migration, so a staff scan that loses to a prior cancel names the reason instead of falling into the generic `CLAIM_INVALID_STATE` catch-all.
+
+Known, accepted consequence: `per_customer_limit` and `budget.max_redemptions` above both count non-cancelled claims only (0013, predating this RPC), so a consumer can claim → cancel → claim the same reward without bound. No attacker gain (nothing is minted; each cycle is a real debit and a real, immediate refund) and no cross-tenant impact, but it removes a cap that existed before cancellation had a writer and produces two extra append-only ledger rows per cycle on the consumer's own statement. Not bounded in task 1.4; a future task owns deciding whether/how to rate-limit it if it proves to matter in practice.
+
 **Worked example:** balance 970. Claim "Free Milk Tea" (`points_cost=500`, `remaining` 50→49, `claim_expiry_days=30`): redeem txn `-500`, `balance_after=470`. (a) Staff validates day 3 → `redemptions` row, claim `redeemed`; final balance 470. (b) Never shown: day 30 sweep → claim `expired`, reversal txn `+500`, `balance_after=970`, `remaining` 49→50.
 
 ## 7. Points expiry
@@ -210,6 +214,8 @@ Conventions per `../10-architecture/13-api-standards.md`; consumer wallet UX in 
 | `POST /businesses/{businessId}/customers/{consumerId}/points-adjustments` (idempotent) | Manual adjust (§8) | owner, manager (capped), super_admin | `POINTS_ADJUST_CAP_EXCEEDED`, `VALIDATION_FAILED` |
 | `GET /businesses/{businessId}/customers/{consumerId}/points` | CRM view: balance + statement | owner, manager, marketing | `NOT_FOUND` |
 
+`public.cancel_claim` (task 1.4, §6) deliberately gets no row in the table above: like the claim expiry sweep, it is RPC-only with no REST route — the consumer app calls it through a server action, not an API endpoint. Its error codes (`FORBIDDEN`, `CLAIM_ALREADY_REDEEMED`, `CLAIM_ALREADY_CANCELLED`, `CLAIM_INVALID_STATE`) still belong in the transport-agnostic registry below, the same way `CLAIM_ALREADY_REDEEMED` already does for the equally RPC-only `validate_redemption`.
+
 ### Domain error codes registered (extends `../10-architecture/13-api-standards.md` registry)
 
 | HTTP | Code | Meaning |
@@ -221,6 +227,7 @@ Conventions per `../10-architecture/13-api-standards.md`; consumer wallet UX in 
 | 422 | `REWARD_EXPIRED` | Reward/campaign no longer claimable (shared registry; owned here) |
 | 422 | `CLAIM_EXPIRED` | Claim past `expires_at` |
 | 409 | `CLAIM_ALREADY_REDEEMED` | `redemptions.claim_id` uniqueness hit / claim not in `claimed` |
+| 409 | `CLAIM_ALREADY_CANCELLED` | `cancel_claim` or `validate_redemption` hit a claim already `status='cancelled'` (task 1.4) |
 | 422 | `REDEMPTION_TOKEN_INVALID` | Token expired, replayed (`jti` consumed), or malformed (shared registry) |
 | 403 | `CUSTOMER_BLACKLISTED` | `business_customers.segment='blacklisted'` blocks earn/claim/redeem |
 

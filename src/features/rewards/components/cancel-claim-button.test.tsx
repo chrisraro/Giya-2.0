@@ -74,6 +74,43 @@ describe("CancelClaimButton", () => {
     expect(mocks.cancelClaim).not.toHaveBeenCalled();
   });
 
+  // Review fix I3: consumer PWA surfaces need 48px (h-12) touch targets
+  // (docs/10-architecture/16-design-system.md:45/:127), not the 32px/40px
+  // business-portal sizes this originally shipped with.
+  it("uses a 48px (size=touch) trigger button", () => {
+    render(<CancelClaimButton claimId={CLAIM_ID} pointsSpent={500} />);
+
+    expect(screen.getByRole("button", { name: "Cancel claim" })).toHaveClass("h-12");
+  });
+
+  // Review fix M7: describedById was a hard-coded literal, so every
+  // CancelClaimButton on the page shared one DOM id - harmless only by
+  // accident (Dialog renders nothing while closed). Two instances open
+  // AT THE SAME TIME is the case that would actually break without
+  // useId().
+  it("gives each instance its own description id, so two dialogs open together never collide", () => {
+    render(
+      <>
+        <CancelClaimButton claimId="claim-a" pointsSpent={100} />
+        <CancelClaimButton claimId="claim-b" pointsSpent={200} />
+      </>,
+    );
+
+    const triggers = screen.getAllByRole("button", { name: "Cancel claim" });
+    expect(triggers).toHaveLength(2);
+    for (const trigger of triggers) fireEvent.click(trigger);
+
+    const dialogs = screen.getAllByRole("dialog");
+    expect(dialogs).toHaveLength(2);
+
+    const describedByIds = dialogs.map((dialog) => dialog.getAttribute("aria-describedby"));
+    expect(describedByIds[0]).not.toBe(describedByIds[1]);
+    for (const id of describedByIds) {
+      expect(id).toBeTruthy();
+      expect(document.getElementById(id as string)).not.toBeNull();
+    }
+  });
+
   it("shows the mapped error and keeps the dialog open when the action fails", async () => {
     mocks.cancelClaim.mockResolvedValue({
       ok: false,

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 
 // `@/lib/supabase/client` transitively imports `@/lib/env`, which throws at
@@ -31,7 +31,13 @@ vi.mock("../actions", () => ({
 // cancel-claim-button.test.tsx's job), but the module must still resolve.
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
 
-import { RedemptionQr, formatCountdown, initialPhase, unavailableMessage } from "./redemption-qr";
+import {
+  RedemptionQr,
+  formatCountdown,
+  initialPhase,
+  nextPhaseForStatus,
+  unavailableMessage,
+} from "./redemption-qr";
 import type { ClaimDetailDTO } from "../types";
 
 // formatCountdown/initialPhase/unavailableMessage are pure and carry the
@@ -106,6 +112,33 @@ describe("initialPhase", () => {
 
   it('returns "minting" for a still-live claimed reward when online', () => {
     expect(initialPhase(LIVE_CLAIM, { isOnline: true, now: NOW })).toBe("minting");
+  });
+});
+
+// Review fix I2: the screen's phase was seeded once in a useState
+// initializer and never re-derived when the CLAIM ITSELF changed underneath
+// it - not on a claim.status prop update (router.refresh() after this
+// screen's own cancel), not on a Realtime UPDATE payload, not on the poll
+// fallback. All three call sites now funnel through this one pure decision
+// so they cannot drift on what counts as a terminal transition, mirroring
+// why 0050/0051 centralized the ledger reversal itself.
+describe("nextPhaseForStatus", () => {
+  it('moves to "redeemed" when the observed status is redeemed', () => {
+    expect(nextPhaseForStatus("ready", "redeemed")).toBe("redeemed");
+  });
+
+  it('moves to "cancelled" when the observed status is cancelled', () => {
+    expect(nextPhaseForStatus("ready", "cancelled")).toBe("cancelled");
+  });
+
+  it("leaves the phase alone for any other observed status", () => {
+    expect(nextPhaseForStatus("minting", "claimed")).toBe("minting");
+    expect(nextPhaseForStatus("ready", "expired")).toBe("ready");
+  });
+
+  it("is sticky once already redeemed or cancelled - a stale/duplicate event cannot regress it", () => {
+    expect(nextPhaseForStatus("redeemed", "claimed")).toBe("redeemed");
+    expect(nextPhaseForStatus("cancelled", "claimed")).toBe("cancelled");
   });
 });
 
@@ -185,6 +218,57 @@ describe("RedemptionQr", () => {
     );
 
     expect(await screen.findByRole("button", { name: "Cancel claim" })).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  // Review fix M2: cancel_claim (0050) permits cancelling ANY status='claimed'
+  // row regardless of expires_at (the sweep just hasn't caught up yet), and
+  // ClaimList already offers cancel on this same state. The detail screen
+  // used to disagree - canCancel excluded phase "unavailable", which
+  // initialPhase also returns for a claimed-but-expired row, so the two
+  // screens showed different affordances for the identical claim. Fixed by
+  // dropping that exclusion (canCancel now depends on claim.status ===
+  // "claimed" directly, which already correctly excludes the OTHER two
+  // reasons "unavailable" can fire: a genuinely 'expired' or 'cancelled'
+  // server status).
+  it("shows a cancel affordance for a claimed reward whose expiresAt has already passed (M2)", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("should not mint a claimed-but-late reward"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <RedemptionQr claim={baseClaim({ status: "claimed", expiresAt: "2020-01-01T00:00:00.000Z" })} />,
+    );
+
+    expect(screen.getByText("This claim cannot be redeemed right now.")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Cancel claim" })).toBeInTheDocument();
+    // and, being genuinely late, it never attempted to mint a QR code
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  // Review fix I2: router.refresh() after THIS screen's own cancel action
+  // re-renders the server component tree and hands RedemptionQr a NEW
+  // `claim` prop (status now 'cancelled'), but a client component's
+  // internal state survives a soft navigation - phase does not re-derive on
+  // its own. Simulated here via rerender() with an updated prop, which is
+  // exactly what Next does under the hood.
+  it("stops showing the live QR/cancel affordance once the claim prop itself flips to cancelled", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const claimed = baseClaim({ status: "claimed", expiresAt: "2099-01-01T00:00:00.000Z" });
+    const { rerender } = render(<RedemptionQr claim={claimed} />);
+
+    expect(await screen.findByRole("button", { name: "Cancel claim" })).toBeInTheDocument();
+
+    rerender(<RedemptionQr claim={{ ...claimed, status: "cancelled" }} />);
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Cancel claim" })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("This claim was cancelled.")).toBeInTheDocument();
 
     vi.unstubAllGlobals();
   });

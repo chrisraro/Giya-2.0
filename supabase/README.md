@@ -109,7 +109,7 @@ Fifteen suites, one per domain:
 | `rls_identity_smoke.sql` | identity tables and their policies (0001-0006, 0011) |
 | `rls_catalog_smoke.sql` | catalog tenancy and composite FKs (0007-0010) |
 | `rls_campaigns_smoke.sql` | campaigns, points rules, ledger immutability (0012) |
-| `rpc_claim_smoke.sql` | `claim_reward`, `validate_redemption`, `expire_claims` (0013, 0016); task 1.4's `cancel_claim` (0050) - happy-path cancel restoring balance/inventory in one reversal row, wrong-owner FORBIDDEN, already-redeemed and already-cancelled refusals (idempotent, no double reversal), `expire_claims` skipping a cancelled claim, the redeem-vs-cancel race in both directions via sequential state simulation (`validate_redemption`'s own new `CLAIM_ALREADY_CANCELLED` branch), and the full grant matrix including the shared `private.reverse_claim_ledger` helper |
+| `rpc_claim_smoke.sql` | `claim_reward`, `validate_redemption`, `expire_claims` (0013, 0016); task 1.4's `cancel_claim` (0050-0051, 76 assertions after the review-fix pass) - happy-path cancel restoring balance/inventory in one reversal row, wrong-owner FORBIDDEN, already-redeemed and already-cancelled refusals (idempotent, no double reversal), the redeem-vs-cancel race in both directions via sequential state simulation (`validate_redemption`'s own new `CLAIM_ALREADY_CANCELLED` branch), and the full grant matrix including the shared `private.reverse_claim_ledger` helper and `cancel_claim`'s `service_role` denial (0051 review fix M6). `expire_claims` skipping a cancelled claim is proved against a claim BACK-DATED INTO THE PAST AFTER being cancelled (0051 review fix I1) - without that, `expires_at <= now()` alone would already exclude it from the candidate scan and the assertion would prove nothing about the `status = 'claimed'` filter actually doing the excluding; the proof asserts the sweep's return value, the claim's status, AND the balance (the one that actually catches a double-reverse) |
 | `rls_receipts_smoke.sql` | receipts evidence fences, column grant, the three unique amendments, the delete and immutability triggers (0017) |
 | `rpc_award_smoke.sql` | `award_receipt_points`: guard order, one earn per receipt, the `balance_after` chain, the Manila-day visit rule (0018); the `fixed_per_visit` VISIT-DAY dedupe and its `FIXED_PER_VISIT_RACE` backstop, keyed on `manila_day(coalesce(receipt_date, created_at))` rather than processing time, including the review-lag/backdated-upload cases and the two I3 cases where a prior earn that was not itself a PAID fixed_per_visit base must not suppress a later one (0037, 0038) |
 | `rls_consumer_fence_smoke.sql` | the `consumers` / `profiles` self-update column fence: legitimate profile and onboarding writes still land, fraud and trust columns raise 42501 (0021) |
@@ -407,6 +407,20 @@ outcome is visible; the push is owed to the notifications slice.
   so honouring it is not retroactive. Pinned by the pgTAP fixtures asserting a
   backfilled past-due lot is swept and never warned. Recorded here rather than
   in 0042, which must not describe anything that came after it.
+- **`cancel_claim` (0050/0051, task 1.4, M8, decision recorded) removes a cap
+  that used to be implicit.** `reward_claims.per_customer_limit` and
+  campaign `budget.max_redemptions` (0013) both count non-cancelled claims
+  only - correct and pre-existing, but before this task nothing ever wrote
+  `status='cancelled'`, so the exclusion had no real consequence. Now a
+  consumer can claim -> cancel -> claim the same reward without bound. No
+  attacker gain (nothing is minted; each cycle is a genuine debit and a
+  genuine, immediate refund) and no cross-tenant impact, but it writes two
+  extra append-only ledger rows per cycle onto the consumer's own statement.
+  Deliberately not bounded in task 1.4 - see
+  `docs/30-modules/35-points-engine.md` section 6's "Consumer cancel"
+  paragraph for the full reasoning. Owed: a decision on whether/how to
+  rate-limit repeated claim/cancel cycles, if it proves to matter in
+  practice.
 
 - `private.jwt_biz_role()` keeps doc 12's table-lookup fallback for `biz_overflow` users (>20 memberships). Under RLS this recurses (policy -> helper -> same table) and Postgres aborts the query for those users. [SCALE]-only surface; fixing requires a security definer lookup variant and an ADR against the Locked doc 12. Do not ship overflow accounts before that ADR.
 - The custom access token hook runs as `supabase_auth_admin` with explicit grants/policies (current Supabase-documented pattern) instead of doc 12's literal `security definer` wording. Functionally equivalent; noted as doc drift.
@@ -473,7 +487,7 @@ outcome is visible; the push is owed to the notifications slice.
   (called from inside `cancel_claim`/`expire_claims`, which already run as
   the owner) and is revoked from every role including `service_role`.
 
-### `cancel_claim` (0050, task 1.4)
+### `cancel_claim` (0050-0051, task 1.4 + review-fix pass)
 
 A consumer can cancel their own unredeemed claim (`reward_claims.status =
 'claimed'`) and get the points back immediately, instead of waiting up to
@@ -499,12 +513,30 @@ column both predate this migration (provisioned in 0012, never had a
 writer); `cancel_claim` is their first writer, stamping
 `cancelled_reason = 'consumer_cancelled'`.
 
-Granted to `authenticated` (consumer-facing, matching `claim_reward`'s own
-shape), never `anon`. Idempotent: a second cancel of an already-cancelled
-claim raises `CLAIM_ALREADY_CANCELLED` rather than double-reversing, and
-`expire_claims`'s own candidate scan (`status = 'claimed'`) never re-selects
-a cancelled claim, so the sweep cannot double-reverse it either. Covered by
-`rpc_claim_smoke.sql`.
+Granted to `authenticated` only (consumer-facing, matching `claim_reward`'s
+own shape) - `anon` AND `service_role` are both explicitly revoked (0051,
+review fix M6): Supabase's project-level default privileges grant every new
+`public`-schema function EXECUTE to `service_role` independently of the
+`revoke ... from public` a caller might expect to cover it, so 0050 shipped
+with `service_role` able to call this consumer-only action until 0051's
+pgTAP grant matrix caught it. Idempotent: a second cancel of an
+already-cancelled claim raises `CLAIM_ALREADY_CANCELLED` rather than
+double-reversing, and `expire_claims`'s own candidate scan
+(`status = 'claimed'`) never re-selects a cancelled claim - even a cancelled
+claim whose `expires_at` has ALSO lapsed, which is the case the pgTAP suite
+actually proves (a fixture back-dated into the past AFTER being cancelled;
+without that, the sweep's own date predicate alone would already return 0
+candidates and the assertion would prove nothing about the status filter).
+`private.reverse_claim_ledger`'s `p_created_by` parameter (renamed from
+`p_actor_id`, 0051 review fix M3 - it is written to
+`points_transactions.created_by`, never `.actor_id`) stamps
+`business_customers.updated_by` only when given a real actor
+(`coalesce(p_created_by, business_customers.updated_by)`, 0051 review fix
+M1): `cancel_claim` passes the consumer's `auth.uid()` and so still stamps
+it, matching `claim_reward`'s own precedent, while `expire_claims` passes
+null and now correctly leaves the column untouched, restoring 0016's real
+prior behavior instead of nulling it on every sweep run as 0050 shipped.
+Covered by `rpc_claim_smoke.sql` (76 assertions after the review-fix pass).
 
 ## Manual dashboard steps (pending)
 
@@ -570,6 +602,7 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0048_points_expiry_warn_window_stable_ordering.sql | 20260806054312 | 0048_points_expiry_warn_window_stable_ordering |
 | 0049_points_expiry_warn_honest_deadline.sql | (applied 2026-08-06) | 0049_points_expiry_warn_honest_deadline |
 | 0050_cancel_claim.sql | (applied 2026-08-06) | 0050_cancel_claim |
+| 0051_cancel_claim_review_fixes.sql | (applied 2026-08-06) | 0051_cancel_claim_review_fixes |
 
 **Rows 0001-0035 are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`; rows 0036-0049 were applied later, and 0042-0049 on 2026-08-06.** The
 sentence below describes the replay only. It does NOT describe 0042-0049: one

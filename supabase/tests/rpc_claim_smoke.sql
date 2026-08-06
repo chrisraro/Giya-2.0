@@ -20,7 +20,7 @@ begin;
 
 set local search_path = public, extensions;
 
-select plan(73);
+select plan(76);
 
 -- ---------------------------------------------------------------- fixtures
 -- Six fixed test users: two business owners, one consumer with a balance,
@@ -858,18 +858,46 @@ select throws_ok(
   'cancel_claim of an already-redeemed claim raises CLAIM_ALREADY_REDEEMED');
 reset role;
 
--- 64-65. expire_claims must not later double-reverse a cancelled claim: a
--- fresh sweep run finds no new candidates (cancelled is not 'claimed') and
--- the cancelled claim's own status is left exactly as cancel_claim left it.
+-- 64-67. expire_claims must not later double-reverse a cancelled claim -
+-- REVIEW FIX (I1): claim_cancel was seeded with expires_at 10 days out, so
+-- expire_claims' own `expires_at <= now()` predicate alone already excludes
+-- it; a sweep run at this point would return 0 whether or not the
+-- `status = 'claimed'` filter is even present, which proves nothing about
+-- that filter doing its job. Back-date expires_at into the past NOW, AFTER
+-- the claim is already cancelled, so the candidate scan depends ENTIRELY on
+-- the status filter: if that filter were ever removed, this past-due
+-- cancelled row would be picked up and reversed a second time. Assert all
+-- four of the sweep's return value, the claim's status, the BALANCE (the
+-- assertion that actually catches a double-reverse - a second reversal
+-- would push 470 to 520), and the reversal row count (a second reversal
+-- would make this 2, not 1).
+update public.reward_claims
+   set expires_at = now() - interval '1 hour'
+ where id = current_setting('test.claim_cancel')::uuid;
+
 select is(
   public.expire_claims(),
   0,
-  'expire_claims() run after the cancel finds no candidates (cancelled claims are never selected)');
+  'expire_claims() against a past-due CANCELLED claim finds no candidates (the status filter, not the date, is what excludes it)');
 
 select is(
   (select status from public.reward_claims where id = current_setting('test.claim_cancel')::uuid),
   'cancelled',
-  'the cancelled claim is untouched by expire_claims (still cancelled, not expired)');
+  'the cancelled, now past-due claim is untouched by expire_claims (still cancelled, not expired)');
+
+select is(
+  (select points_balance from public.business_customers
+    where business_id = current_setting('test.biz1')::uuid
+      and consumer_id = 'a3333333-3333-4333-8333-333333333333'),
+  470,
+  'balance is still 470 after the sweep runs against the past-due cancelled claim - not double-refunded');
+
+select is(
+  (select count(*)::int from public.points_transactions
+    where claim_id = current_setting('test.claim_cancel')::uuid
+      and type = 'reversal'),
+  1,
+  'still exactly one reversal row for the claim after the sweep - not double-reversed');
 
 -- ---- redeem-vs-cancel race, the other direction (sequential simulation) ----
 -- 63 above already covers "cancel loses to a prior redeem" (claim1).  This
@@ -924,6 +952,15 @@ select ok(
 select ok(
   has_function_privilege('authenticated', 'public.cancel_claim(uuid)', 'EXECUTE'),
   'authenticated can execute cancel_claim');
+
+-- M6 (review fix): the grant matrix, for completeness - service_role is not
+-- explicitly granted execute on cancel_claim anywhere, so the implicit
+-- PUBLIC grant revoke above means service_role has none either. Pinned so a
+-- future migration cannot silently widen this consumer-only entry point to
+-- the service role without the suite noticing.
+select ok(
+  not has_function_privilege('service_role', 'public.cancel_claim(uuid)', 'EXECUTE'),
+  'service_role cannot execute cancel_claim (consumer-only entry point, not a system job)');
 
 -- 70. the shared reversal helper is reachable only from inside a definer
 --     context that already holds the right locks - denied to every role,

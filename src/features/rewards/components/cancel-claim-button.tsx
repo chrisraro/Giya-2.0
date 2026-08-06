@@ -37,6 +37,12 @@ export function CancelClaimButton({ claimId, pointsSpent, className }: CancelCla
   const [open, setOpen] = React.useState(false);
   const [pending, setPending] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  // Review fix M7: a hard-coded id collides across every CancelClaimButton
+  // instance on the page (ClaimList renders one per claimed row). Harmless
+  // only by accident today (Dialog returns null while closed, so only ever
+  // one copy is in the DOM at a time), not by design - useId() gives each
+  // instance its own stable id regardless of how many are mounted at once.
+  const descriptionId = React.useId();
 
   async function submit() {
     setPending(true);
@@ -54,10 +60,19 @@ export function CancelClaimButton({ claimId, pointsSpent, className }: CancelCla
 
   return (
     <>
+      {/* Review fix I3: this is a consumer PWA surface (docs/10-architecture/
+          16-design-system.md:45 "48px minimum touch targets on consumer
+          surfaces", :127 "size=touch buttons" for the Consumer PWA) - every
+          button on this component uses size="touch", matching the sibling
+          "Show QR" affordance in the same card. The size="sm"/size="md"
+          this originally shipped with were copied from business-portal
+          precedents (rewards/catalog/components/reward-list.tsx,
+          receipts/review/decision-screen.tsx), which is the wrong audience
+          for this component. */}
       <Button
         type="button"
         variant="text"
-        size="sm"
+        size="touch"
         className={className}
         onClick={() => {
           setError(null);
@@ -71,12 +86,12 @@ export function CancelClaimButton({ claimId, pointsSpent, className }: CancelCla
         open={open}
         onClose={() => setOpen(false)}
         title="Cancel this claim?"
-        describedById="cancel-claim-confirm-body"
+        describedById={descriptionId}
       >
-        <p id="cancel-claim-confirm-body" className="text-body-m text-on-surface-variant">
+        <p id={descriptionId} className="text-body-m text-on-surface-variant">
           {pointsSpent > 0
-            ? `Cancel this claim and get your ${pointsSpent} points back. This does not affect the reward itself - you can claim it again later.`
-            : "Cancel this claim? You can claim this reward again later."}
+            ? `Cancel this claim and get your ${pointsSpent} points back. This does not affect the reward itself - you can claim it again while it's available.`
+            : "Cancel this claim? You can claim it again while it's available."}
         </p>
 
         {error !== null && (
@@ -86,13 +101,13 @@ export function CancelClaimButton({ claimId, pointsSpent, className }: CancelCla
         )}
 
         <div className="flex flex-wrap justify-end gap-2">
-          <Button type="button" variant="text" size="md" onClick={() => setOpen(false)}>
+          <Button type="button" variant="text" size="touch" onClick={() => setOpen(false)}>
             Keep claim
           </Button>
           <PendingButton
             type="button"
             variant="filled"
-            size="md"
+            size="touch"
             pending={pending}
             pendingLabel="Cancelling"
             onClick={() => void submit()}

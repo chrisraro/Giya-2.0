@@ -354,7 +354,7 @@ describe("actions.cancelClaim: auth and validation gating", () => {
 
     expect(result).toEqual({
       ok: false,
-      message: "Please sign in to claim rewards.",
+      message: "Please sign in to manage your claims.",
       code: "UNAUTHENTICATED",
     });
     expect(mocks.rpc).not.toHaveBeenCalled();

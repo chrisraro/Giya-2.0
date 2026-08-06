@@ -20,6 +20,7 @@ export interface RedemptionQrProps {
 
 type Phase =
   | "redeemed"
+  | "cancelled"
   | "unavailable"
   | "offline"
   | "minting"
@@ -64,6 +65,32 @@ export function initialPhase(
   }
   if (!options.isOnline) return "offline";
   return "minting";
+}
+
+/**
+ * Review fix I2. Three places need to react when this screen learns the
+ * claim's status has changed out from under it - a `claim` prop update
+ * (router.refresh() after THIS screen's own cancel action; see the
+ * prop-sync effect below), a Realtime UPDATE payload, and the poll
+ * fallback - and before this fix each of those three call sites handled
+ * only "redeemed" (two of them) or nothing (the prop never re-derived
+ * `phase` at all, which is the bug the review caught: the screen kept
+ * showing a live QR and ticking countdown after the consumer cancelled
+ * from this very screen). Centralizing the decision here means the three
+ * call sites cannot drift on what counts as a terminal transition, the
+ * same reasoning 0050/0051 already applied to the ledger reversal itself.
+ *
+ * Sticky once terminal: a stale or duplicate event can never regress an
+ * already-redeemed or already-cancelled phase back to something live.
+ * Any OTHER observed status (including the initial "claimed" a mount-time
+ * effect run will pass) is a no-op - this function only ever moves
+ * forward into a terminal phase, never sideways.
+ */
+export function nextPhaseForStatus(current: Phase, status: string): Phase {
+  if (current === "redeemed" || current === "cancelled") return current;
+  if (status === "redeemed") return "redeemed";
+  if (status === "cancelled") return "cancelled";
+  return current;
 }
 
 /**
@@ -140,6 +167,30 @@ export function RedemptionQr({ claim }: RedemptionQrProps) {
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
 
   const claimId = claim.claimId;
+
+  // Review fix I2. router.refresh() after this screen's OWN cancel action
+  // (<CancelClaimButton>, below) re-renders the server component tree and
+  // hands this already-mounted client component a NEW `claim` prop - but a
+  // soft navigation preserves client state, so `phase` never re-derives on
+  // its own from a prop change the way it did once, at mount, via
+  // initialPhase.
+  //
+  // This is React's own sanctioned "adjusting state when a prop changes"
+  // pattern (https://react.dev/learn/you-might-not-need-an-effect), not a
+  // useEffect: the check runs DURING RENDER, so a changed prop is corrected
+  // before anything commits, with no extra flush and no
+  // react-hooks/set-state-in-effect footgun (calling setState from inside
+  // an effect body, as this used to). `observedStatus` is the previous
+  // render's claim.status, purely so this can detect "it changed" without
+  // an effect; on mount it always equals claim.status, so this is a
+  // deliberate no-op then (initialPhase already accounted for the starting
+  // status, and feeding the SAME status through nextPhaseForStatus never
+  // moves off it).
+  const [observedStatus, setObservedStatus] = React.useState(claim.status);
+  if (claim.status !== observedStatus) {
+    setObservedStatus(claim.status);
+    setPhase((current) => nextPhaseForStatus(current, claim.status));
+  }
 
   // Mint (or re-mint, via the Refresh/Retry buttons setting phase back to
   // "minting"). Already-redeemed is treated as good news, not an error - a
@@ -224,7 +275,9 @@ export function RedemptionQr({ claim }: RedemptionQrProps) {
   // Browser online/offline transitions.
   React.useEffect(() => {
     function handleOffline() {
-      setPhase((current) => (current === "redeemed" || current === "unavailable" ? current : "offline"));
+      setPhase((current) =>
+        current === "redeemed" || current === "cancelled" || current === "unavailable" ? current : "offline",
+      );
     }
     function handleOnline() {
       setPhase((current) => (current === "offline" ? "minting" : current));
@@ -242,24 +295,30 @@ export function RedemptionQr({ claim }: RedemptionQrProps) {
   // its claim to flip to 'redeemed' is the same use, just the other
   // screen), with a polling fallback via the getClaimStatus server action
   // if the channel errors, times out, or simply never confirms in time.
-  const awaitingRedemption = phase !== "redeemed" && phase !== "unavailable";
+  // Review fix I2: this now watches for "cancelled" too, not just
+  // "redeemed" - a consumer can cancel from a DIFFERENT tab/session while
+  // this exact screen is open, and only Realtime/poll (not the prop-sync
+  // effect above, which only fires on THIS component's own props changing)
+  // can ever learn about that.
+  const awaitingOutcome = phase !== "redeemed" && phase !== "cancelled" && phase !== "unavailable";
 
   React.useEffect(() => {
-    if (!awaitingRedemption) return;
+    if (!awaitingOutcome) return;
 
     const supabase = createClient();
     let settled = false;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
+    function observe(status: string | undefined) {
+      if (settled || (status !== "redeemed" && status !== "cancelled")) return;
+      settled = true;
+      setPhase(status);
+    }
+
     function startPolling() {
       if (pollTimer) return;
       pollTimer = setInterval(() => {
-        void getClaimStatus(claimId).then((result) => {
-          if (!settled && result?.status === "redeemed") {
-            settled = true;
-            setPhase("redeemed");
-          }
-        });
+        void getClaimStatus(claimId).then((result) => observe(result?.status));
       }, POLL_INTERVAL_MS);
     }
 
@@ -269,11 +328,7 @@ export function RedemptionQr({ claim }: RedemptionQrProps) {
         "postgres_changes",
         { event: "UPDATE", schema: "public", table: "reward_claims", filter: `id=eq.${claimId}` },
         (payload: RealtimePostgresChangesPayload<RewardClaimRow>) => {
-          const status = (payload.new as Partial<RewardClaimRow>).status;
-          if (!settled && status === "redeemed") {
-            settled = true;
-            setPhase("redeemed");
-          }
+          observe((payload.new as Partial<RewardClaimRow>).status);
         },
       )
       .subscribe((status) => {
@@ -292,23 +347,27 @@ export function RedemptionQr({ claim }: RedemptionQrProps) {
       clearTimeout(fallbackTimer);
       void supabase.removeChannel(channel);
     };
-  }, [awaitingRedemption, claimId]);
+  }, [awaitingOutcome, claimId]);
 
   const msRemaining = expiresAt !== null ? expiresAt - nowTick : 0;
 
-  // Task 1.4: the cancel affordance on the claim detail screen. Gated on the
-  // ORIGINAL server-loaded status (never redeemed/expired/cancelled reach
-  // this component in a claimed-looking phase to begin with - see
-  // initialPhase) AND the live phase not yet having flipped to "redeemed"
-  // (a concurrent staff scan winning the race while this screen is open) or
-  // "unavailable"/"claim-error" (not actually a live claimed row). Shown
-  // through every other phase - minting, ready, offline, code-expired,
-  // mint-error - because all of those still mean "this claim is claimed and
+  // The cancel affordance on the claim detail screen. Gated on claim.status
+  // === "claimed" (review fix M2: NOT on phase !== "unavailable" - that
+  // phase also fires for a claimed-but-past-expiry row, which
+  // cancel_claim's own guard (0050) happily accepts; checking claim.status
+  // directly already excludes the other two reasons "unavailable" can fire,
+  // a genuinely 'expired' or 'cancelled' server status, so ClaimList and
+  // this screen now agree on exactly the same claims) and on the live phase
+  // not yet having flipped to "redeemed" or "cancelled" (review fix I2:
+  // either can happen while this screen is open, from a concurrent staff
+  // scan or a concurrent cancel elsewhere) or "claim-error". Shown through
+  // every other phase - minting, ready, offline, code-expired, mint-error -
+  // because all of those still mean "this claim is claimed and
   // cancellable", a technical hiccup minting the QR code notwithstanding.
   const canCancel =
     claim.status === "claimed" &&
     phase !== "redeemed" &&
-    phase !== "unavailable" &&
+    phase !== "cancelled" &&
     phase !== "claim-error";
 
   return (
@@ -346,6 +405,27 @@ export function RedemptionQr({ claim }: RedemptionQrProps) {
               block
             </span>
             <p className="text-body-l text-on-surface">{unavailableMessage(claim.status)}</p>
+          </Card>
+          <Link href="/rewards" className={BACK_TO_REWARDS_CLASS}>
+            Back to Rewards
+          </Link>
+        </>
+      ) : null}
+
+      {/* Review fix I2: a terminal phase reached LIVE (via the prop-sync
+          effect after this screen's own cancel, or Realtime/poll noticing a
+          cancel from elsewhere) rather than at initial load - unlike
+          "unavailable" above, whose copy reads the (possibly stale)
+          claim.status prop, this reads the fixed, always-correct
+          "cancelled" string, since a live transition is the one case where
+          the prop is not guaranteed to have caught up yet. */}
+      {phase === "cancelled" ? (
+        <>
+          <Card variant="outlined" className="flex w-full flex-col items-center gap-3 p-8">
+            <span aria-hidden className="material-symbols-rounded text-[48px] text-on-surface-variant">
+              block
+            </span>
+            <p className="text-body-l text-on-surface">{unavailableMessage("cancelled")}</p>
           </Card>
           <Link href="/rewards" className={BACK_TO_REWARDS_CLASS}>
             Back to Rewards
