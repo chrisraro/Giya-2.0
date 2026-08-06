@@ -13,8 +13,16 @@ import { estimateMaxGapMinutes } from "./cron-interval";
 // checkJobHealth(): task 2.5, "make a failing scheduled job actually reach a
 // human". Reads public.sweep_job_health (0028) - already the only readable
 // window onto pg_cron's own run history (see that migration's header on why
-// nothing else can see it) - and turns "a job has failures" or "a job has
-// gone quiet" into one email per incident.
+// nothing else can see it) - and turns "a job has failures", "a job has gone
+// quiet" or "a job was never scheduled at all" into one email per incident.
+//
+// Review fix (post-merge review of the first cut): this header and the
+// classifier below were rewritten to fix two false-positive/false-negative
+// bugs (C2), a window that could never prove a weekly job stale (I1), a
+// dedupe bug that could swallow an alert for 24h on a retryable send failure
+// (I2), a flapping job paging up to 12x/day (I4), and a blind spot where a
+// job that stopped being scheduled ENTIRELY was invisible (I5). Each fix is
+// explained at its own point below rather than only here.
 // =============================================================================
 //
 // -----------------------------------------------------------------------------
@@ -42,92 +50,201 @@ import { estimateMaxGapMinutes } from "./cron-interval";
 // provider account, no second implementation of "send an email" - which is
 // what "do not build a second email path" actually forbids.
 //
-// The STAFF_FACING_KINDS / consumers-row-suppression mechanism in email.ts
-// (task 1.2's widening for `campaign_budget_exhausted`) is real and worth
-// knowing about, but it exists to gate `notifications` ROWS addressed to
-// real profiles - it has nothing to bypass here, because this path never
-// creates a `notifications` row or a `profiles` lookup in the first place.
-// Re-deriving it (a second STAFF_FACING-shaped set somewhere) would be
-// exactly the "re-widening it a second way" the brief warns against; not
-// touching that mechanism at all is how this avoids it.
-//
 // -----------------------------------------------------------------------------
-// DEDUPE: see supabase/migrations/0058_job_health_alerts.sql's header for the
-// full argument. Short version: the key is the job's own name, because that
-// is the one part of "this job is currently unhealthy" that stays stable for
-// exactly as long as the SAME incident is open and changes the moment it
-// stops being open - unlike a failure count (always increases), a
+// DEDUPE: see supabase/migrations/0059_job_health_alerts.sql's header for the
+// full argument (filed as 0059, applied live as 0058_job_health_alerts - see
+// that file's own top note on the ledger-name mismatch). Short version: the
+// key is the job's own name, because that is the one part of "this job is
+// currently unhealthy" that stays stable for exactly as long as the SAME
+// incident is open and changes the moment it stops being open - unlike a
 // last_finished_at (changes every run, healthy or not) or raw error text
 // (can carry a request id or timestamp and mint a "new" incident on every
 // occurrence of the SAME bug). That is precisely the class of bug 0048
 // shipped a fix for (task 1.3's projected-figure dedupe key), cited by name
 // in the brief.
 //
-// -----------------------------------------------------------------------------
-// TWO INDEPENDENT WAYS A JOB IS UNHEALTHY
-// -----------------------------------------------------------------------------
-// `failing`: its most recent recorded run did not succeed. Read from
-// `last_status`, not from `failures > 0` in the window - a job that failed
-// nine times yesterday and has now been succeeding for a day is HEALTHY, and
-// keying on the failure count would keep alerting on the sum of its
-// history rather than its current state.
-//
-// `stale`: it has gone quiter than its own schedule can honestly explain.
-// This is the half sweep_job_health alone cannot tell an operator (the brief,
-// verbatim: "a job that silently stopped being scheduled ... is the one
-// sweep_job_health alone will not tell you about") - a job with zero runs in
-// the window looks IDENTICAL to a job that was never registered, unless
-// something also knows how often it was supposed to run. `schedule` (raw pg_
-// cron syntax, straight off `cron.job`) is read through estimateMaxGapMinutes
-// (./cron-interval.ts) to answer that, with a 2x-plus-5-minutes grace window
-// so an on-time run near the boundary of a check cycle is never mistaken for
-// a missed one.
+// One correction to that migration's own header, made HERE rather than by
+// editing an applied migration (never done - see supabase/README.md's 0011b
+// note): its `since` column comment implies the first alert for an incident
+// can say something like "failing for 6h". It cannot. `since` is set to the
+// moment THIS CHECKER first observes the problem, not to an objectively
+// earlier start time sweep_job_health has no per-run timestamps to derive -
+// so the FIRST alert for any incident always reports a duration near zero.
+// The value the column buys is real, but it only shows up starting with the
+// first 24h reminder (composeAlert()'s "Ongoing for" line), which is exactly
+// when "how long has this been going on" becomes the question worth asking.
 //
 // -----------------------------------------------------------------------------
-// THE WINDOW: 192 HOURS, NOT sweep_job_health's OWN 24H DEFAULT
+// THREE INDEPENDENT WAYS A JOB IS UNHEALTHY
 // -----------------------------------------------------------------------------
-// src/lib/observability/metrics.ts calls sweep_job_health with its documented
-// default (24h) because its job is "recent run history for a dashboard".
-// This module's job is different: proving a WEEKLY job (this wave's
-// `cleanup.devices`-shaped schedules, `M H * * D`) has gone quiet requires
-// enough history to have seen at least one of its expected runs, and a 24h
-// window can never contain one. 192h (8 days) is the smallest window that
-// covers every cadence this codebase's schedule registry actually uses with
-// one full cycle of slack. See classifyRow() below for what happens when a
-// job's gap is WIDER than even this window (an honest "cannot tell" null,
-// never a guess).
+// `not_scheduled`: an EXPECTED job (see EXPECTED_JOBS below) is either
+// entirely absent from `cron.job` or present with `active=false`. This is
+// the brief's headline case, verbatim: "a job that silently stopped being
+// scheduled ... is the one sweep_job_health alone will not tell you about."
+// Both halves matter and neither was covered by the first cut: skipping
+// every `active=false` row unconditionally (as it did) means a job flipped
+// inactive is silently ignored, and `cron.unschedule` removes the `cron.job`
+// row ENTIRELY, so a job that vanishes that way was never even seen by a
+// loop that only iterates the rows sweep_job_health returns. Checking a
+// fixed EXPECTED_JOBS list against the returned set catches both.
+//
+// `failing`: checked TWO ways, because one signal alone is wrong in both
+// directions (the review's finding, C2):
+//   1. The most recent run's own status is the terminal 'failed' state.
+//      NOT `!== 'succeeded'` - pg_cron's `cron.job_run_details.status` also
+//      passes through 'starting', 'running' and 'sending' before landing on
+//      'succeeded' or 'failed', and a check that lands mid-run must not page
+//      on an in-flight status that will resolve on its own.
+//   2. Failures happened recently even though the MOST RECENT run happened
+//      to succeed (or is in flight) - an intermittently-flapping job, e.g.
+//      one failing every other run. This is read from a SEPARATE, narrower
+//      RPC call (RECENT_WINDOW_HOURS = 24h, matching sweep_job_health's own
+//      documented default and 0028's "the window" framing) rather than from
+//      the wide staleness window, and that separation is deliberate: a
+//      24h-bounded failure count naturally ages OUT after a full day
+//      failure-free, which is what makes "genuinely recovered" a meaningful,
+//      non-flappy signal (see the I4 note below) without ever needing to key
+//      on the ever-growing whole-history failure count the first cut's
+//      header correctly rejected.
+//
+// `stale`: gone quieter than its own schedule can honestly explain - see
+// classifyKnownJob() and the STALE_WINDOW_HOURS note below for the window-
+// math fix (I1).
+//
+// -----------------------------------------------------------------------------
+// WHY RECOVERY REQUIRES A CLEAN 24H, NOT JUST ONE SUCCESSFUL RUN (I4)
+// -----------------------------------------------------------------------------
+// The first cut cleared a job's dedupe state (and so was willing to alert
+// again) the instant its MOST RECENT run succeeded. For a job flapping every
+// other run, that is a fresh "new incident" on every single failure: the
+// review's probe found 3 sends across 6 checks alternating fail/succeed/fail.
+// Recovery now requires the SAME 24h window used for the flapping check
+// above to show zero failures - so a flapping job's incident stays open
+// (and reminder-throttled) for as long as it keeps flapping, and clears only
+// once it has gone a full day clean. This is a real, deliberate trade
+// (recovery lags a genuine last-minute fix by up to 24h) made in exchange
+// for the alerting channel not becoming something an operator learns to
+// ignore.
 // =============================================================================
 
 /**
- * Wide enough to prove a weekly job (`M H * * D`) has gone quiet - the
- * widest cadence this codebase's schedule registry uses - with a full cycle
- * of slack. See the module header.
+ * The narrow window for "has this job failed recently", independent of the
+ * wide staleness window below. Matches sweep_job_health's own documented
+ * default and src/lib/observability/metrics.ts's SWEEP_HEALTH_WINDOW_HOURS -
+ * this is "the window" 0028's header already establishes as the unit doc 39
+ * reasons about failures in.
  */
-export const JOB_ALERT_WINDOW_HOURS = 24 * 8;
+export const RECENT_WINDOW_HOURS = 24;
+
+/**
+ * The wide window used ONLY for staleness (has this job gone quiet longer
+ * than its own schedule explains).
+ *
+ * Review fix (I1): the first cut used 192h (8 days) and its own header
+ * claimed that was "the smallest window that covers every cadence ... with
+ * one full cycle of slack" - false for the one cadence (weekly) it was
+ * chosen for. The bug is structural, not a rounding error: a job's
+ * `last_finished_at` can only be VISIBLE within whatever window this module
+ * asks sweep_job_health for, which means the "found but old" staleness
+ * branch below can only ever fire when the window is WIDER than the
+ * staleness threshold itself - and the first cut's window was narrower than
+ * its own weekly threshold (11520 min of window vs a 20165 min threshold),
+ * making that branch dead code for the one cadence it existed to catch.
+ *
+ * 504h (21 days) is chosen the same way `staleThresholdMinutes` is chosen
+ * below: comfortably ABOVE the widest threshold this codebase's schedule
+ * shapes produce (weekly, `M H * * D`: 10080 min gap * 2 + 5 = 20165 min =
+ * ~336h), with a margin (168h, another full week) so a job whose last run
+ * sits right at the threshold boundary is still visible in the "found but
+ * old" branch rather than falling into the coarser "not found at all"
+ * branch. See job-health.test.ts's "I1" suite, which pins the arithmetic
+ * directly rather than trusting this comment.
+ */
+export const STALE_WINDOW_HOURS = 24 * 21;
 
 /**
  * "at most a daily reminder" per the brief. An incident that stays open
  * re-alerts at most once per this interval; a check inside it is a no-op for
- * an already-known incident.
+ * an already-known incident UNLESS the previous alert attempt did not
+ * actually reach anyone - see the I2 note on ALERT_NOT_YET_DELIVERED below.
  */
 const REMINDER_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /**
- * The staleness threshold is `gap * MULTIPLIER + BUFFER_MINUTES`, not the raw
- * gap: pg_cron's own scheduling jitter and this check's own cadence (it does
- * not run at the exact instant a job was due) both cost a few minutes for
- * free, and doubling the gap absorbs one whole missed cycle before calling a
- * job stale rather than firing on the very first late minute of the next
- * one.
+ * The staleness threshold for a job whose expected gap is `gapMinutes`: the
+ * gap itself, doubled, plus a small fixed buffer. Doubling absorbs one whole
+ * missed cycle (pg_cron jitter and this check's own cadence both cost a few
+ * minutes for free) before calling a job stale, rather than firing on the
+ * very first late minute of the next one. Exported so its relationship to
+ * STALE_WINDOW_HOURS can be asserted directly rather than trusted - see the
+ * comment on that constant.
  */
+export function staleThresholdMinutes(gapMinutes: number): number {
+  return gapMinutes * STALE_GRACE_MULTIPLIER + STALE_GRACE_BUFFER_MINUTES;
+}
+
 const STALE_GRACE_MULTIPLIER = 2;
 const STALE_GRACE_BUFFER_MINUTES = 5;
+
+/**
+ * Sentinel `last_alerted_at` meaning "an alert was owed but never confirmed
+ * delivered" - the epoch, which is always more than REMINDER_INTERVAL_MS in
+ * the past, so the very next check retries unconditionally rather than
+ * waiting out a reminder window for a message nobody received.
+ *
+ * Review fix (I2): the first cut persisted `last_alerted_at = now()` BEFORE
+ * attempting the send, so a retryable Resend failure (or simply no
+ * OPS_ALERT_EMAIL configured yet) silently started the 24h dedupe clock for
+ * an alert that was never actually delivered - the exact opposite of what
+ * its own comment claimed. State is now written AFTER the send attempt,
+ * using its real outcome: `now()` on confirmed delivery, this sentinel on
+ * anything else (send failure OR no address configured). The sentinel also
+ * directly fixes M5 (an operator wiring OPS_ALERT_EMAIL in mid-incident
+ * hears about it on the very next check, not up to 24h later), because it is
+ * the same "was this incident ever actually told to anyone" question either
+ * way.
+ */
+const ALERT_NOT_YET_DELIVERED = new Date(0).toISOString();
+
+/**
+ * Every job doc 39's schedule registry (plus task 2.2's `integrity.
+ * balance_check`, 0056-0058) actually schedules via pg_cron TODAY, confirmed
+ * live against `cron.job` on 2026-08-06. This is deliberately the live set,
+ * not the aspirational one: doc 39 also lists `cleanup.devices`,
+ * `fraud.ring_sweep` and a weekly `integrity.balance_check {mode:'full'}`
+ * that no migration has scheduled yet, and listing a job here that does not
+ * exist would page every single check forever with "not scheduled" for
+ * something nobody ever intended to schedule today.
+ *
+ * This is the registry I5 requires: sweep_job_health only reports on rows
+ * `cron.job` currently HAS, so a job removed by `cron.unschedule` (which
+ * deletes the row outright, unlike `active=false`) is invisible to a loop
+ * that only iterates what came back. Comparing this fixed list against the
+ * returned set catches that; comparing each returned row's `active` flag
+ * against membership in this list catches the OTHER half (flipped inactive
+ * without being unscheduled).
+ *
+ * A job added to pg_cron later without an entry here is invisible to THIS
+ * specific check (the "did it go missing" one) but still fully covered by
+ * the `failing` / `stale` checks below, which iterate every ACTIVE row
+ * sweep_job_health returns regardless of this list - so the failure mode of
+ * forgetting to update this list is "a newly-added job's own disappearance
+ * goes unnoticed", not "a newly-added job's failures go unnoticed".
+ */
+export const EXPECTED_JOBS: readonly string[] = [
+  "campaigns.sweep",
+  "claims.expiry_sweep",
+  "integrity.balance_check",
+  "points.expiry_sweep",
+  "points.expiry_warn",
+  "receipts.stuck_sweep",
+];
 
 const LOG_PREFIX = "[alerts/job-health]";
 
 export interface JobHealthDeps {
-  /** SERVICE ROLE. sweep_job_health (0028) and job_alert_state (0058) are
-   * both service_role-only; see either migration's header. */
+  /** SERVICE ROLE. sweep_job_health (0028) and job_alert_state (0058/filed as
+   * 0059) are both service_role-only; see either migration's header. */
   readonly supabase: SupabaseClient<Database>;
   /** Injected in tests; defaults to the real Resend gateway. */
   readonly send?: (input: SendEmailInput) => Promise<SendEmailResult>;
@@ -150,7 +267,7 @@ export function defaultJobHealthDeps(): JobHealthDeps | null {
   return { supabase };
 }
 
-export type JobHealthReason = "failing" | "stale";
+export type JobHealthReason = "failing" | "stale" | "not_scheduled";
 
 export interface JobIncident {
   readonly jobname: string;
@@ -159,7 +276,8 @@ export interface JobIncident {
   readonly detail: string;
   readonly lastFinishedAt: string | null;
   /** When THIS incident began - stable across every check while it stays
-   * open, per the module header's dedupe argument. */
+   * open, per the module header's dedupe argument. See the header correction
+   * on what this does and does not tell you about the FIRST alert. */
   readonly since: string;
 }
 
@@ -195,42 +313,70 @@ interface StateRow {
   last_detail: string | null;
 }
 
+/** Never returns null/undefined shape surprises - the shared empty report for
+ * every early-exit path (an RPC failure, or an unexpected throw under M4). */
+function emptyReport(now: Date, opsAddressConfigured: boolean): JobHealthReport {
+  return {
+    checkedAt: now.toISOString(),
+    checkedJobs: 0,
+    unhealthy: [],
+    alerted: [],
+    opsAddressConfigured,
+    sent: 0,
+  };
+}
+
 /**
- * Run the check: read current job health, decide which jobs are unhealthy,
- * dedupe against `job_alert_state`, and email the ops address for every
- * genuinely new or reminder-due incident.
+ * Run the check: read current job health (both windows), decide which jobs
+ * are unhealthy, dedupe against `job_alert_state`, and email the ops address
+ * for every genuinely new or reminder-due incident.
  *
- * NEVER THROWS. Every read degrades independently and the function still
- * returns a report - see the module header and, for the convention this
- * follows, src/lib/observability/metrics.ts's own header.
+ * NEVER THROWS (M4: this is now actually true, not only claimed - the whole
+ * body below the null-deps guard runs inside a try/catch that degrades to
+ * `emptyReport` on anything unexpected, the same shape every early-return
+ * below already used for an RPC failure specifically).
  */
 export async function checkJobHealth(
   deps: JobHealthDeps | null = defaultJobHealthDeps(),
 ): Promise<JobHealthReport | null> {
   if (deps === null) return null;
 
-  const { supabase } = deps;
   const now = deps.now?.() ?? new Date();
-  const send = deps.send ?? sendEmail;
   const opsAddress = resolveOpsAddress(deps);
 
-  const { data: sweepData, error: sweepError } = await supabase.rpc("sweep_job_health", {
-    p_hours: JOB_ALERT_WINDOW_HOURS,
-  });
+  try {
+    return await runCheck(deps, now, opsAddress);
+  } catch (error) {
+    console.error(`${LOG_PREFIX} unexpected failure running the check`, error);
+    return emptyReport(now, opsAddress !== null);
+  }
+}
 
-  if (sweepError !== null) {
-    console.error(`${LOG_PREFIX} sweep_job_health read failed`, sweepError);
-    return {
-      checkedAt: now.toISOString(),
-      checkedJobs: 0,
-      unhealthy: [],
-      alerted: [],
-      opsAddressConfigured: opsAddress !== null,
-      sent: 0,
-    };
+async function runCheck(
+  deps: JobHealthDeps,
+  now: Date,
+  opsAddress: string | null,
+): Promise<JobHealthReport> {
+  const { supabase } = deps;
+  const send = deps.send ?? sendEmail;
+
+  const [recentResult, wideResult] = await Promise.all([
+    supabase.rpc("sweep_job_health", { p_hours: RECENT_WINDOW_HOURS }),
+    supabase.rpc("sweep_job_health", { p_hours: STALE_WINDOW_HOURS }),
+  ]);
+
+  if (recentResult.error !== null || wideResult.error !== null) {
+    console.error(
+      `${LOG_PREFIX} sweep_job_health read failed`,
+      recentResult.error ?? wideResult.error,
+    );
+    return emptyReport(now, opsAddress !== null);
   }
 
-  const rows = (sweepData ?? []) as SweepRow[];
+  const wideRows = (wideResult.data ?? []) as SweepRow[];
+  const recentRows = (recentResult.data ?? []) as SweepRow[];
+  const wideByJob = new Map(wideRows.map((r) => [r.jobname, r] as const));
+  const recentByJob = new Map(recentRows.map((r) => [r.jobname, r] as const));
 
   const { data: stateData, error: stateError } = await supabase
     .from("job_alert_state")
@@ -251,32 +397,53 @@ export async function checkJobHealth(
     stateByJob.set(row.jobname, row);
   }
 
+  // Every job worth a verdict this run: everything sweep_job_health returned
+  // (evaluated for failing/stale) UNION every job this codebase expects to
+  // exist (evaluated for not_scheduled even when cron.job has no row for it
+  // at all - see EXPECTED_JOBS's header on why that union is required).
+  const allJobNames = new Set<string>([...EXPECTED_JOBS, ...wideRows.map((r) => r.jobname)]);
+
   const unhealthy: JobIncident[] = [];
   const toAlert: JobIncident[] = [];
-  const upserts: StateRow[] = [];
   const clears: string[] = [];
 
-  for (const row of rows) {
-    // An intentionally unscheduled job (0028's `active` column) is not this
-    // check's business - see classifyRow's header note.
-    if (!row.active) continue;
+  for (const jobname of allJobNames) {
+    const wideRow = wideByJob.get(jobname);
+    const isExpected = EXPECTED_JOBS.includes(jobname);
 
-    const classification = classifyRow(row, now);
-    const existing = stateByJob.get(row.jobname);
+    let classification: { reason: JobHealthReason; detail: string } | null;
+
+    if (isExpected && (wideRow === undefined || !wideRow.active)) {
+      classification = {
+        reason: "not_scheduled",
+        detail:
+          wideRow === undefined
+            ? `expected job "${jobname}" has no cron.job entry at all - check whether it was cron.unschedule()'d`
+            : `job "${jobname}" is registered in cron.job but marked inactive (active=false)`,
+      };
+    } else if (wideRow === undefined || !wideRow.active) {
+      // An unexpected job, intentionally inactive or simply not one this
+      // check tracks. Not this check's business.
+      continue;
+    } else {
+      classification = classifyKnownJob(wideRow, recentByJob.get(jobname), now);
+    }
+
+    const existing = stateByJob.get(jobname);
 
     if (classification === null) {
-      if (existing !== undefined) clears.push(row.jobname);
+      if (existing !== undefined) clears.push(jobname);
       continue;
     }
 
     const isNewIncident = existing === undefined;
     const since = isNewIncident ? now.toISOString() : existing.since;
     const incident: JobIncident = {
-      jobname: row.jobname,
-      schedule: row.schedule,
+      jobname,
+      schedule: wideRow?.schedule ?? "(not registered)",
       reason: classification.reason,
       detail: classification.detail,
-      lastFinishedAt: row.last_finished_at,
+      lastFinishedAt: wideRow?.last_finished_at ?? null,
       since,
     };
     unhealthy.push(incident);
@@ -287,65 +454,71 @@ export async function checkJobHealth(
 
     if (isNewIncident || dueForReminder) {
       toAlert.push(incident);
-      upserts.push({
-        jobname: row.jobname,
-        since,
-        last_alerted_at: now.toISOString(),
-        last_detail: classification.detail,
-      });
     }
   }
 
-  // Persist dedupe-state changes before sending. Best effort: a write
-  // failure here costs at most a duplicate or missed reminder on the NEXT
-  // check, never silently drops the alert this run is about to send.
-  await Promise.all([
-    ...upserts.map(async (row) => {
-      const { error } = await supabase
-        .from("job_alert_state")
-        .upsert(row, { onConflict: "jobname" });
-      if (error !== null) {
-        console.error(`${LOG_PREFIX} could not persist alert state for ${row.jobname}`, error);
-      }
-    }),
-    ...clears.map(async (jobname) => {
+  // Recovery clears immediately, independent of send outcomes below - a
+  // healthy job's state row is stale information the moment it is read.
+  await Promise.all(
+    clears.map(async (jobname) => {
       const { error } = await supabase.from("job_alert_state").delete().eq("jobname", jobname);
       if (error !== null) {
         console.error(`${LOG_PREFIX} could not clear recovered alert state for ${jobname}`, error);
       }
     }),
-  ]);
+  );
 
+  // Review fix (I2): state is written AFTER the send attempt and reflects
+  // its REAL outcome - see ALERT_NOT_YET_DELIVERED's header. This is the
+  // one loop that decides both "did we tell anyone" and "do we owe a state
+  // write", so the two can never disagree the way they did in the first cut.
   let sent = 0;
   for (const incident of toAlert) {
+    let delivered = false;
+
     if (opsAddress === null) {
       // Genuinely optional per the brief: the check still ran, still found
       // and recorded the incident, it simply has nowhere configured to send
-      // it. Not an error.
+      // it. Not an error - but also not "delivered", so the sentinel below
+      // makes sure the very next check (once an address IS configured)
+      // retries rather than waiting out a reminder window for nothing.
       console.warn(
         `${LOG_PREFIX} ${incident.jobname}: ${incident.reason} (${incident.detail}) - OPS_ALERT_EMAIL is not configured, not sending`,
       );
-      continue;
+    } else {
+      const message = composeAlert(incident, now);
+      const result = await send({
+        to: opsAddress,
+        subject: message.subject,
+        html: message.html,
+        text: message.text,
+      });
+
+      if (result.ok) {
+        delivered = true;
+        sent += 1;
+      } else {
+        console.error(`${LOG_PREFIX} alert send failed for ${incident.jobname}: ${result.reason}`);
+      }
     }
 
-    const message = composeAlert(incident, now);
-    const result = await send({
-      to: opsAddress,
-      subject: message.subject,
-      html: message.html,
-      text: message.text,
-    });
-
-    if (result.ok) {
-      sent += 1;
-    } else {
-      console.error(`${LOG_PREFIX} alert send failed for ${incident.jobname}: ${result.reason}`);
+    const { error } = await supabase.from("job_alert_state").upsert(
+      {
+        jobname: incident.jobname,
+        since: incident.since,
+        last_alerted_at: delivered ? now.toISOString() : ALERT_NOT_YET_DELIVERED,
+        last_detail: incident.detail,
+      } satisfies StateRow,
+      { onConflict: "jobname" },
+    );
+    if (error !== null) {
+      console.error(`${LOG_PREFIX} could not persist alert state for ${incident.jobname}`, error);
     }
   }
 
   return {
     checkedAt: now.toISOString(),
-    checkedJobs: rows.length,
+    checkedJobs: allJobNames.size,
     unhealthy,
     alerted: toAlert,
     opsAddressConfigured: opsAddress !== null,
@@ -354,76 +527,97 @@ export async function checkJobHealth(
 }
 
 /**
- * A job's health this check, or `null` when it is healthy (or its schedule's
- * shape makes a staleness call dishonest - see estimateMaxGapMinutes).
+ * A KNOWN, ACTIVE job's health this check (the not_scheduled case is decided
+ * by the caller, before this is reached), or `null` when it is healthy (or
+ * its schedule's shape makes a staleness call dishonest - see
+ * estimateMaxGapMinutes).
  *
- * `failing` is checked first and wins over `stale`: a job with a fresh
- * failure is a stronger, more specific fact than "has it been long enough
- * since a success", and the two are rarely both true at once (a job stale
- * enough to trip the gap check has usually stopped producing ANY run
- * details, `last_status` included).
+ * Order matters and is deliberate: a definitive terminal failure (1) beats a
+ * recent-window flap (2) beats staleness (3), because each is a strictly
+ * more specific fact than the one after it, and a job cannot be BOTH stale
+ * (has not run) and failing (has run and it went badly) at once.
  */
-function classifyRow(
-  row: SweepRow,
+function classifyKnownJob(
+  wideRow: SweepRow,
+  recentRow: SweepRow | undefined,
   now: Date,
 ): { reason: JobHealthReason; detail: string } | null {
-  const failing = row.last_status !== null && row.last_status !== "succeeded";
-  if (failing) {
+  // 1. Terminal failure on the most recent recorded run. NOT `!==
+  //    'succeeded'` - see the module header (C2): 'starting', 'running' and
+  //    'sending' are real, common, in-flight values of the same column and
+  //    must never read as a failure.
+  if (wideRow.last_status === "failed") {
     return {
       reason: "failing",
-      detail: row.last_error ?? `last run did not succeed (status: ${row.last_status})`,
+      detail: wideRow.last_error ?? "the most recent recorded run failed",
     };
   }
 
-  const gapMinutes = estimateMaxGapMinutes(row.schedule);
+  // 2. Flapping: the most recent run happened to succeed (or is in flight),
+  //    but real failures happened within the last RECENT_WINDOW_HOURS. See
+  //    the module header (C2 direction 2, and the brief's own req 1: "has
+  //    failures in the window").
+  const recentFailures = recentRow?.failures ?? 0;
+  if (recentFailures > 0) {
+    const recentRuns = recentRow?.runs ?? recentFailures;
+    const errorText = recentRow?.last_error ?? wideRow.last_error;
+    const summary = `${recentFailures} of ${recentRuns} runs failed in the last ${RECENT_WINDOW_HOURS}h`;
+    return {
+      reason: "failing",
+      detail: errorText !== null ? `${errorText} (${summary})` : summary,
+    };
+  }
+
+  // 3. Staleness.
+  const gapMinutes = estimateMaxGapMinutes(wideRow.schedule);
   if (gapMinutes === null) return null; // unknown cadence shape - no honest call to make
 
-  const thresholdMs = (gapMinutes * STALE_GRACE_MULTIPLIER + STALE_GRACE_BUFFER_MINUTES) * 60_000;
+  const thresholdMs = staleThresholdMinutes(gapMinutes) * 60_000;
 
-  if (row.last_finished_at !== null) {
-    const sinceLastRun = now.getTime() - Date.parse(row.last_finished_at);
+  if (wideRow.last_finished_at !== null) {
+    const sinceLastRun = now.getTime() - Date.parse(wideRow.last_finished_at);
     if (sinceLastRun <= thresholdMs) return null;
     return {
       reason: "stale",
-      detail: `no successful run observed since ${row.last_finished_at} (schedule "${row.schedule}" expects one roughly every ${gapMinutes}m)`,
+      detail: `no successful run observed since ${wideRow.last_finished_at} (schedule "${wideRow.schedule}" expects one roughly every ${gapMinutes}m)`,
     };
   }
 
   // No run at all inside the tracked window. Only conclusive when the
   // window is wide enough to have caught at least one expected run - see
-  // the module header on why JOB_ALERT_WINDOW_HOURS is 192, not 24.
-  if (thresholdMs > JOB_ALERT_WINDOW_HOURS * 3_600_000) return null;
+  // STALE_WINDOW_HOURS's header on why it is 504, not 192.
+  if (thresholdMs > STALE_WINDOW_HOURS * 3_600_000) return null;
 
   return {
     reason: "stale",
-    detail: `no run observed in the tracked ${JOB_ALERT_WINDOW_HOURS}h window (schedule "${row.schedule}" expects one roughly every ${gapMinutes}m)`,
+    detail: `no run observed in the tracked ${STALE_WINDOW_HOURS}h window (schedule "${wideRow.schedule}" expects one roughly every ${gapMinutes}m)`,
   };
 }
 
 /** The five plausible-email characters: local@domain.tld, no whitespace. Not
  * RFC 5322 - a local-only sanity check, same spirit as src/lib/supabase/
  * service.ts re-validating SUPABASE_SERVICE_ROLE_KEY's length itself rather
- * than trusting a schema no code path for this variable goes through (see
- * below on why OPS_ALERT_EMAIL is never added to src/lib/env.ts). */
+ * than trusting a schema no code path for this variable goes through. */
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
  * The ops recipient, or `null` when none is configured or the configured
  * value is not plausibly an address.
  *
- * Reads `process.env.OPS_ALERT_EMAIL` DIRECTLY rather than through
- * `getServerEnv()`/src/lib/env.ts, and validates locally rather than with a
- * schema `.min()`/regex - the exact pattern src/lib/supabase/service.ts's
- * header documents for SUPABASE_SERVICE_ROLE_KEY and
- * src/app/api/internal/metrics/route.ts's header documents for
- * METRICS_TOKEN. Both explain the same failure this avoids: getServerEnv()
- * validates its WHOLE object as one unit and throws naming every missing
- * key, so routing an optional, low-stakes variable through it would let a
- * blank OPS_ALERT_EMAIL (or a typo in an unrelated required key) take down
- * every other caller of getServerEnv() - REDEMPTION_TOKEN_SECRET,
- * UPSTASH_REDIS_REST_URL, the queue publisher - over a variable those
- * callers never read. A malformed value here costs exactly one thing: this
- * one check does not send mail, and says so in the log.
+ * Review fix (I3): OPS_ALERT_EMAIL IS declared in src/lib/env.ts's
+ * serverEnvSchema (`z.string().optional()`, no `.min()`/format constraint) -
+ * what the METRICS_TOKEN precedent the brief pointed at actually does. What
+ * the brief's constraint bans is a length/format FLOOR in the schema (a
+ * `.min()` there would make getServerEnv() throw its whole object for every
+ * OTHER caller - REDEMPTION_TOKEN_SECRET, UPSTASH_REDIS_REST_URL, the queue
+ * publisher - on a truncated or malformed value of a variable those callers
+ * never read). This function still reads `process.env.OPS_ALERT_EMAIL`
+ * DIRECTLY rather than through `getServerEnv()`, for the same reason
+ * METRICS_TOKEN's own reader does (see src/app/api/internal/metrics/
+ * route.ts's `readMetricsToken` and its comment): the declaration keeps
+ * env.ts the single inventory of server variables, but going through
+ * getServerEnv() for the READ would let an unrelated required key's absence
+ * take this check down too.
  */
 function resolveOpsAddress(deps: JobHealthDeps): string | null {
   if (deps.opsAddress !== undefined) return deps.opsAddress;
@@ -449,13 +643,19 @@ function composeAlert(
   const headline =
     incident.reason === "stale"
       ? `${incident.jobname} has not run when expected`
-      : `${incident.jobname} is failing`;
+      : incident.reason === "not_scheduled"
+        ? `${incident.jobname} is not scheduled`
+        : `${incident.jobname} is failing`;
 
   const lines = [
     `Job: ${incident.jobname}`,
     `Schedule: ${incident.schedule}`,
     `Problem: ${incident.detail}`,
-    `Ongoing for: ${duration} (since ${incident.since})`,
+    // "Ongoing for" is time since THIS CHECKER first detected the problem,
+    // not necessarily since it began - see the module header. The first
+    // alert for any incident will always read close to 0m; the number
+    // becomes meaningful starting with the first 24h reminder.
+    `Ongoing for: ${duration} (first detected by this check at ${incident.since})`,
     incident.lastFinishedAt !== null
       ? `Last finished run: ${incident.lastFinishedAt}`
       : "Last finished run: none observed in the tracked window",

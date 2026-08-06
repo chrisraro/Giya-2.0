@@ -277,6 +277,24 @@ const serverEnvSchema = z.object({
   // re-validates SUPABASE_SERVICE_ROLE_KEY's length locally instead of
   // trusting a schema no code path for it goes through.
   METRICS_TOKEN: z.string().optional(),
+
+  // The ops recipient for src/lib/alerts/job-health.ts (task 2.5's "alert a
+  // human when a scheduled job fails"): a bare email address, no `.min()`,
+  // for the exact METRICS_TOKEN reason stated immediately above - a length
+  // or format floor here would make getServerEnv() throw its whole object
+  // for every OTHER caller (REDEMPTION_TOKEN_SECRET, UPSTASH_REDIS_REST_URL,
+  // the queue publisher) on a truncated or malformed value of a variable
+  // those callers never read. Declared here anyway so this schema stays the
+  // single inventory of server variables, and NOT read through
+  // getServerEnv() by its one consumer - job-health.ts reads
+  // `process.env.OPS_ALERT_EMAIL` directly and validates the address shape
+  // locally, mirroring readMetricsToken() in
+  // src/app/api/internal/metrics/route.ts. Optional, and it has to stay
+  // that way: with it unset the check still runs, still reads
+  // sweep_job_health, still logs every incident it finds - it only sends no
+  // mail, which is the documented dormant state every credential in this
+  // file degrades to.
+  OPS_ALERT_EMAIL: z.string().optional(),
 });
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;
@@ -320,6 +338,7 @@ export function getServerEnv(): ServerEnv {
     INTEGRATION_TOKEN_AES_KEY: emptyToUndefined(process.env.INTEGRATION_TOKEN_AES_KEY),
     EMAIL_FROM: emptyToUndefined(process.env.EMAIL_FROM),
     METRICS_TOKEN: emptyToUndefined(process.env.METRICS_TOKEN),
+    OPS_ALERT_EMAIL: emptyToUndefined(process.env.OPS_ALERT_EMAIL),
   });
 
   if (!parsed.success) {

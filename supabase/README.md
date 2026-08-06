@@ -102,7 +102,7 @@ is transaction-wrapped (`begin ... rollback`) and leaves no data behind:
 psql "$DATABASE_URL" -f supabase/tests/rls_identity_smoke.sql
 ```
 
-Twenty-three suites, one per domain (review fix, task 2.1: the prior count of "Nineteen" - itself already a correction attempt - was still wrong; four existing suites had never been added as table rows at all: `receipt_escalation_smoke.sql`, `rls_jobs_smoke.sql`, `rls_merchant_aliases_smoke.sql`, `rpc_campaign_budget_guard_smoke.sql`, restored below in their migration order rather than appended, so this table reads in the same order the suites were written):
+Twenty-four suites, one per domain (review fix, task 2.1: the prior count of "Nineteen" - itself already a correction attempt - was still wrong; four existing suites had never been added as table rows at all: `receipt_escalation_smoke.sql`, `rls_jobs_smoke.sql`, `rls_merchant_aliases_smoke.sql`, `rpc_campaign_budget_guard_smoke.sql`, restored below in their migration order rather than appended, so this table reads in the same order the suites were written; task 2.5 adds one more, `rls_job_alert_state_smoke.sql`):
 
 | file | covers |
 |---|---|
@@ -129,6 +129,7 @@ Twenty-three suites, one per domain (review fix, task 2.1: the prior count of "N
 | `rpc_campaign_budget_guard_smoke.sql` | the campaign budget race guard in `award_receipt_points` (0040/0041, task 1.2 + review fix C1), 34 assertions: CORRECT PER-CAMPAIGN ATTRIBUTION from each earn row's own `rule_snapshot` entries - never a naive `sum(points) where campaign_id = X`, which is wrong in both directions the moment a campaign stacks as a non-primary contributor (review C1); `max_total_points` as a running cap shared across every consumer, closed race-safely by locking the campaigns row before re-checking the total (the same cross-consumer race 0015 hardened for `claim_reward`); `per_customer_limit` armed at award time on its own, not only when `max_total_points` is also set (review I1); a budget with room for exactly one more contribution and two sequential awards - the second raises `CAMPAIGN_BUDGET_RACE`, and a corrected retry (the value `award.ts`'s own recovery sends) succeeds; a clawed-back contribution stops counting against the budget; a vanished/unknown campaign id in the array is skipped, not fatal; and omitting `p_campaign_budget_checks` entirely (every caller before task 1.2) enforces nothing, byte-identical to 0038's prior behaviour |
 | `rpc_points_expiry_smoke.sql` | Task 1.3 points expiry enforcement (0042-0048, both review-fix passes), 67 assertions: doc 35 section 7's FIFO remainder formula ordered by EXPIRY not creation (I1) - a partially-consumed lot, a later untouched lot, a lot fully drained to 0, a clawback-only consumption, and the counter-example where a never-expiring `adjust` must be drained LAST rather than first (a null expiry sorting as `+∞`, not first); the aggregate at two `asof` values and the public wrapper agreeing with it; `public.points_next_expiry` correctly excluding an already-past-due lot; `public.expire_points` (the sweep) - SELF-CLEARING proven with a small `p_limit` (I2: a third pair is reached only once the first two clear a slot, not starved forever), the right `expire` row with the restored `x_expired_sum`/`d_drained_sum` audit fields (I5), the cached balance equal to the ledger sum, nothing for a zero-balance pair, a backfilled-already-past-due lot swept correctly (M5), and idempotency across every pair including the self-clearing trio; `public.points_expiry_warn` (the warn job) using the PROJECTED remainder at both horizons rather than the soonest lot (original I3: a shadowed larger lot fires its own combined total on the first run), ordered by URGENCY - soonest in-window expiry, not UUID - so a p_limit of 1 notifies a 2-days-out pair over a UUID-earlier 25-days-out one (re-review N2), deduped on the WINDOW-STABLE soonest-lot date rather than the moving projected figure, proven by literally aging the ledger between runs to simulate a day passing: a growing aggregate (300->500) produces no duplicate, only a genuine change of the soonest lot does (re-review N3), the restored date in both the copy ("expire by...") and the `data.expires_on` payload (re-review N4), the in_app/email channel split, a backfilled-already-past-due lot never warned (M5), and idempotency; both `cron.job` rows with their exact schedule and command; the append-only fence's one permanent exception (now correctly homed in 0047, not rewriting 0042's history) proven both ways (I4: the null-to-value transition succeeds and lands, every other column and every other `expires_at` transition and DELETE still raise), with its column allowlist pinned exactly (re-review N7); and the full I-A grant matrix including `public.points_expirable_remainder`, missed by the first pass (C1) |
 | `rpc_campaigns_sweep_smoke.sql` | Task 2.1 `campaigns.sweep` (0053, review-fixed twice by 0054 and 0055), 33 assertions: doc 34's T3 (`scheduled -> active` at `starts_at`) and T7 (`active|paused -> ended` at `ends_at`) as ONE `public.sweep_campaigns` function with two independent candidate scans; a due scheduled campaign on an ACTIVE business activates with a `campaign.activated` audit row (`actor_kind='system'`, `after.trigger='sweep'` - the app's own vocabulary from `src/features/campaigns/server/audit.ts`, never a parallel verb); a not-yet-due scheduled campaign and both an already-`ended` and an already-`archived` campaign are left completely untouched with no audit row; an `active` campaign AND a `paused` campaign both past `ends_at` are ended with `campaign.ended` recording the correct source status in `before`, PROVEN AGAIN on a business the T3 skip case has already made suspended (T7 is unconditional and a fixture now pins that rather than leaving it asserted only by construction); G1 (business standing) gates T3 alone - a due scheduled campaign on a SUSPENDED business is SKIPPED (stays `scheduled`, no audit row, no error) and then genuinely activates once the business is set back to `active`, proving the skip re-checks live standing rather than caching a verdict; GENUINE SELF-CLEARING under a TIGHT `p_limit=1` (0054 review fix I1/I2, the actual 0045-shaped bug 0053 shipped with: a `p_limit=200`/8-fixture "second run is 0" check cannot distinguish "left candidacy" from "still occupying a slot doing no work" the way a small-limit starvation probe can - a permanently-ineligible `'closed'`-business campaign sorted first by `starts_at` no longer starves a later, gate-passing one out of the budget); `private.campaigns_sweep_ineligible_count()` (0055 review fix I1: 0054's own I1+I3 interaction silently dropped skip visibility to zero for the ordinary case) returning exactly the one due-but-ineligible campaign in play, fully revoked from every role including `service_role`; the widened `campaigns_active_window_idx` (now covering `paused`, which 0012's original predicate excluded); the `cron.job` row's exact schedule (`*/5 * * * *`) and command; no `points_transactions` row written by any of it; and the service_role-only grant |
+| `rls_job_alert_state_smoke.sql` | `job_alert_state` (task 2.5, filed as 0059 / applied live as 0058_job_health_alerts - see that file's own ledger-name note), 13 assertions: the service-role-only fence (no policies at all, privileges revoked underneath), the service_role privilege split - the opposite shape from `jobs` (0029): DELETE stays and TRUNCATE does not, because the checker's own recovery path IS a per-row delete rather than never deleting at all - the no-truncate statement trigger, and the one shape check (a blank `jobname` is rejected) |
 
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
@@ -776,6 +777,10 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0053_campaigns_sweep.sql | 20260806084550 | 0053_campaigns_sweep |
 | 0054_campaigns_sweep_review_fixes.sql | 20260806091451 | 0054_campaigns_sweep_review_fixes |
 | 0055_campaigns_sweep_skip_visibility.sql | 20260806093311 | 0055_campaigns_sweep_skip_visibility |
+| *(not in this worktree - task 2.2)* | 20260806095729 | 0056_balance_check |
+| *(not in this worktree - task 2.2)* | 20260806104108 | 0057_balance_check_review_fixes |
+| 0059_job_health_alerts.sql | 20260806110554 | 0058_job_health_alerts |
+| *(not in this worktree - task 2.2)* | 20260806111225 | 0058_balance_check_deployment_correction |
 
 **Rows 0001-0035 are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`; rows 0036-0049 were applied later, and 0042-0049 on 2026-08-06.** The
 sentence below describes the replay only. It does NOT describe 0042-0049: one
@@ -791,6 +796,25 @@ is still the source of truth and the ordering is unaffected. 0034 and 0035 were 
 happened.
 
 Notes:
+- **0056-0058 (task 2.2's three) are not present as files in THIS worktree.**
+  Every Wave 2 task works against the same live project through its own
+  isolated git worktree, so a migration another task applies live reaches
+  this worktree's `supabase/migrations/` only once the branches merge - the
+  live ledger (confirmed via `list_migrations` on 2026-08-06) is ahead of
+  what this checkout can see. Recorded as three ledger rows with no
+  filename rather than silently omitted, so the table stays an honest map of
+  what is actually live rather than implying only four migrations exist
+  between 0055 and 0059.
+- **Two migrations both applied live as `0058_...`.** Task 2.5's
+  `job_alert_state` table (authored as `0058_job_health_alerts.sql`) and task
+  2.2's deployment correction (`0058_balance_check_deployment_correction`)
+  were authored concurrently in separate checkouts and both took file number
+  0058. Both are applied live, at distinct timestamps, in the order shown
+  above; only the FIRST one's filename was renamed (to `0059`, body
+  byte-identical to what ran) so a merged file set has a defined replay
+  order. See `supabase/migrations/0059_job_health_alerts.sql`'s own top note
+  for the full account - the same drift-gets-written-down rule 0011b and the
+  0042/0047 incident both established.
 - **0020 makes `receipts` a Realtime table.** Before it, the `supabase_realtime`
   publication contained only `reward_claims` (added by 0014), so
   `postgres_changes` subscriptions on `receipts` subscribed cleanly and then
