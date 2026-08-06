@@ -128,7 +128,7 @@ Twenty-three suites, one per domain (review fix, task 2.1: the prior count of "N
 | `receipt_escalation_smoke.sql` | `receipts.escalated_at` (0036), 12 assertions, deliberately scoped to what only the DATABASE can answer (the guards deciding whether an escalation may happen at all - submitter check, cap, excluded fraud family, once-per-receipt - are code, owned by `escalate.test.ts`): THE COLLISION IS REAL - `receipts_number_unique` (0017) covers `('approved','review','processing')` and excludes `'rejected'`, so moving a rejected receipt back into `'review'` collides with any live row already claiming its number, and this is the single most important assertion in the file, proof the pre-check and the 23505 catch in `escalate.ts` are load-bearing rather than defensive decoration; the write fence is unchanged (a consumer still cannot UPDATE `receipts`); the read grant reaches the consumer (the column grant + `receipts_consumer_select`, since the escalation is once per receipt forever and the consumer's own screen must be able to see it happened); and 0035's routing breakdown attributes an escalation to its own reason rather than crediting whatever rejected the receipt first |
 | `rpc_campaign_budget_guard_smoke.sql` | the campaign budget race guard in `award_receipt_points` (0040/0041, task 1.2 + review fix C1), 34 assertions: CORRECT PER-CAMPAIGN ATTRIBUTION from each earn row's own `rule_snapshot` entries - never a naive `sum(points) where campaign_id = X`, which is wrong in both directions the moment a campaign stacks as a non-primary contributor (review C1); `max_total_points` as a running cap shared across every consumer, closed race-safely by locking the campaigns row before re-checking the total (the same cross-consumer race 0015 hardened for `claim_reward`); `per_customer_limit` armed at award time on its own, not only when `max_total_points` is also set (review I1); a budget with room for exactly one more contribution and two sequential awards - the second raises `CAMPAIGN_BUDGET_RACE`, and a corrected retry (the value `award.ts`'s own recovery sends) succeeds; a clawed-back contribution stops counting against the budget; a vanished/unknown campaign id in the array is skipped, not fatal; and omitting `p_campaign_budget_checks` entirely (every caller before task 1.2) enforces nothing, byte-identical to 0038's prior behaviour |
 | `rpc_points_expiry_smoke.sql` | Task 1.3 points expiry enforcement (0042-0048, both review-fix passes), 67 assertions: doc 35 section 7's FIFO remainder formula ordered by EXPIRY not creation (I1) - a partially-consumed lot, a later untouched lot, a lot fully drained to 0, a clawback-only consumption, and the counter-example where a never-expiring `adjust` must be drained LAST rather than first (a null expiry sorting as `+∞`, not first); the aggregate at two `asof` values and the public wrapper agreeing with it; `public.points_next_expiry` correctly excluding an already-past-due lot; `public.expire_points` (the sweep) - SELF-CLEARING proven with a small `p_limit` (I2: a third pair is reached only once the first two clear a slot, not starved forever), the right `expire` row with the restored `x_expired_sum`/`d_drained_sum` audit fields (I5), the cached balance equal to the ledger sum, nothing for a zero-balance pair, a backfilled-already-past-due lot swept correctly (M5), and idempotency across every pair including the self-clearing trio; `public.points_expiry_warn` (the warn job) using the PROJECTED remainder at both horizons rather than the soonest lot (original I3: a shadowed larger lot fires its own combined total on the first run), ordered by URGENCY - soonest in-window expiry, not UUID - so a p_limit of 1 notifies a 2-days-out pair over a UUID-earlier 25-days-out one (re-review N2), deduped on the WINDOW-STABLE soonest-lot date rather than the moving projected figure, proven by literally aging the ledger between runs to simulate a day passing: a growing aggregate (300->500) produces no duplicate, only a genuine change of the soonest lot does (re-review N3), the restored date in both the copy ("expire by...") and the `data.expires_on` payload (re-review N4), the in_app/email channel split, a backfilled-already-past-due lot never warned (M5), and idempotency; both `cron.job` rows with their exact schedule and command; the append-only fence's one permanent exception (now correctly homed in 0047, not rewriting 0042's history) proven both ways (I4: the null-to-value transition succeeds and lands, every other column and every other `expires_at` transition and DELETE still raise), with its column allowlist pinned exactly (re-review N7); and the full I-A grant matrix including `public.points_expirable_remainder`, missed by the first pass (C1) |
-| `rpc_campaigns_sweep_smoke.sql` | Task 2.1 `campaigns.sweep` (0053, review-fixed by 0054), 31 assertions: doc 34's T3 (`scheduled -> active` at `starts_at`) and T7 (`active|paused -> ended` at `ends_at`) as ONE `public.sweep_campaigns` function with two independent candidate scans; a due scheduled campaign on an ACTIVE business activates with a `campaign.activated` audit row (`actor_kind='system'`, `after.trigger='sweep'` - the app's own vocabulary from `src/features/campaigns/server/audit.ts`, never a parallel verb); a not-yet-due scheduled campaign and both an already-`ended` and an already-`archived` campaign are left completely untouched with no audit row; an `active` campaign AND a `paused` campaign both past `ends_at` are ended with `campaign.ended` recording the correct source status in `before`, PROVEN AGAIN on a business the T3 skip case has already made suspended (T7 is unconditional and a fixture now pins that rather than leaving it asserted only by construction); G1 (business standing) gates T3 alone - a due scheduled campaign on a SUSPENDED business is SKIPPED (stays `scheduled`, no audit row, no error) and then genuinely activates once the business is set back to `active`, proving the skip re-checks live standing rather than caching a verdict; GENUINE SELF-CLEARING under a TIGHT `p_limit=1` (0054 review fix I1/I2, the actual 0045-shaped bug 0053 shipped with: a `p_limit=200`/8-fixture "second run is 0" check cannot distinguish "left candidacy" from "still occupying a slot doing no work" the way a small-limit starvation probe can - a permanently-ineligible `'closed'`-business campaign sorted first by `starts_at` no longer starves a later, gate-passing one out of the budget); the widened `campaigns_active_window_idx` (now covering `paused`, which 0012's original predicate excluded); the `cron.job` row's exact schedule (`*/5 * * * *`) and command; no `points_transactions` row written by any of it; and the service_role-only grant |
+| `rpc_campaigns_sweep_smoke.sql` | Task 2.1 `campaigns.sweep` (0053, review-fixed twice by 0054 and 0055), 33 assertions: doc 34's T3 (`scheduled -> active` at `starts_at`) and T7 (`active|paused -> ended` at `ends_at`) as ONE `public.sweep_campaigns` function with two independent candidate scans; a due scheduled campaign on an ACTIVE business activates with a `campaign.activated` audit row (`actor_kind='system'`, `after.trigger='sweep'` - the app's own vocabulary from `src/features/campaigns/server/audit.ts`, never a parallel verb); a not-yet-due scheduled campaign and both an already-`ended` and an already-`archived` campaign are left completely untouched with no audit row; an `active` campaign AND a `paused` campaign both past `ends_at` are ended with `campaign.ended` recording the correct source status in `before`, PROVEN AGAIN on a business the T3 skip case has already made suspended (T7 is unconditional and a fixture now pins that rather than leaving it asserted only by construction); G1 (business standing) gates T3 alone - a due scheduled campaign on a SUSPENDED business is SKIPPED (stays `scheduled`, no audit row, no error) and then genuinely activates once the business is set back to `active`, proving the skip re-checks live standing rather than caching a verdict; GENUINE SELF-CLEARING under a TIGHT `p_limit=1` (0054 review fix I1/I2, the actual 0045-shaped bug 0053 shipped with: a `p_limit=200`/8-fixture "second run is 0" check cannot distinguish "left candidacy" from "still occupying a slot doing no work" the way a small-limit starvation probe can - a permanently-ineligible `'closed'`-business campaign sorted first by `starts_at` no longer starves a later, gate-passing one out of the budget); `private.campaigns_sweep_ineligible_count()` (0055 review fix I1: 0054's own I1+I3 interaction silently dropped skip visibility to zero for the ordinary case) returning exactly the one due-but-ineligible campaign in play, fully revoked from every role including `service_role`; the widened `campaigns_active_window_idx` (now covering `paused`, which 0012's original predicate excluded); the `cron.job` row's exact schedule (`*/5 * * * *`) and command; no `points_transactions` row written by any of it; and the service_role-only grant |
 
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
@@ -307,7 +307,7 @@ The wallet's own "what expires when" line (`public.points_next_expiry`) reads
 the identical formula, so the number a consumer sees is the number the sweep
 will eventually take.
 
-### Campaign sweep (0053-0054, task 2.1 + review-fix pass)
+### Campaign sweep (0053-0055, task 2.1 + two review-fix passes)
 
 `public.sweep_campaigns` closes doc 34's two time-driven lifecycle
 transitions that had nothing firing them (`service.ts`'s
@@ -366,29 +366,68 @@ with a permanently-ineligible campaign engineered to sort FIRST - it starved
 the gate-passing campaign behind it before the I1 fix, and no longer does
 after.
 
-**Review fix I3 - `raise notice` reached nobody.** NOTICE sits below
+**Review fix I3 (0054) - `raise notice` reached nobody.** NOTICE sits below
 Postgres's default `log_min_messages = warning`, so the skip message was
 never written to the server log, and pg_cron's `cron.job_run_details`
 records only the run's completion status and (on failure) its error
-string - never a NOTICE from a successful run. Changed to `raise warning`,
-readable via `mcp__supabase__get_logs` / the dashboard's Postgres logs.
+string - never a NOTICE from a successful run. Changed to `raise warning`.
 
-Noted, not fixed (architectural, predates this sweep): a `scheduled`
-campaign whose `ends_at` has ALSO already passed, on a business that never
-returns to `'active'`, is a permanent dead end - T7 only ever scans `status
-in ('active','paused')`, and doc 34's edge set has no `scheduled -> ended`
-transition at all. Such a row sits `scheduled` with a stale `ends_at` until
-a human unschedules it.
+**Review fix I1 (0055) - I1 and I3 (both 0054) interacted, and 0054 shipped
+without noticing.** Moving the business-standing check into the WHERE
+clause (I1) and raising the skip message's severity (I3) happened in the
+SAME migration, and together they cancelled each other's purpose: once T3's
+scan itself excludes an ineligible row, the loop body - and its
+`raise warning` - never runs for it at all. For the ORDINARY case (a due
+campaign on a suspended/closed business) skip visibility went from "a
+NOTICE nobody can read" to nothing whatsoever; the per-row warning now fires
+only inside the sub-millisecond race window between the `exists()` snapshot
+and the row's lock. 0054's own header and an earlier version of this section
+both claimed skips were "readable via `mcp__supabase__get_logs` / the
+dashboard's Postgres logs" - never true for the ordinary case even at 0054,
+and corrected here. **Fixed** with ONE `raise warning` per run carrying a
+COUNT of due-but-ineligible scheduled campaigns, from
+`private.campaigns_sweep_ineligible_count()` - a small, directly-testable
+`stable` SQL helper (revoked from every role including `service_role`,
+0045's own precedent), computed independently of `p_limit` and the
+transition budget so the number is honest regardless of backlog size or how
+tightly `p_limit` is set. The in-loop per-row warning from 0054 is kept for
+the race window it genuinely covers.
+
+Noted, not fixed (architectural, predates this sweep) - and less permanent
+than first described: a `scheduled` campaign whose `ends_at` has ALSO
+already passed, on a business that is not currently `'active'`, cannot be
+resolved today (T7 only ever scans `status in ('active','paused')`, and doc
+34's edge set has no `scheduled -> ended` transition at all), so it sits
+`scheduled` with a stale `ends_at`. But it is SELF-RESOLVING the moment the
+business returns to `'active'`: the next `sweep_campaigns()` call activates
+it in the T3 loop, and because that same call's T7 loop runs immediately
+afterward against the freshly-committed state, it finds the row already
+`active` with `ends_at <= now()` and ends it in the SAME call - one
+invocation, a legal `scheduled -> active -> ended` path, both audit rows.
+The dead end is exactly co-extensive with "the business never comes back",
+not a state nothing can ever resolve.
 
 0012's `campaigns_active_window_idx` predated this sweep and only covered
 `status in ('scheduled','active')`; widened here (drop + create, since a
 partial index predicate cannot be altered in place) to include `paused`, so
 the T7 scan's paused half is index-assisted too.
 
-Covered by `rpc_campaigns_sweep_smoke.sql`, 31 assertions (24 original +
-7 added by the review-fix pass: 2 pinning T7 unconditionality on a
+Covered by `rpc_campaigns_sweep_smoke.sql`, 33 assertions (24 original + 7
+added by the first review-fix pass: 2 pinning T7 unconditionality on a
 suspended business, 5 proving the I1/I2 starvation-then-fixed behaviour
-under `p_limit=1`).
+under `p_limit=1`; 2 more added by the second pass, proving
+`private.campaigns_sweep_ineligible_count()`'s value and its full grant
+denial).
+
+**Process note (M2):** 857ab86, during the first review-fix pass, edited
+0053's header COMMENT (outside the `$$` function body) in place to fix a
+misattribution, on the reasoning that `pg_proc.prosrc` was genuinely
+unaffected. Flagged in review as still wrong to do: this repo treats "never
+edit an applied migration in place" as absolute, precisely because "it's
+only a comment" is how the 0047 incident below began. No revert was needed
+(0053's header reads correctly after that edit), but every correction to
+0053 or 0054 from here on goes in a companion migration - 0055 is that
+migration for 0054's own I1/I3 interaction.
 
 ### What the receipts sweep does and does not do
 
@@ -609,6 +648,13 @@ outcome is visible; the push is owed to the notifications slice.
   unsurprising, since `create or replace function` on the same signature
   keeps the same grants and the same `search_path = ''` pin 0053 already
   carried.
+- Migration 0055 (task 2.1 second review-fix pass: the aggregate skip
+  warning and the new `private.campaigns_sweep_ineligible_count()` helper)
+  added no new advisor of any level. Verified live on 2026-08-06: still 0
+  ERROR, same WARN set. The new private helper is plain (not `SECURITY
+  DEFINER`) and revoked from every role including `service_role`, so it
+  never appears in the definer-callable warnings at all; `sweep_campaigns`
+  itself keeps its `service_role`-only grant across the `create or replace`.
 
 ### `cancel_claim` (0050-0051, task 1.4 + review-fix pass)
 
@@ -729,6 +775,7 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0052_definer_service_role_hygiene.sql | 20260806082050 | 0052_definer_service_role_hygiene |
 | 0053_campaigns_sweep.sql | 20260806084550 | 0053_campaigns_sweep |
 | 0054_campaigns_sweep_review_fixes.sql | 20260806091451 | 0054_campaigns_sweep_review_fixes |
+| 0055_campaigns_sweep_skip_visibility.sql | 20260806093311 | 0055_campaigns_sweep_skip_visibility |
 
 **Rows 0001-0035 are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`; rows 0036-0049 were applied later, and 0042-0049 on 2026-08-06.** The
 sentence below describes the replay only. It does NOT describe 0042-0049: one

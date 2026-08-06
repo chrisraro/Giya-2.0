@@ -20,16 +20,19 @@
 -- same instant the function itself will read.
 --
 -- Runs entirely inside one transaction and rolls back. Execute as a
--- privileged role (postgres) against a database with migrations 0001-0054
--- applied (0054 is the review-fix pass: I1's self-clearing WHERE clause and
--- I3's raise warning, both proven below).
+-- privileged role (postgres) against a database with migrations 0001-0055
+-- applied. 0054 is the first review-fix pass (I1's self-clearing WHERE
+-- clause, I3's raise warning); 0055 is the second (I1+I3's interaction
+-- silently dropped skip visibility to zero for the ordinary case, fixed
+-- with a separately-testable ineligible-count primitive) - both proven
+-- below.
 -- ============================================================================
 
 begin;
 
 set local search_path = public, extensions;
 
-select plan(31);
+select plan(33);
 
 -- ---------------------------------------------------------------- fixtures
 insert into auth.users (id, aud, role, email, raw_user_meta_data)
@@ -267,14 +270,19 @@ select ok(
     where entity_type = 'campaign' and entity_id = current_setting('test.due_suspended')::uuid),
   'no audit row is written for a skipped campaign - nothing happened to it');
 
--- 17. self-clearing: a second run finds nothing new to do. The skipped
--- campaign is still a legitimate candidate (business still suspended) but
--- contributes 0 to the count every time, so this proves the transitioned
--- rows dropped out of candidacy rather than proving the scan is empty.
+-- 17. idempotency, NOT proof of self-clearing on its own (round-1 finding,
+-- restated so this comment stops contradicting the block below it): with
+-- p_limit=200 and this few fixtures, "second run returns 0" cannot tell
+-- apart "nothing left to do" from "a skipped row is still occupying a slot
+-- doing no work" - genuine self-clearing under a tight budget is proven
+-- separately further down. As of 0055, `due_suspended` is not even a
+-- candidate at this point (0054's `exists()` excludes it while its business
+-- stays suspended), so this run's 0 reflects an empty T3/T7 window, not a
+-- skip contributing 0.
 select is(
   public.sweep_campaigns(200)::text,
   '0',
-  'a second run transitions nothing further (self-clearing)');
+  'a second run transitions nothing further (idempotent)');
 
 -- 18-19. reactivating the business un-skips the campaign on the NEXT run -
 -- proving the skip re-checks live standing rather than caching a verdict
@@ -389,11 +397,17 @@ select is(
   'active',
   'the gate-passing campaign activated even though a permanently-ineligible one sorts earlier');
 
--- 22. 'poison' was never touched - still scheduled, business still closed
+-- 22. 'poison' was never touched - still scheduled, business still closed.
+-- (Softened per round-2 review: this status check alone shows "not
+-- activated", not the internal MECHANISM by which that happened - both the
+-- pre- and post-0054 implementations leave a non-eligible row `scheduled`,
+-- so "excluded from candidacy" would claim more than one status read can
+-- prove. The count-based assertions below are what actually distinguish the
+-- two mechanisms.)
 select is(
   (select status from public.campaigns where id = current_setting('test.poison')::uuid),
   'scheduled',
-  'the closed-business campaign is left scheduled - excluded from candidacy, not skipped-and-reselected');
+  'the closed-business campaign is left scheduled (not activated)');
 
 -- 23. the audit row landed for 'good'
 select ok(
@@ -411,6 +425,39 @@ select ok(
   not exists (select 1 from public.audit_logs
     where entity_type = 'campaign' and entity_id = current_setting('test.poison')::uuid),
   'no audit row for the closed-business campaign - it was never a candidate');
+
+-- ------------------------------------------------------- I1 (0055) review fix:
+-- the observability lost when I1 (0054) moved the skip out of the loop body
+-- ------------------------------------------------------------------------
+-- 0054's `exists()` fix made T3's WHERE clause the primary skip mechanism,
+-- which means the in-loop `raise warning` (0054's I3 fix) now fires only
+-- inside the sub-millisecond race window between the scan and the row lock -
+-- for the ORDINARY case (a due campaign on a suspended/closed business,
+-- which is exactly what 'poison' is right now) it never executes at all.
+-- 0055 restores visibility with ONE `raise warning` per run carrying a
+-- COUNT of due-but-ineligible campaigns, computed by a separate, directly
+-- testable primitive (`private.campaigns_sweep_ineligible_count`) that does
+-- not touch p_limit or the transition budget. pgTAP cannot capture a RAISE
+-- statement's text, so what is proven here is the number that statement is
+-- built from - the same principle `rpc_points_expiry_smoke.sql` uses for
+-- `expire_points`'s internal sums (private.points_lot_remainders).
+--
+-- 25. exactly one campaign is due, scheduled, and ineligible right now:
+-- 'poison' (closed business). 'due_suspended' already activated earlier in
+-- this script (its business was reactivated); 'future_scheduled' is not due.
+select is(
+  private.campaigns_sweep_ineligible_count()::text,
+  '1',
+  'private.campaigns_sweep_ineligible_count reports exactly the one due-but-ineligible campaign');
+
+-- 26. private, revoked from every role including service_role (0045's own
+-- precedent for a helper only a definer function - already running as
+-- owner - or a privileged test session ever needs to call directly)
+select ok(
+  not has_function_privilege('anon', 'private.campaigns_sweep_ineligible_count()', 'EXECUTE')
+  and not has_function_privilege('authenticated', 'private.campaigns_sweep_ineligible_count()', 'EXECUTE')
+  and not has_function_privilege('service_role', 'private.campaigns_sweep_ineligible_count()', 'EXECUTE'),
+  'private.campaigns_sweep_ineligible_count is reachable by no client or service role');
 
 -- ------------------------------------------------------------ grants
 select ok(
