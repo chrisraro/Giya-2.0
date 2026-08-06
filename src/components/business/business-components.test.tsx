@@ -19,6 +19,7 @@ describe("Sidebar", () => {
       "Menu",
       "Customers",
       "Rewards",
+      "Staff",
       "Settings",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();

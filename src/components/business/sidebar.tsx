@@ -17,6 +17,7 @@ const NAV_ITEMS = [
   { href: "/business/menu", label: "Menu", icon: "restaurant_menu" },
   { href: "/business/customers", label: "Customers", icon: "group" },
   { href: "/business/rewards", label: "Rewards", icon: "redeem" },
+  { href: "/business/staff", label: "Staff", icon: "group_add" },
   { href: "/business/settings", label: "Settings", icon: "settings" },
 ] as const;
 
