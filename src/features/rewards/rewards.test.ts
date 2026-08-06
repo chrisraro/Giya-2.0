@@ -97,6 +97,7 @@ describe("mapValidateError", () => {
   const cases: Array<[string, string]> = [
     ["FORBIDDEN", "You do not have permission to validate for this business."],
     ["CLAIM_ALREADY_REDEEMED", "This reward was already redeemed."],
+    ["CLAIM_ALREADY_CANCELLED", "This claim was cancelled by the customer."],
     ["CLAIM_INVALID_STATE", "This claim cannot be redeemed right now."],
     ["CLAIM_EXPIRED", "This claim has expired."],
     ["CUSTOMER_BLACKLISTED", "This account cannot redeem rewards at this business."],
@@ -278,6 +279,117 @@ describe("actions.claimReward", () => {
       ok: false,
       message: "This promo has reached its limit.",
       code: "CAMPAIGN_BUDGET_EXHAUSTED",
+    });
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+});
+
+// ------------------------------------------------------------ mapCancelError
+
+describe("mapCancelError", () => {
+  const cases: Array<[string, string]> = [
+    ["FORBIDDEN", "Something went wrong. Please try again."],
+    ["CLAIM_ALREADY_REDEEMED", "This reward was already redeemed, so it can no longer be cancelled."],
+    ["CLAIM_ALREADY_CANCELLED", "This claim was already cancelled."],
+    ["CLAIM_INVALID_STATE", "This claim can't be cancelled right now."],
+    ["UNAUTHENTICATED", "Please sign in to manage your claims."],
+  ];
+
+  it.each(cases)("maps %s to the documented consumer-facing copy", (code, message) => {
+    expect(service.mapCancelError(code)).toEqual({ code, message });
+  });
+
+  it("maps an unrecognized message to a generic UNKNOWN error, never echoing raw text", () => {
+    expect(service.mapCancelError("relation reward_claims does not exist")).toEqual({
+      code: "UNKNOWN",
+      message: "Something went wrong. Please try again.",
+    });
+  });
+});
+
+// -------------------------------------------------------- service.cancelClaim
+
+describe("service.cancelClaim", () => {
+  it("calls the cancel_claim RPC with the claim id and returns ok:true on success", async () => {
+    mocks.rpc.mockResolvedValue({ data: null, error: null });
+
+    const result = await service.cancelClaim(CLAIM_ID);
+
+    expect(mocks.rpc).toHaveBeenCalledWith("cancel_claim", { p_claim_id: CLAIM_ID });
+    expect(result).toEqual({ ok: true, data: { claimId: CLAIM_ID } });
+  });
+
+  it("maps a CLAIM_ALREADY_CANCELLED RPC error to the friendly message", async () => {
+    mocks.rpc.mockResolvedValue({ data: null, error: { message: "CLAIM_ALREADY_CANCELLED" } });
+
+    const result = await service.cancelClaim(CLAIM_ID);
+
+    expect(result).toEqual({
+      ok: false,
+      message: "This claim was already cancelled.",
+      code: "CLAIM_ALREADY_CANCELLED",
+    });
+  });
+
+  it("maps a CLAIM_ALREADY_REDEEMED RPC error to the friendly message", async () => {
+    mocks.rpc.mockResolvedValue({ data: null, error: { message: "CLAIM_ALREADY_REDEEMED" } });
+
+    const result = await service.cancelClaim(CLAIM_ID);
+
+    expect(result).toEqual({
+      ok: false,
+      message: "This reward was already redeemed, so it can no longer be cancelled.",
+      code: "CLAIM_ALREADY_REDEEMED",
+    });
+  });
+});
+
+// -------------------------------------------------------------- actions: cancelClaim
+
+describe("actions.cancelClaim: auth and validation gating", () => {
+  it("returns ok:false and never calls the RPC when unauthenticated", async () => {
+    mockUnauthenticated();
+
+    const result = await actions.cancelClaim({ claimId: CLAIM_ID });
+
+    expect(result).toEqual({
+      ok: false,
+      message: "Please sign in to claim rewards.",
+      code: "UNAUTHENTICATED",
+    });
+    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("returns ok:false and never calls the RPC when claimId is not a uuid", async () => {
+    const result = await actions.cancelClaim({ claimId: "not-a-uuid" });
+
+    expect(result.ok).toBe(false);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+});
+
+describe("actions.cancelClaim", () => {
+  it("returns ok:true and revalidates /rewards and /wallet on success", async () => {
+    mocks.rpc.mockResolvedValue({ data: null, error: null });
+
+    const result = await actions.cancelClaim({ claimId: CLAIM_ID });
+
+    expect(result).toEqual({ ok: true, data: { claimId: CLAIM_ID } });
+    expect(revalidatePath).toHaveBeenCalledWith("/rewards");
+    expect(revalidatePath).toHaveBeenCalledWith("/wallet");
+    expect(revalidatePath).toHaveBeenCalledWith(`/rewards/claims/${CLAIM_ID}`);
+  });
+
+  it("returns ok:false with the mapped message and does not revalidate when the RPC errors", async () => {
+    mocks.rpc.mockResolvedValue({ data: null, error: { message: "CLAIM_ALREADY_CANCELLED" } });
+
+    const result = await actions.cancelClaim({ claimId: CLAIM_ID });
+
+    expect(result).toEqual({
+      ok: false,
+      message: "This claim was already cancelled.",
+      code: "CLAIM_ALREADY_CANCELLED",
     });
     expect(revalidatePath).not.toHaveBeenCalled();
   });

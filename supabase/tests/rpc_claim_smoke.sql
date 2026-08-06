@@ -20,7 +20,7 @@ begin;
 
 set local search_path = public, extensions;
 
-select plan(51);
+select plan(73);
 
 -- ---------------------------------------------------------------- fixtures
 -- Six fixed test users: two business owners, one consumer with a balance,
@@ -692,6 +692,260 @@ select is(
     where id = current_setting('test.r_capfull')::uuid),
   'expired/5',
   'reward already at remaining = total_inventory is not incremented past the cap');
+
+-- ---------------------------------------------------------------- cancel_claim (0050)
+-- State entering this section for the pair (biz1, consumer a3): balance 470,
+-- r_main.remaining 49 (restored by the sweep above), claim1 status
+-- 'redeemed', claim_free status 'claimed' with points_spent 0.
+--
+-- A fresh paid, still-claimed fixture to cancel: mirrors the claim_paid
+-- fixture's shape above (claim row, then the redeem ledger row carrying
+-- claim_id, then link points_txn_id back), but left in 'claimed' with an
+-- expiry far in the future so nothing here becomes a sweep candidate.
+-- a dedicated reward for the race fixture below (test 66-68): every existing
+-- reward's per_customer_limit or campaign budget is already exhausted or
+-- occupied by this point in the suite (r_free alone already carries TWO
+-- non-cancelled claims of its own - claim_free, redeemed at test 33, and
+-- claim_future, still 'claimed' from the expiry-sweep fixtures above - which
+-- is already its own per_customer_limit of 2), so reusing any of them would
+-- raise a limit/budget error unrelated to what this section tests.
+with ins as (
+  insert into public.rewards
+    (business_id, campaign_id, name, points_cost, total_inventory, remaining,
+     per_customer_limit, claim_expiry_days)
+  values
+    (current_setting('test.biz1')::uuid, current_setting('test.camp1')::uuid,
+     'Race Fixture Reward', 0, null, null, 5, 30)
+  returning id
+)
+select set_config('test.r_race', (select id::text from ins), true);
+
+with ins as (
+  insert into public.reward_claims
+    (business_id, reward_id, consumer_id, status, points_spent, expires_at)
+  values
+    (current_setting('test.biz1')::uuid, current_setting('test.r_main')::uuid,
+     'a3333333-3333-4333-8333-333333333333', 'claimed', 50,
+     now() + interval '10 days')
+  returning id
+)
+select set_config('test.claim_cancel', (select id::text from ins), true);
+
+with ins as (
+  insert into public.points_transactions
+    (business_id, consumer_id, type, points, balance_after, claim_id, campaign_id)
+  values
+    (current_setting('test.biz1')::uuid,
+     'a3333333-3333-4333-8333-333333333333', 'redeem', -50, 420,
+     current_setting('test.claim_cancel')::uuid, current_setting('test.camp1')::uuid)
+  returning id
+)
+select set_config('test.txn_cancel', (select id::text from ins), true);
+
+update public.reward_claims
+   set points_txn_id = current_setting('test.txn_cancel')::uuid
+ where id = current_setting('test.claim_cancel')::uuid;
+update public.business_customers
+   set points_balance = 420
+ where business_id = current_setting('test.biz1')::uuid
+   and consumer_id = 'a3333333-3333-4333-8333-333333333333';
+update public.rewards
+   set remaining = remaining - 1              -- 49 -> 48, as claim_reward would have
+ where id = current_setting('test.r_main')::uuid;
+
+-- 52. someone else entirely (owner2, not staff of tenant1 and not this
+--     claim's consumer) cannot cancel it
+select set_config('request.jwt.claims',
+  '{"sub": "a2222222-2222-4222-8222-222222222222", "role": "authenticated"}', true);
+set local role authenticated;
+select throws_ok(
+  $$select public.cancel_claim(current_setting('test.claim_cancel')::uuid)$$,
+  'P0001', 'FORBIDDEN',
+  'cancel_claim by someone other than the claim owner raises FORBIDDEN');
+reset role;
+
+-- 53. the claim owner cancels it
+select set_config('request.jwt.claims',
+  '{"sub": "a3333333-3333-4333-8333-333333333333", "role": "authenticated"}', true);
+set local role authenticated;
+select lives_ok(
+  $$select public.cancel_claim(current_setting('test.claim_cancel')::uuid)$$,
+  'consumer cancels their own claimed, unredeemed claim');
+reset role;
+
+-- 54. the claim row: status cancelled, cancelled_reason set, updated_by the consumer
+select is(
+  (select status || '/' || coalesce(cancelled_reason, '') || '/'
+       || (updated_by = 'a3333333-3333-4333-8333-333333333333')::text
+     from public.reward_claims where id = current_setting('test.claim_cancel')::uuid),
+  'cancelled/consumer_cancelled/true',
+  'cancelled claim row: status cancelled, cancelled_reason consumer_cancelled, updated_by the consumer');
+
+-- 55. EXACTLY ONE reversal ledger row exists for this claim
+select is(
+  (select count(*)::int from public.points_transactions
+    where claim_id = current_setting('test.claim_cancel')::uuid
+      and type = 'reversal'),
+  1,
+  'cancel wrote exactly one reversal ledger row for the claim');
+
+-- 56. the reversal carries points = +points_spent and balance_after = 420+50
+select is(
+  (select points::text || '/' || balance_after::text from public.points_transactions
+    where claim_id = current_setting('test.claim_cancel')::uuid
+      and type = 'reversal'),
+  '50/470',
+  'reversal row has points +50 and balance_after 470 (prev 420 + refund 50)');
+
+-- 57. reverses_id points at the original redeem txn; campaign_id carried over
+select is(
+  (select (reverses_id = current_setting('test.txn_cancel')::uuid)::text || '/'
+       || (campaign_id = current_setting('test.camp1')::uuid)::text
+     from public.points_transactions
+    where claim_id = current_setting('test.claim_cancel')::uuid
+      and type = 'reversal'),
+  'true/true',
+  'reversal reverses_id is the original redeem txn and campaign_id is carried from it');
+
+-- 58. the pair balance is restored immediately
+select is(
+  (select points_balance from public.business_customers
+    where business_id = current_setting('test.biz1')::uuid
+      and consumer_id = 'a3333333-3333-4333-8333-333333333333'),
+  470,
+  'points_balance restored to 470 immediately by cancel_claim');
+
+-- 59. inventory restored: the fixture decrement 49 -> 48 is undone, 48 -> 49
+select is(
+  (select remaining from public.rewards where id = current_setting('test.r_main')::uuid),
+  49,
+  'cancel_claim incremented rewards.remaining by 1 (48 -> 49)');
+
+-- 60. idempotent: a second cancel of the same claim is refused
+select set_config('request.jwt.claims',
+  '{"sub": "a3333333-3333-4333-8333-333333333333", "role": "authenticated"}', true);
+set local role authenticated;
+select throws_ok(
+  $$select public.cancel_claim(current_setting('test.claim_cancel')::uuid)$$,
+  'P0001', 'CLAIM_ALREADY_CANCELLED',
+  'a second cancel_claim of the same claim raises CLAIM_ALREADY_CANCELLED');
+reset role;
+
+-- 61. and it did not double-refund
+select is(
+  (select points_balance from public.business_customers
+    where business_id = current_setting('test.biz1')::uuid
+      and consumer_id = 'a3333333-3333-4333-8333-333333333333'),
+  470,
+  'the refused second cancel did not double-refund (balance still 470)');
+
+-- 62. still exactly one reversal row for the claim
+select is(
+  (select count(*)::int from public.points_transactions
+    where claim_id = current_setting('test.claim_cancel')::uuid
+      and type = 'reversal'),
+  1,
+  'still exactly one reversal row after the refused second cancel');
+
+-- 63. cancelling an already-redeemed claim is refused (claim1, redeemed earlier
+--     in this suite by validate_redemption)
+select set_config('request.jwt.claims',
+  '{"sub": "a3333333-3333-4333-8333-333333333333", "role": "authenticated"}', true);
+set local role authenticated;
+select throws_ok(
+  $$select public.cancel_claim(current_setting('test.claim1')::uuid)$$,
+  'P0001', 'CLAIM_ALREADY_REDEEMED',
+  'cancel_claim of an already-redeemed claim raises CLAIM_ALREADY_REDEEMED');
+reset role;
+
+-- 64-65. expire_claims must not later double-reverse a cancelled claim: a
+-- fresh sweep run finds no new candidates (cancelled is not 'claimed') and
+-- the cancelled claim's own status is left exactly as cancel_claim left it.
+select is(
+  public.expire_claims(),
+  0,
+  'expire_claims() run after the cancel finds no candidates (cancelled claims are never selected)');
+
+select is(
+  (select status from public.reward_claims where id = current_setting('test.claim_cancel')::uuid),
+  'cancelled',
+  'the cancelled claim is untouched by expire_claims (still cancelled, not expired)');
+
+-- ---- redeem-vs-cancel race, the other direction (sequential simulation) ----
+-- 63 above already covers "cancel loses to a prior redeem" (claim1).  This
+-- covers "a staff redemption loses to a prior cancel": the consumer cancels
+-- first, then a staff scan of the same claim must see CLAIM_ALREADY_CANCELLED
+-- rather than the generic CLAIM_INVALID_STATE it fell into before 0050.
+select set_config('request.jwt.claims',
+  '{"sub": "a3333333-3333-4333-8333-333333333333", "role": "authenticated"}', true);
+set local role authenticated;
+
+-- 66. consumer claims the dedicated race-fixture reward
+select lives_ok(
+  $$select public.claim_reward(current_setting('test.r_race')::uuid)$$,
+  'consumer claims the race-fixture reward');
+
+reset role;
+
+select set_config('test.claim_race',
+  (select id::text from public.reward_claims
+    where reward_id = current_setting('test.r_race')::uuid
+      and consumer_id = 'a3333333-3333-4333-8333-333333333333'), true);
+
+select set_config('request.jwt.claims',
+  '{"sub": "a3333333-3333-4333-8333-333333333333", "role": "authenticated"}', true);
+set local role authenticated;
+
+-- 67. the consumer cancels it first
+select lives_ok(
+  $$select public.cancel_claim(current_setting('test.claim_race')::uuid)$$,
+  'consumer cancels the race-fixture claim before staff can scan it');
+reset role;
+
+-- 68. the staff scan that would have redeemed it now sees the cancellation,
+--     by name, not the generic CLAIM_INVALID_STATE
+select set_config('request.jwt.claims',
+  '{"sub": "a1111111-1111-4111-8111-111111111111", "role": "authenticated"}', true);
+set local role authenticated;
+select throws_ok(
+  $$select public.validate_redemption(current_setting('test.claim_race')::uuid, 'jti-race-1')$$,
+  'P0001', 'CLAIM_ALREADY_CANCELLED',
+  'validate_redemption of a claim the consumer already cancelled raises CLAIM_ALREADY_CANCELLED');
+reset role;
+
+-- ---------------------------------------------------------------- grants (0050)
+-- 69. consumer-facing, matching claim_reward's own grant shape: anon may not
+--     call it, authenticated may (the row lock + ownership check inside the
+--     function scope WHICH claim, not who may attempt)
+select ok(
+  not has_function_privilege('anon', 'public.cancel_claim(uuid)', 'EXECUTE'),
+  'anon cannot execute cancel_claim');
+
+select ok(
+  has_function_privilege('authenticated', 'public.cancel_claim(uuid)', 'EXECUTE'),
+  'authenticated can execute cancel_claim');
+
+-- 70. the shared reversal helper is reachable only from inside a definer
+--     context that already holds the right locks - denied to every role,
+--     including service_role, mirroring 0038/0041's private helpers
+select ok(
+  not has_function_privilege('anon',
+        'private.reverse_claim_ledger(uuid, uuid, uuid, uuid, integer, uuid, integer, uuid)', 'EXECUTE')
+  and not has_function_privilege('authenticated',
+        'private.reverse_claim_ledger(uuid, uuid, uuid, uuid, integer, uuid, integer, uuid)', 'EXECUTE')
+  and not has_function_privilege('service_role',
+        'private.reverse_claim_ledger(uuid, uuid, uuid, uuid, integer, uuid, integer, uuid)', 'EXECUTE'),
+  'private.reverse_claim_ledger is denied to anon, authenticated and service_role');
+
+-- 71-72. validate_redemption's grants, pinned for the first time (0050
+-- re-created it; it was previously unpinned - see supabase/README.md)
+select ok(
+  not has_function_privilege('anon', 'public.validate_redemption(uuid, text, text)', 'EXECUTE'),
+  'anon cannot execute validate_redemption');
+
+select ok(
+  has_function_privilege('authenticated', 'public.validate_redemption(uuid, text, text)', 'EXECUTE'),
+  'authenticated (staff) can execute validate_redemption');
 
 select * from finish();
 

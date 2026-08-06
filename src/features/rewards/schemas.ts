@@ -13,6 +13,16 @@ export const claimRewardInputSchema = z.object({
 });
 export type ClaimRewardActionInput = z.infer<typeof claimRewardInputSchema>;
 
+// ----------------------------------------------------------- cancel action
+
+// supabase/migrations/0050_cancel_claim.sql's cancel_claim RPC takes only
+// the claim id: the RPC itself resolves ownership from auth.uid() against
+// the locked claim row, so no other input ever crosses this boundary.
+export const cancelClaimInputSchema = z.object({
+  claimId: idSchema,
+});
+export type CancelClaimActionInput = z.infer<typeof cancelClaimInputSchema>;
+
 // -------------------------------------------------------- validate route
 
 // supabase/migrations/0013_reward_claim_rpcs.sql's validate_redemption RPC

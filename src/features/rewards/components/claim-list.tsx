@@ -5,6 +5,7 @@ import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/consumer/empty-state";
 import { cn } from "@/lib/utils";
 
+import { CancelClaimButton } from "./cancel-claim-button";
 import type { MyClaimDTO } from "../types";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -130,6 +131,21 @@ export function ClaimList({ claims, now = new Date() }: ClaimListProps) {
               >
                 Show QR
               </Link>
+            ) : null}
+
+            {/* Task 1.4: cancel affordance, only for a still-unredeemed
+                claim - never on redeemed/expired/cancelled rows. Shown
+                regardless of expiresAt (unlike showQr above): a claim past
+                its deadline but not yet swept is still status='claimed',
+                and cancelling gets the consumer their points back
+                immediately rather than making them wait for the hourly
+                sweep. */}
+            {claim.status === "claimed" ? (
+              <CancelClaimButton
+                claimId={claim.claimId}
+                pointsSpent={claim.pointsSpent}
+                className="self-start"
+              />
             ) : null}
           </Card>
         );

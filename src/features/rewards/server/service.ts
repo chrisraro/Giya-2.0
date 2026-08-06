@@ -77,6 +77,7 @@ const GENERIC_VALIDATE_ERROR = "Something went wrong. Please try again.";
 const VALIDATE_ERROR_COPY: Record<string, string> = {
   FORBIDDEN: "You do not have permission to validate for this business.",
   CLAIM_ALREADY_REDEEMED: "This reward was already redeemed.",
+  CLAIM_ALREADY_CANCELLED: "This claim was cancelled by the customer.",
   CLAIM_INVALID_STATE: "This claim cannot be redeemed right now.",
   CLAIM_EXPIRED: "This claim has expired.",
   CUSTOMER_BLACKLISTED: "This account cannot redeem rewards at this business.",
@@ -166,4 +167,59 @@ export async function validateRedemption(
       redeemedAt: data.redeemed_at,
     },
   };
+}
+
+// ---------------------------------------------------------------- cancelClaim
+
+const GENERIC_CANCEL_ERROR = "Something went wrong. Please try again.";
+
+// Keyed by the exact P0001 message strings cancel_claim (0050) raises, plus
+// the 42501 UNAUTHENTICATED case (actions.ts already answers this before the
+// RPC is ever called; kept here defensively, matching claimReward's own
+// posture). FORBIDDEN maps to the generic message rather than a specific
+// one: it only ever fires for "not found" or "not your claim" (doc 13: the
+// two cases share one message so probing ids is not an existence oracle),
+// and a consumer-facing UI never lets a signed-in user reach this action for
+// a claim that isn't in their own claims list to begin with.
+const CANCEL_ERROR_COPY: Record<string, string> = {
+  FORBIDDEN: GENERIC_CANCEL_ERROR,
+  CLAIM_ALREADY_REDEEMED: "This reward was already redeemed, so it can no longer be cancelled.",
+  CLAIM_ALREADY_CANCELLED: "This claim was already cancelled.",
+  CLAIM_INVALID_STATE: "This claim can't be cancelled right now.",
+  UNAUTHENTICATED: "Please sign in to manage your claims.",
+};
+
+/**
+ * Maps a cancel_claim RPC error message to a consumer-safe { code, message }
+ * pair, mirroring mapClaimError's shape exactly.
+ */
+export function mapCancelError(message: string): { code: string; message: string } {
+  const copy = CANCEL_ERROR_COPY[message];
+  if (copy !== undefined) return { code: message, message: copy };
+  return { code: "UNKNOWN", message: GENERIC_CANCEL_ERROR };
+}
+
+export interface CancelClaimData {
+  claimId: string;
+}
+
+/**
+ * Cancels the signed-in consumer's own unredeemed claim via the cancel_claim
+ * RPC (0050, SECURITY DEFINER). Every guard - ownership, claim status, the
+ * race against a concurrent staff redemption - and the ledger reversal
+ * (identical shape to expire_claims's single-claim reversal, via the shared
+ * private.reverse_claim_ledger helper) live inside that RPC; this function
+ * only calls it and maps the result. Session verification is the caller's
+ * job (actions.ts), matching claimReward's own division of labor.
+ */
+export async function cancelClaim(claimId: string): Promise<ActionResult<CancelClaimData>> {
+  const supabase = await createClient();
+  const { error } = await supabase.rpc("cancel_claim", { p_claim_id: claimId });
+
+  if (error) {
+    const mapped = mapCancelError(error.message ?? "");
+    return { ok: false, message: mapped.message, code: mapped.code };
+  }
+
+  return { ok: true, data: { claimId } };
 }

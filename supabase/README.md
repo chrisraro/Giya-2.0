@@ -109,7 +109,7 @@ Fifteen suites, one per domain:
 | `rls_identity_smoke.sql` | identity tables and their policies (0001-0006, 0011) |
 | `rls_catalog_smoke.sql` | catalog tenancy and composite FKs (0007-0010) |
 | `rls_campaigns_smoke.sql` | campaigns, points rules, ledger immutability (0012) |
-| `rpc_claim_smoke.sql` | `claim_reward`, `validate_redemption`, `expire_claims` (0013, 0016) |
+| `rpc_claim_smoke.sql` | `claim_reward`, `validate_redemption`, `expire_claims` (0013, 0016); task 1.4's `cancel_claim` (0050) - happy-path cancel restoring balance/inventory in one reversal row, wrong-owner FORBIDDEN, already-redeemed and already-cancelled refusals (idempotent, no double reversal), `expire_claims` skipping a cancelled claim, the redeem-vs-cancel race in both directions via sequential state simulation (`validate_redemption`'s own new `CLAIM_ALREADY_CANCELLED` branch), and the full grant matrix including the shared `private.reverse_claim_ledger` helper |
 | `rls_receipts_smoke.sql` | receipts evidence fences, column grant, the three unique amendments, the delete and immutability triggers (0017) |
 | `rpc_award_smoke.sql` | `award_receipt_points`: guard order, one earn per receipt, the `balance_after` chain, the Manila-day visit rule (0018); the `fixed_per_visit` VISIT-DAY dedupe and its `FIXED_PER_VISIT_RACE` backstop, keyed on `manila_day(coalesce(receipt_date, created_at))` rather than processing time, including the review-lag/backdated-upload cases and the two I3 cases where a prior earn that was not itself a PAID fixed_per_visit base must not suppress a later one (0037, 0038) |
 | `rls_consumer_fence_smoke.sql` | the `consumers` / `profiles` self-update column fence: legitimate profile and onboarding writes still land, fraud and trust columns raise 42501 (0021) |
@@ -462,6 +462,49 @@ outcome is visible; the push is owed to the notifications slice.
   because EXECUTE on all three is granted to `service_role` only and all three
   pin `search_path = ''`; `private.has_usable_base_rule` is absent for the same
   reason plus a revoke from every role.
+- Migration 0050 (task 1.4: `cancel_claim`, the re-created `expire_claims` and
+  `validate_redemption`, and the shared `private.reverse_claim_ledger`
+  helper) added exactly one new advisor: `public.cancel_claim` is
+  authenticated-callable `SECURITY DEFINER`. Accepted, same category as
+  `claim_reward` and `register_business` above - it is the designed
+  consumer-facing entry point (doc 03 Key Finding 1). Verified live on
+  2026-08-06: still 0 ERROR. `private.reverse_claim_ledger` is absent from
+  the definer-callable warnings because it is plain `SECURITY INVOKER`
+  (called from inside `cancel_claim`/`expire_claims`, which already run as
+  the owner) and is revoked from every role including `service_role`.
+
+### `cancel_claim` (0050, task 1.4)
+
+A consumer can cancel their own unredeemed claim (`reward_claims.status =
+'claimed'`) and get the points back immediately, instead of waiting up to
+`rewards.claim_expiry_days` for the hourly sweep - doc 03's loyalty
+benchmark research (Key Finding 1) names "points debited on intent and never
+returned" as the top complaint driver this closes.
+
+`public.cancel_claim(p_claim_id uuid)` locks the claim row FOR UPDATE first,
+exactly where `validate_redemption` takes its own lock, so a concurrent
+staff redemption and a concurrent consumer cancel of the SAME claim
+serialize on that row and the loser gets a clean typed error
+(`CLAIM_ALREADY_REDEEMED` if a redemption won, `CLAIM_ALREADY_CANCELLED` if
+a cancel won - `validate_redemption` gained this second branch in the same
+migration, ahead of its existing `CLAIM_INVALID_STATE` catch-all). The
+reversal itself - the ledger `reversal` row (only when `points_spent > 0`),
+the `business_customers.points_balance` cache restore, and the
+`rewards.remaining` restore under the `rewards_remaining_lte_total` cap - is
+`private.reverse_claim_ledger`, a plain (non-definer) helper now shared with
+a refactored `expire_claims`, so the on-demand cancel path and the sweep's
+own single-claim reversal cannot drift on what "reverse a claim" means.
+`reward_claims.status`'s `'cancelled'` value and its `cancelled_reason`
+column both predate this migration (provisioned in 0012, never had a
+writer); `cancel_claim` is their first writer, stamping
+`cancelled_reason = 'consumer_cancelled'`.
+
+Granted to `authenticated` (consumer-facing, matching `claim_reward`'s own
+shape), never `anon`. Idempotent: a second cancel of an already-cancelled
+claim raises `CLAIM_ALREADY_CANCELLED` rather than double-reversing, and
+`expire_claims`'s own candidate scan (`status = 'claimed'`) never re-selects
+a cancelled claim, so the sweep cannot double-reverse it either. Covered by
+`rpc_claim_smoke.sql`.
 
 ## Manual dashboard steps (pending)
 
@@ -526,6 +569,7 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0047_points_expiry_append_only_narrow_guard.sql | 20260806054229 | 0047_points_expiry_append_only_narrow_guard |
 | 0048_points_expiry_warn_window_stable_ordering.sql | 20260806054312 | 0048_points_expiry_warn_window_stable_ordering |
 | 0049_points_expiry_warn_honest_deadline.sql | (applied 2026-08-06) | 0049_points_expiry_warn_honest_deadline |
+| 0050_cancel_claim.sql | (applied 2026-08-06) | 0050_cancel_claim |
 
 **Rows 0001-0035 are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`; rows 0036-0049 were applied later, and 0042-0049 on 2026-08-06.** The
 sentence below describes the replay only. It does NOT describe 0042-0049: one

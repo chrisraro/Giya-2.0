@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { createClient } from "@/lib/supabase/client";
 
 import { getClaimStatus } from "../actions";
+import { CancelClaimButton } from "./cancel-claim-button";
 import type { ClaimDetailDTO, RewardClaimRow } from "../types";
 
 export interface RedemptionQrProps {
@@ -295,6 +296,21 @@ export function RedemptionQr({ claim }: RedemptionQrProps) {
 
   const msRemaining = expiresAt !== null ? expiresAt - nowTick : 0;
 
+  // Task 1.4: the cancel affordance on the claim detail screen. Gated on the
+  // ORIGINAL server-loaded status (never redeemed/expired/cancelled reach
+  // this component in a claimed-looking phase to begin with - see
+  // initialPhase) AND the live phase not yet having flipped to "redeemed"
+  // (a concurrent staff scan winning the race while this screen is open) or
+  // "unavailable"/"claim-error" (not actually a live claimed row). Shown
+  // through every other phase - minting, ready, offline, code-expired,
+  // mint-error - because all of those still mean "this claim is claimed and
+  // cancellable", a technical hiccup minting the QR code notwithstanding.
+  const canCancel =
+    claim.status === "claimed" &&
+    phase !== "redeemed" &&
+    phase !== "unavailable" &&
+    phase !== "claim-error";
+
   return (
     <main className="mx-auto flex max-w-md flex-col items-center gap-6 px-4 pt-6 pb-8 text-center">
       <div>
@@ -409,6 +425,10 @@ export function RedemptionQr({ claim }: RedemptionQrProps) {
             Refresh code
           </Button>
         </>
+      ) : null}
+
+      {canCancel ? (
+        <CancelClaimButton claimId={claim.claimId} pointsSpent={claim.pointsSpent} className="mt-2" />
       ) : null}
     </main>
   );

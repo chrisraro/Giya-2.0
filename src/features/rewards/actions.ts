@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { createClient } from "@/lib/supabase/server";
 
-import { claimRewardInputSchema } from "./schemas";
+import { cancelClaimInputSchema, claimRewardInputSchema } from "./schemas";
 import { assertClaimOwner } from "./server/claim-ownership";
 import * as repo from "./server/repo";
 import * as service from "./server/service";
@@ -83,4 +83,37 @@ export async function getClaimStatus(claimId: string): Promise<{ status: string 
   if (!claim || !assertClaimOwner(claim, user.id)) return null;
 
   return { status: claim.status };
+}
+
+/**
+ * Cancels the signed-in consumer's own unredeemed claim (0050 cancel_claim
+ * RPC) and gets their points back immediately - doc 03 Key Finding 1's top
+ * complaint driver: "points debited on intent and never returned". On
+ * success, revalidates /rewards and /wallet (mirrors claimReward - the
+ * catalog's remaining stock and the wallet's restored balance both change),
+ * plus the claim's own detail route so a consumer who cancels from there
+ * sees the claim's new state on refresh rather than a stale one.
+ */
+export async function cancelClaim(
+  input: unknown,
+): Promise<ActionResult<{ claimId: string }>> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) return NOT_SIGNED_IN;
+
+  const parsed = cancelClaimInputSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, message: firstIssueMessage(parsed.error) };
+  }
+
+  const result = await service.cancelClaim(parsed.data.claimId);
+  if (result.ok) {
+    revalidatePath("/rewards");
+    revalidatePath("/wallet");
+    revalidatePath(`/rewards/claims/${parsed.data.claimId}`);
+  }
+  return result;
 }

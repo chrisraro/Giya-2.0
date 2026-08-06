@@ -18,10 +18,18 @@ vi.mock("@/lib/supabase/client", () => ({
 
 // `../actions` (getClaimStatus, the poll fallback) transitively imports
 // `@/lib/supabase/server`, which has the same env-at-import-time issue as
-// `@/lib/supabase/client` above.
+// `@/lib/supabase/client` above. cancelClaim is mocked here too (task 1.4):
+// the cancel affordance's own <CancelClaimButton> imports it directly, the
+// same convention getClaimStatus already uses in this file.
 vi.mock("../actions", () => ({
   getClaimStatus: vi.fn(),
+  cancelClaim: vi.fn(),
 }));
+
+// <CancelClaimButton> uses next/navigation's router.refresh() on a
+// successful cancel; not exercised by the tests in this file (that is
+// cancel-claim-button.test.tsx's job), but the module must still resolve.
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
 
 import { RedemptionQr, formatCountdown, initialPhase, unavailableMessage } from "./redemption-qr";
 import type { ClaimDetailDTO } from "../types";
@@ -145,5 +153,39 @@ describe("RedemptionQr", () => {
 
     expect(screen.getByText("This claim has expired.")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Back to Rewards" })).toHaveAttribute("href", "/rewards");
+  });
+
+  it("never shows a cancel affordance once the claim is redeemed", () => {
+    render(<RedemptionQr claim={baseClaim({ status: "redeemed", redeemedAt: "2026-07-24T00:00:00.000Z" })} />);
+
+    expect(screen.queryByRole("button", { name: "Cancel claim" })).not.toBeInTheDocument();
+  });
+
+  it("never shows a cancel affordance for an expired claim", () => {
+    render(<RedemptionQr claim={baseClaim({ status: "expired" })} />);
+
+    expect(screen.queryByRole("button", { name: "Cancel claim" })).not.toBeInTheDocument();
+  });
+
+  // Task 1.4: the detail screen offers cancel while the claim is still
+  // 'claimed', regardless of the QR-minting phase (minting/ready/offline/
+  // code-expired/mint-error all reach here with status='claimed'). Forcing
+  // a mint failure (fetch rejects) is the simplest deterministic phase to
+  // assert against without mocking the QR token payload itself.
+  it("shows a cancel affordance for a still-claimed reward even if the QR mint fails", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // expiresAt must be safely in the future relative to the REAL clock:
+    // initialPhase (unlike formatExpiry elsewhere in this feature) is
+    // computed from `new Date()`, not an injectable `now`, because it runs
+    // once in RedemptionQr's own useState initializer.
+    render(
+      <RedemptionQr claim={baseClaim({ status: "claimed", expiresAt: "2099-01-01T00:00:00.000Z" })} />,
+    );
+
+    expect(await screen.findByRole("button", { name: "Cancel claim" })).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
   });
 });

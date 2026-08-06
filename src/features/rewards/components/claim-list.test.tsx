@@ -1,5 +1,13 @@
 import { render, screen } from "@testing-library/react";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+
+// ClaimList renders <CancelClaimButton> (task 1.4) for 'claimed' rows, which
+// is a client component pulling in next/navigation and the cancelClaim
+// server action - mocked here the same way cancel-claim-button.test.tsx
+// mocks them, since this file never exercises the confirm flow itself (that
+// is cancel-claim-button.test.tsx's job).
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
+vi.mock("../actions", () => ({ cancelClaim: vi.fn() }));
 
 import { ClaimList, formatExpiry } from "./claim-list";
 import type { MyClaimDTO } from "../types";
@@ -105,5 +113,28 @@ describe("ClaimList", () => {
 
     expect(screen.getByText("Expired")).toBeInTheDocument();
     expect(screen.getByText("Cancelled")).toBeInTheDocument();
+  });
+
+  // ------------------------------------------------------- cancel affordance (task 1.4)
+
+  it("shows a cancel affordance for a claimed reward", () => {
+    render(<ClaimList claims={[baseClaim({ status: "claimed" })]} now={NOW} />);
+
+    expect(screen.getByRole("button", { name: "Cancel claim" })).toBeInTheDocument();
+  });
+
+  it("never shows a cancel affordance for a redeemed, expired, or cancelled claim", () => {
+    render(
+      <ClaimList
+        claims={[
+          baseClaim({ claimId: "c-redeemed", status: "redeemed", redeemedAt: "2026-07-24T00:00:00.000Z" }),
+          baseClaim({ claimId: "c-expired", status: "expired" }),
+          baseClaim({ claimId: "c-cancelled", status: "cancelled" }),
+        ]}
+        now={NOW}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Cancel claim" })).not.toBeInTheDocument();
   });
 });

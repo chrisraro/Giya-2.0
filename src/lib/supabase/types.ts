@@ -2569,6 +2569,7 @@ export type Database = {
         Args: { p_business_id: string; p_campaign_id: string }
         Returns: number
       }
+      cancel_claim: { Args: { p_claim_id: string }; Returns: undefined }
       claim_reward: { Args: { p_reward_id: string }; Returns: string }
       clawback_receipt_points: {
         Args: {
