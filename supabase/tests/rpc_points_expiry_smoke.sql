@@ -1,36 +1,43 @@
 -- ============================================================================
 -- rpc_points_expiry_smoke.sql (pgTAP)
--- Task 1.3: points expiry enforcement, INCLUDING the review-fix pass
--- (0045/0046, plus 0042's replaced append-only fence). Covers doc 35 section
--- 7's FIFO remainder formula ordered by EXPIRY not creation (private.
--- points_lot_remainders / private.points_expirable_remainder), the wallet's
--- shared read (public.points_next_expiry), the sweep (public.expire_points)
--- including its self-clearing candidate scan and restored audit fields, the
--- warn job (public.points_expiry_warn) using the PROJECTED remainder at both
--- horizons rather than the soonest lot, its self-clearing scan and its
--- concurrency-safe lock, the pg_cron schedules for both, the service_role-only
--- grant on every new `public.` surface (including `points_expirable_remainder`,
--- missed by the first pass), the not-even-service_role posture on both
--- `private.` helpers, and the append-only fence's one permanent exception.
+-- Task 1.3: points expiry enforcement, INCLUDING both review-fix passes
+-- (0045/0046, 0047/0048, plus 0042 restored to what actually ran). Covers
+-- doc 35 section 7's FIFO remainder formula ordered by EXPIRY not creation
+-- (private.points_lot_remainders / private.points_expirable_remainder), the
+-- wallet's shared read (public.points_next_expiry), the sweep (public.
+-- expire_points) including its self-clearing candidate scan and restored
+-- audit fields, the warn job (public.points_expiry_warn) using the
+-- PROJECTED remainder at both horizons, ordered by URGENCY (soonest
+-- in-window expiry, not UUID) rather than starving a backlog, deduped on the
+-- WINDOW-STABLE soonest-lot date rather than the moving aggregate figure,
+-- and restoring that same date to both the copy and the payload, the
+-- pg_cron schedules for both, the service_role-only grant on every new
+-- `public.` surface (including `points_expirable_remainder`, missed by the
+-- first pass), the not-even-service_role posture on both `private.` helpers,
+-- the append-only fence's one permanent exception (now correctly homed in
+-- 0047, not rewriting 0042's own history), and a pin on the exact column set
+-- that fence's trigger enumerates by name.
 --
 -- Runs entirely inside one transaction and rolls back. Execute as a
--- privileged role (postgres) against a database with migrations 0001-0046
+-- privileged role (postgres) against a database with migrations 0001-0048
 -- applied.
 --
 -- Fixture strategy: one business ("Expiry Cafe"), consumer ids prefixed by
 -- scenario, each isolated so every assertion filters by its own (business,
 -- consumer) pair. Consumer id PREFIXES are chosen deliberately for the I2
 -- self-clearing proof: 'a1111.../a2222.../a3333...' sort before every other
--- prefix used here ('e', 'f', 'g', 'm'), so a small `p_limit` on
+-- prefix used here ('e', 'f', 'g', '8', 'd', '9'), so a small `p_limit` on
 -- `expire_points` deterministically reaches them first regardless of what
--- else exists in this transaction or the live project.
+-- else exists in this transaction or the live project. The N2/N3 sections
+-- near the end add their own `b`/`c` prefixed fixtures, the N2 ones wrapped
+-- in a savepoint so they cannot affect any count elsewhere in the file.
 -- ============================================================================
 
 begin;
 
 set local search_path = public, extensions;
 
-select plan(60);
+select plan(67);
 
 -- ---------------------------------------------------------------- fixtures
 insert into auth.users (id, aud, role, email, raw_user_meta_data)
@@ -569,6 +576,179 @@ select is(
   (select count(*)::int from public.notifications
     where user_id = '81111111-1111-4111-8111-111111111111' and kind = 'points_expiring'),
   2, 'v39 idempotent: shadow pair unchanged (same projected sum, deduped)');
+
+-- ============================================================================
+-- N4 (re-review) — the copy and payload carry a date again
+-- ============================================================================
+
+-- 61. warn30's notice carries the lot's OWN expires_at as data.expires_on
+select is(
+  (select (n.data->>'expires_on')::timestamptz = pt.expires_at
+     from public.notifications n, public.points_transactions pt
+    where n.user_id = 'e5555555-5555-4555-8555-555555555555'
+      and n.kind = 'points_expiring' and n.data->>'horizon' = '30d'
+      and pt.business_id = current_setting('test.biz')::uuid
+      and pt.consumer_id = 'e5555555-5555-4555-8555-555555555555'
+      and pt.type = 'earn'
+    limit 1),
+  true, 'v61 (N4) warn30''s notice payload carries the lot''s own expiry date');
+
+-- 62. the copy states a date, not just a horizon
+select ok(
+  (select body ~ 'expire by' from public.notifications
+    where user_id = 'e5555555-5555-4555-8555-555555555555'
+      and kind = 'points_expiring' and data->>'horizon' = '30d'
+    limit 1),
+  'v62 (N4) copy states "expire by <date>", not merely "within N days"');
+
+-- 63. shadow pair's date is the SOONEST lot (A, 10d out), not lot B (12d),
+-- even though the POINTS figure is the combined 550 of both.
+select is(
+  (select (n.data->>'expires_on')::timestamptz = pt.expires_at
+     from public.notifications n, public.points_transactions pt
+    where n.user_id = '81111111-1111-4111-8111-111111111111'
+      and n.kind = 'points_expiring' and n.data->>'horizon' = '30d'
+      and pt.business_id = current_setting('test.biz')::uuid
+      and pt.consumer_id = '81111111-1111-4111-8111-111111111111'
+      and pt.type = 'earn' and pt.points = 50
+    limit 1),
+  true, 'v63 (N4) shadow pair''s date is the soonest lot (A), not the shadowed-but-larger lot B');
+
+-- ============================================================================
+-- N2 (re-review) — order by URGENCY, not UUID, so a persistent backlog cannot
+-- starve a pair closer to losing its points. Savepoint-isolated: b1111... and
+-- c9999... must be the ONLY two candidates for this p_limit=1 assertion to
+-- mean anything, so the fixture and the check are wrapped and rolled back
+-- without disturbing the rest of the suite.
+-- ============================================================================
+
+savepoint n2_urgency;
+
+insert into auth.users (id, aud, role, email, raw_user_meta_data)
+values
+  ('b1111111-1111-4111-8111-111111111111', 'authenticated', 'authenticated',
+   'giya-expiry-n2-noturgent@example.com', '{"full_name": "N2 Not Urgent"}'::jsonb),
+  ('c9999999-9999-4999-8999-999999999999', 'authenticated', 'authenticated',
+   'giya-expiry-n2-urgent@example.com', '{"full_name": "N2 Urgent"}'::jsonb);
+
+-- b1111... sorts BEFORE c9999... in plain UUID order, but is the LESS urgent
+-- pair (25 days out) - the old `order by business_id, consumer_id` would
+-- have picked it first every time under a small limit, starving c9999...
+-- forever.
+insert into public.business_customers (business_id, consumer_id, points_balance)
+values (current_setting('test.biz')::uuid, 'b1111111-1111-4111-8111-111111111111', 400);
+insert into public.points_transactions
+  (business_id, consumer_id, type, points, balance_after, created_at, expires_at)
+values (current_setting('test.biz')::uuid, 'b1111111-1111-4111-8111-111111111111',
+        'earn', 400, 400, now() - interval '340 days', now() + interval '25 days');
+
+-- c9999... sorts AFTER b1111... but is the URGENT pair (2 days out).
+insert into public.business_customers (business_id, consumer_id, points_balance)
+values (current_setting('test.biz')::uuid, 'c9999999-9999-4999-8999-999999999999', 250);
+insert into public.points_transactions
+  (business_id, consumer_id, type, points, balance_after, created_at, expires_at)
+values (current_setting('test.biz')::uuid, 'c9999999-9999-4999-8999-999999999999',
+        'earn', 250, 250, now() - interval '363 days', now() + interval '2 days');
+
+select public.points_expiry_warn(1);
+
+-- 64. the urgent pair (2 days out) IS notified under p_limit=1 despite
+-- sorting after the not-urgent pair in plain UUID order (fires both
+-- horizons: 2 days is inside both 30d and 7d, so 4 rows).
+select is(
+  (select count(*)::int from public.notifications
+    where user_id = 'c9999999-9999-4999-8999-999999999999' and kind = 'points_expiring'),
+  4, 'v64 (N2) the urgent pair is notified under a p_limit of 1');
+
+-- 65. the less-urgent pair is NOT notified this run - the single slot went to
+-- whoever is closer to losing points, not to whoever sorts first.
+select is(
+  (select count(*)::int from public.notifications
+    where user_id = 'b1111111-1111-4111-8111-111111111111' and kind = 'points_expiring'),
+  0, 'v65 (N2) the less-urgent (UUID-earlier) pair is NOT notified when the one slot favors urgency');
+
+rollback to savepoint n2_urgency;
+
+-- ============================================================================
+-- N3 (re-review) — the dedupe key is WINDOW-STABLE, proven by literally
+-- moving what the window contains between runs (the only way to simulate
+-- "a day passed" without a clock-mocking extension: aging the ledger data is
+-- the same relative effect as advancing now()).
+-- ============================================================================
+
+insert into auth.users (id, aud, role, email, raw_user_meta_data)
+values ('c1111111-1111-4111-8111-111111111111', 'authenticated', 'authenticated',
+        'giya-expiry-n3@example.com', '{"full_name": "N3 Window Stable"}'::jsonb);
+
+insert into public.business_customers (business_id, consumer_id, points_balance)
+values (current_setting('test.biz')::uuid, 'c1111111-1111-4111-8111-111111111111', 300);
+
+-- lot A: 300pts, 20 days out.
+insert into public.points_transactions
+  (business_id, consumer_id, type, points, balance_after, created_at, expires_at)
+values (current_setting('test.biz')::uuid, 'c1111111-1111-4111-8111-111111111111',
+        'earn', 300, 300, now() - interval '345 days', now() + interval '20 days');
+
+select public.points_expiry_warn(500);
+with c1 as (
+  select count(*)::int as n from public.notifications
+   where user_id = 'c1111111-1111-4111-8111-111111111111'
+     and kind = 'points_expiring' and data->>'horizon' = '30d'
+)
+select set_config('test.n3_run1', (select n::text from c1), true);
+
+-- "a day later, a new lot enters the window": lot B, 200pts, 25 days out.
+-- The AGGREGATE 30d remainder grows from 300 to 500 - the exact condition
+-- that used to mint a brand new dedupe key and duplicate the notice.
+insert into public.points_transactions
+  (business_id, consumer_id, type, points, balance_after, created_at, expires_at)
+values (current_setting('test.biz')::uuid, 'c1111111-1111-4111-8111-111111111111',
+        'earn', 200, 500, now() - interval '340 days', now() + interval '25 days');
+
+select public.points_expiry_warn(500);
+with c2 as (
+  select count(*)::int as n from public.notifications
+   where user_id = 'c1111111-1111-4111-8111-111111111111'
+     and kind = 'points_expiring' and data->>'horizon' = '30d'
+)
+select set_config('test.n3_run2', (select n::text from c2), true);
+
+-- lot A is now fully drained (spent, or swept - either way, gone): lot B
+-- becomes the new soonest in-window lot, which IS a genuinely new fact.
+insert into public.points_transactions
+  (business_id, consumer_id, type, points, balance_after, created_at)
+values (current_setting('test.biz')::uuid, 'c1111111-1111-4111-8111-111111111111',
+        'redeem', -300, 200, now());
+
+select public.points_expiry_warn(500);
+
+-- 66. run1=2 (first notice), run2=2 STILL (no duplicate despite the
+-- aggregate growing 300->500 - this is N3's whole point), run3=4 (a genuine
+-- new notice fires once the soonest lot itself actually changes).
+select is(
+  current_setting('test.n3_run1') || '/' || current_setting('test.n3_run2') || '/' ||
+  (select count(*)::int from public.notifications
+    where user_id = 'c1111111-1111-4111-8111-111111111111'
+      and kind = 'points_expiring' and data->>'horizon' = '30d')::text,
+  '2/2/4',
+  'v66 (N3) window-stable dedupe: a growing aggregate does not duplicate; a genuine change of the soonest lot does notify again');
+
+-- ============================================================================
+-- N7 (re-review) — pin the append-only trigger's column allowlist
+-- ============================================================================
+
+-- 67. points_transactions' column set matches EXACTLY what 0047's trigger
+-- enumerates. Adding a column to this table without deciding whether the
+-- guard must also name it now fails this pin instead of passing quietly -
+-- the same idiom rls_consumer_fence_smoke.sql uses for 0021's allowlists.
+select is(
+  (select array_agg(column_name::text order by column_name)
+     from information_schema.columns
+    where table_schema = 'public' and table_name = 'points_transactions'),
+  array['actor_id','adjust_reason','balance_after','business_id','campaign_id',
+        'claim_id','consumer_id','created_at','created_by','expires_at','id',
+        'points','receipt_id','reverses_id','rule_snapshot','type']::text[],
+  'v67 (N7) points_transactions'' column set matches the append-only trigger''s enumerated allowlist');
 
 -- ============================================================================
 -- pg_cron schedules
