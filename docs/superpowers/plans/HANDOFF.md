@@ -1,7 +1,7 @@
 # Giya 2.0 — Build Handoff
 
-**Written:** 2026-08-06 · **Repo state:** `main` @ `5052419`, pushed, clean
-**Suite:** 215 files / 4,433 tests green · **Types:** 3 known pre-existing errors · **Migrations:** 0037–0062 live
+**Written:** 2026-08-06 · **Last refreshed:** 2026-08-07 · **Repo state:** `main` at or after `cf34416` (the T3.1 merge), pushed, clean
+**Suite:** 232 files / 4,600 tests green · **Types:** 3 known pre-existing errors · **Migrations:** 0037–0063 live
 
 You are picking up a multi-wave build-out of every module the docs specify and the code lacked. This document is the whole context. Read it top to bottom once; you should not need the prior conversation.
 
@@ -10,7 +10,7 @@ You are picking up a multi-wave build-out of every module the docs specify and t
 ## 1. Verify you're starting from a good state
 
 ```bash
-npx vitest run                    # expect 215 files / 4433 tests, all green
+npx vitest run                    # expect 232 files / 4600 tests, all green
 npx tsc --noEmit                  # expect EXACTLY 3 errors (see below)
 scripts/sdd/check-grants.sh 090bc96   # expect "OK"
 git status --porcelain            # expect empty
@@ -56,7 +56,7 @@ write brief → dispatch implementer (TDD, isolated) → adversarial review
 
 ---
 
-## 4. What is DONE (18 tasks, merged and pushed)
+## 4. What is DONE (19 tasks, merged and pushed)
 
 ### Wave 1 — money correctness (7/7 complete)
 
@@ -84,44 +84,57 @@ write brief → dispatch implementer (TDD, isolated) → adversarial review
 | T2.4 | Dead-lettered jobs were invisible and unrecoverable through any interface |
 | T2.7 | No AI kill switch, no budget caps; `budgetMicros` existed and no caller passed it |
 
-### Wave 3 — auth + suspension (2/4 merged)
+### Wave 3 — auth + suspension (3/4 merged)
 
 | Task | What it closed |
 |---|---|
 | T3.2 | Suspension was written by the admin ladder and read by **nothing** — a suspended user kept scanning, claiming and redeeming |
 | T3.3 | Owners could not add teammates at all — no roster, no invite, no accept |
+| T3.1 | The login page's "Forgot password" link was `href="#"` — no recovery flow existed |
 
 ---
 
-## 5. IN FLIGHT — one worktree
+## 5. IN FLIGHT — nothing
 
-**T3.1** `/forgot-password` + `/reset-password`, worktree
-`.claude/worktrees/agent-a83ed56a39ac1fab0`, branch
-`worktree-agent-a83ed56a39ac1fab0`, HEAD `cbd94ad` at the time of writing.
-Reviewer **approved pending one item (I8)**, whose fix was dispatched and
-had not returned. It carries no migration, so `0063` was free for T3.3.
+**No worktree holds unfinished work.** T3.1 was the last one open; it is
+reviewed, approved and merged. Start at §8 with T3.4.
 
-**I8, so you can judge the fix yourself.** The route mints an HttpOnly marker
-cookie when `/auth/confirm` verifies a `type=recovery` link, and
-`/reset-password` renders its form only if `recovery-status` says the marker
-is present. The cookie is **TTL-based (10 minutes), not single-use**, and
-nothing clears it — so the product's own happy path walks a user back into
-the window: finish a reset → tap the "Sign in" affordance → sign in with the
-new password (an ordinary session) → navigate back to `/reset-password` →
-the marker still answers `verified: true` → the form renders → `updateUser`
-succeeds. The dispatched fix moves `updateUser` behind a server route that
-checks **and clears** the marker, which promotes it from a UI gate to a real
-authorization control.
+### What T3.1 left behind that you should know
 
-**What the marker is and is not.** It replaced an `amr === "recovery"` check.
-Neither gate was ever the authorization boundary — `updateUser` is authorized
-by the Supabase session. The marker only distinguishes a recovery-origin
-session, and `amr` could not do that at *any* value, because `"recovery"` is
-not an `AMRMethod` at all (it is an `EmailOtpType`/`GenerateLinkType`). The
-cookie is strictly stronger: HttpOnly blocks JS writes, and
-`secure` + `sameSite: lax` + host-only blocks cross-site planting.
+**T3.1 does not work until the two Dashboard changes in §9 ship with it.**
+The code is done; the flow receives no traffic at all until then.
 
-**T3.1 does not work until two Dashboard changes ship with it** (§9).
+**The recovery marker is not an authorization boundary, and never was.**
+`/auth/confirm` mints an HttpOnly marker cookie when it verifies a
+`type=recovery` link; `updateUser` now sits behind a server route that checks
+**and clears** it. But `updateUser` is authorized by the Supabase *session* —
+the marker only distinguishes a recovery-origin session. It replaced an
+`amr === "recovery"` check that could not do that at any value, because
+`"recovery"` is not an `AMRMethod` at all (it is an
+`EmailOtpType`/`GenerateLinkType`). Don't reason about the cookie as though
+it carries authority it was never given.
+
+**A cookie's deletion identity tuple is name + `Path` + `Domain` — nothing
+else.** `HttpOnly`, `Secure` and `SameSite` are *not* part of it; stripping
+them from a clearing header still deletes the cookie. Assert them on the
+mint, where they are load-bearing. This cost a review round: the clear
+asserted only `name=;` and `max-age=0`, so `Path=/reset-password`, an omitted
+`Path`, and an added `Domain` all passed a green suite while deleting
+nothing.
+
+**`src/lib/auth/recovery-cookie.test.ts` is the pattern to copy** when a
+property lives between two files. It `await import`s the real mint route,
+reads the actual `set-cookie` off a real response, calls the real clear
+helper, and compares the two identity tuples. The part most likely to be
+dropped when copying it is the non-vacuity guard: without asserting the mint
+tuple's name, a mint that emitted *no cookie at all* would compare
+`{name:"", path:undefined, hasDomain:false}` against itself and pass.
+
+**`.superpowers/` is gitignored, but
+`.superpowers/sdd/briefs/t3-1-report.md` is deliberately tracked** (as is
+`sdd/task-3-report.md` from an earlier slice). The worktree is gone; that
+file is the per-assertion mutant record for a security-sensitive flow. It is
+not cruft — leave it.
 
 Four Minor follow-ups were recorded against T2.4 rather than fixed, none
 blocking: `revertReplay` filters on `id` alone and could clobber a row a
@@ -201,9 +214,9 @@ A row that does no work and writes nothing still matches the scan forever. With 
 
 ---
 
-## 8. REMAINING WORK — 25 tasks
+## 8. REMAINING WORK — 24 tasks
 
-### Wave 3 — auth + suspension (2/4 merged, T3.1 in flight — see §5)
+### Wave 3 — auth + suspension (3/4 merged)
 
 **Remaining in Wave 3:**
 - **T3.4** Profile edit + preferences + devices — profile is read-only with a dead "Devices" row; the four consent toggles exist in the schema with no UI. **NPC Circular 2023-04 requires separate, un-ticked marketing consent** — bundling it is non-compliant.
