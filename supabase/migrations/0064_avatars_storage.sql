@@ -73,8 +73,8 @@
 --     "guessable-by-listing" worry is closed by that policy, not by the bucket
 --     flag.
 --
--- What makes PUBLIC defensible rather than merely convenient: the bytes we
--- publish are not the bytes the consumer picked. The server action re-encodes
+-- What makes PUBLIC defensible rather than merely convenient: THE BYTES *WE*
+-- PUBLISH are not the bytes the consumer picked. The server action re-encodes
 -- every upload through sharp before it reaches this bucket
 -- (src/features/identity/server/avatar-image.ts), which is what strips EXIF and
 -- therefore the GPS tag a phone camera writes into a photo. Publishing a raw
@@ -83,6 +83,18 @@
 -- self-chosen public-facing display image - semantically the opposite of a
 -- receipt, which carries merchant, date, line items and total and is private in
 -- 0019 for exactly that reason.
+--
+-- Be exact about the scope of that claim, because it is a claim about the APP's
+-- path and not about the BUCKET. The insert policy below authorizes any
+-- authenticated session to PUT an object into its own uid prefix directly
+-- against the Storage API, bypassing the re-encode entirely, and 0021 lets that
+-- same session point its own profiles.avatar_url at the result. So a determined
+-- consumer CAN publish their own raw camera JPEG with its GPS tag intact. What
+-- the fence guarantees is that they can only do it to THEMSELVES: no session can
+-- write into anybody else's prefix, and nothing here lets one consumer publish
+-- another's location. Self-inflicted EXIF is an accepted residual risk of a
+-- client-writable bucket; cross-user planting is not, and that is what the
+-- policies are for.
 --
 -- file_size_limit 2097152 = 2 * 1024 * 1024. Receipts are capped at 10MB
 -- because an unreadable receipt is a failed award; an avatar is rendered at 64
@@ -97,10 +109,20 @@
 -- allowed_mime_types is the brief's list: image/jpeg, image/png, image/webp.
 -- image/heic and image/heif are deliberately ABSENT, matching 0019: sharp on
 -- this project is not built to decode HEIC, so a HEIC that reached the bucket
--- would be an object nothing downstream can re-encode. image/gif and image/svg
--- are absent too, and svg emphatically so: an SVG is a script-bearing document,
--- and a script-bearing document served from a PUBLIC bucket on the project's
--- own storage origin is a stored-XSS primitive.
+-- would be an object nothing downstream can re-encode.
+--
+-- image/svg+xml is absent, and here is precisely what that does and does not
+-- buy, because the loose version of this sentence is wrong. This setting checks
+-- the DECLARED Content-Type, exactly as the note four paragraphs above says - it
+-- does not look at bytes. A direct caller can therefore upload SVG BYTES while
+-- declaring image/png, and this list will not stop them. What the list does
+-- guarantee is the half that matters: the stored content type is always one of
+-- these three, so the object is SERVED as image/png or image/jpeg or image/webp
+-- and a browser will not parse or execute it as a document. The stored-XSS
+-- primitive is "a public origin serving attacker-controlled markup as
+-- image/svg+xml", and that is what is closed here - not "no SVG bytes exist in
+-- the bucket", which nothing in this file enforces. The byte-level half is the
+-- action's magic-byte sniff, which is also the only layer that sees bytes.
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (
   'avatars',

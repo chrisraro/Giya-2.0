@@ -49,6 +49,44 @@ export const AVATAR_BUCKET_MAX_BYTES = 2 * 1024 * 1024;
 export const AVATAR_MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 
 /**
+ * THE NUMBER next.config.ts MUST CONFIGURE, and the reason this constant exists
+ * at all.
+ *
+ * Next.js caps a Server Action's request body at 1 MB by default
+ * (`defaultActionBodySizeLimit = '1 MB'`, node_modules/next/dist/build/
+ * templates/app-page.js) and answers anything larger with a 413 BEFORE the
+ * action function is entered. The avatar upload carries a File through a Server
+ * Action, so with the default in place every photo between 1 MB and
+ * AVATAR_MAX_UPLOAD_BYTES died in the framework: the action's own size check was
+ * unreachable, its "larger than 8 MB" copy could never render, and the consumer
+ * saw a screen that simply stopped responding.
+ *
+ * The headroom above AVATAR_MAX_UPLOAD_BYTES is for the ENVELOPE. The limit is
+ * measured against the whole multipart action payload - boundaries, headers, the
+ * action id - not against the file, so a limit set exactly at the file size
+ * would 413 a file that is exactly at the file size.
+ *
+ * avatar.test.ts asserts next.config.ts's configured value IS this constant, so
+ * raising one without the other fails a test rather than production.
+ */
+export const AVATAR_ACTION_BODY_LIMIT_BYTES = AVATAR_MAX_UPLOAD_BYTES + 1024 * 1024;
+
+/**
+ * The copy for a photo past the ceiling, in one place because BOTH sides say it.
+ *
+ * The form checks the size before it sends anything - a body past the Server
+ * Action limit is answered with a 413 by the framework before the action is
+ * entered, so a check that only lives server-side produces a message nobody can
+ * ever see. The action checks it again for a caller that is not our form.
+ * Sharing the sentence keeps the two checks from disagreeing about the number
+ * they are both quoting.
+ */
+export function oversizePhotoMessage(): string {
+  const megabytes = Math.floor(AVATAR_MAX_UPLOAD_BYTES / (1024 * 1024));
+  return `That photo is larger than ${megabytes} MB. Try a smaller one.`;
+}
+
+/**
  * The 1-based path segment that carries the owner's auth uid - the SQL index in
  * `(storage.foldername(name))[1]`. Named rather than inlined so the agreement
  * test can compare it to the number actually written in 0064.

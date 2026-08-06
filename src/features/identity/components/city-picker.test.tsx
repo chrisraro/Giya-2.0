@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   // Deliberately not alphabetical and deliberately including a city that was
   // never in the six-item literal this picker replaced.
   cities: [{ name: "Cebu City" }, { name: "Davao City" }, { name: "Naga (Camarines Sur)" }],
+  /** Counts the ref_cities reads, so mount lifetime is assertable. */
+  cityFetch: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/client", () => ({
@@ -17,21 +19,44 @@ vi.mock("@/lib/supabase/client", () => ({
     from: () => ({
       select: () => ({
         eq: () => ({
-          order: () => Promise.resolve({ data: mocks.cities, error: null }),
+          order: () => {
+            mocks.cityFetch();
+            return Promise.resolve({ data: mocks.cities, error: null });
+          },
         }),
       }),
     }),
   }),
 }));
 
-const { CityPicker } = await import("./city-picker");
+const { CityPicker, useCityPicker } = await import("./city-picker");
 
 function Harness({ initial = null }: { initial?: string | null }) {
   const [city, setCity] = React.useState<string | null>(initial);
+  const picker = useCityPicker();
   return (
     <>
-      <CityPicker value={city} onChange={setCity} />
+      <CityPicker state={picker} value={city} onChange={setCity} />
       <output data-testid="chosen">{city ?? "none"}</output>
+    </>
+  );
+}
+
+/**
+ * A harness that can UNMOUNT the picker while keeping the state hook alive -
+ * exactly the shape the onboarding wizard has, where the city step exists only
+ * while `step === 1`.
+ */
+function ToggleHarness() {
+  const [visible, setVisible] = React.useState(true);
+  const [city, setCity] = React.useState<string | null>(null);
+  const picker = useCityPicker();
+  return (
+    <>
+      <button type="button" onClick={() => setVisible((v) => !v)}>
+        toggle
+      </button>
+      {visible ? <CityPicker state={picker} value={city} onChange={setCity} /> : null}
     </>
   );
 }
@@ -151,14 +176,71 @@ describe("CityPicker", () => {
   });
 
   it("lets two pickers coexist by taking a distinct search field id", () => {
-    render(
-      <>
-        <CityPicker value={null} onChange={() => {}} searchInputId="a" searchLabel="A" />
-        <CityPicker value={null} onChange={() => {}} searchInputId="b" searchLabel="B" />
-      </>,
-    );
+    function TwoPickers() {
+      const picker = useCityPicker();
+      return (
+        <>
+          <CityPicker
+            state={picker}
+            value={null}
+            onChange={() => {}}
+            searchInputId="a"
+            searchLabel="A"
+          />
+          <CityPicker
+            state={picker}
+            value={null}
+            onChange={() => {}}
+            searchInputId="b"
+            searchLabel="B"
+          />
+        </>
+      );
+    }
+    render(<TwoPickers />);
 
     expect(screen.getByLabelText("A")).toHaveAttribute("id", "a");
     expect(screen.getByLabelText("B")).toHaveAttribute("id", "b");
+  });
+});
+
+// The state hook is separate from the component because the onboarding wizard
+// unmounts the city step whenever you move to another step. These pin what that
+// separation buys, against a harness with the same mount lifetime.
+describe("useCityPicker held above an unmounting picker", () => {
+  it("CRITICAL: reads ref_cities once, not once per mount", async () => {
+    render(<ToggleHarness />);
+    await screen.findByRole("radio", { name: /Cebu/ });
+    expect(mocks.cityFetch).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "toggle" }));
+    fireEvent.click(screen.getByRole("button", { name: "toggle" }));
+    await screen.findByRole("radio", { name: /Cebu/ });
+
+    expect(mocks.cityFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("CRITICAL: keeps the typed search across an unmount", async () => {
+    render(<ToggleHarness />);
+    await screen.findByRole("radio", { name: /Cebu/ });
+    fireEvent.change(screen.getByLabelText("Search city"), { target: { value: "Davao" } });
+    await waitFor(() => expect(screen.getAllByRole("radio")).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "toggle" }));
+    fireEvent.click(screen.getByRole("button", { name: "toggle" }));
+
+    expect(screen.getByLabelText("Search city")).toHaveValue("Davao");
+    expect(screen.getAllByRole("radio")).toHaveLength(1);
+  });
+
+  it("shows the list immediately on remount, with no empty-state flash", async () => {
+    render(<ToggleHarness />);
+    await screen.findByRole("radio", { name: /Cebu/ });
+
+    fireEvent.click(screen.getByRole("button", { name: "toggle" }));
+    fireEvent.click(screen.getByRole("button", { name: "toggle" }));
+
+    expect(screen.queryByText(/No cities match/)).not.toBeInTheDocument();
+    expect(screen.getAllByRole("radio")).toHaveLength(mocks.cities.length);
   });
 });

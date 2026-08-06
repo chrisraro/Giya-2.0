@@ -9,7 +9,11 @@ import { Chip } from "@/components/ui/chip";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/brand/logo";
 import { completeConsumerOnboarding } from "@/features/identity/actions";
-import { CityPicker } from "@/features/identity/components/city-picker";
+import {
+  CityPicker,
+  useCityPicker,
+  type CityPickerState,
+} from "@/features/identity/components/city-picker";
 
 const STEP_COUNT = 4;
 
@@ -57,9 +61,11 @@ function WelcomeStep() {
 // handler - is now src/features/identity/components/city-picker.tsx, so
 // /profile/edit uses the same control rather than a second copy of it.
 function CityStep({
+  picker,
   selected,
   onSelect,
 }: {
+  picker: CityPickerState;
   selected: string | null;
   onSelect: (city: string) => void;
 }) {
@@ -71,7 +77,7 @@ function CityStep({
           We will show you deals nearby first.
         </p>
       </div>
-      <CityPicker value={selected} onChange={onSelect} />
+      <CityPicker state={picker} value={selected} onChange={onSelect} />
     </div>
   );
 }
@@ -145,6 +151,13 @@ export default function OnboardingPage() {
   const [notifications, setNotifications] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [pending, setPending] = React.useState(false);
+
+  // Held HERE, not inside the city step, and this component is the reason: the
+  // step is mounted only while `step === 1`, so state living inside it is thrown
+  // away every time somebody moves to Interests and back. The ref_cities read
+  // would repeat, the list would flash its empty state on the way back, and the
+  // typed search would be gone.
+  const cityPicker = useCityPicker();
 
   const canContinue = step !== 1 || city !== null;
 
@@ -254,7 +267,9 @@ export default function OnboardingPage() {
             className="flex flex-col gap-6"
           >
             {step === 0 && <WelcomeStep />}
-            {step === 1 && <CityStep selected={city} onSelect={setCity} />}
+            {step === 1 && (
+              <CityStep picker={cityPicker} selected={city} onSelect={setCity} />
+            )}
             {step === 2 && <InterestsStep selected={interests} onToggle={toggleInterest} />}
             {step === 3 && (
               <NotificationsStep checked={notifications} onChange={setNotifications} />

@@ -27,6 +27,42 @@ async function photoWithGps(): Promise<Uint8Array> {
   return new Uint8Array(buffer);
 }
 
+/**
+ * A square JPEG whose TOP-LEFT quadrant is white and the rest black, optionally
+ * carrying an EXIF Orientation tag.
+ *
+ * Orientation 6 means "rotate 90 degrees clockwise for display", so a viewer
+ * that honours it moves the white quadrant from top-LEFT to top-RIGHT. Square
+ * on purpose: the canonical resize is `fit: "cover"`, and a non-square source
+ * would be cropped differently before and after rotation, which would make the
+ * comparison below prove the crop rather than the rotation.
+ */
+async function quadrantPhoto({ orientation }: { orientation?: number } = {}): Promise<Uint8Array> {
+  const size = 400;
+  const raw = Buffer.alloc(size * size * 3, 0);
+  for (let y = 0; y < size / 2; y += 1) {
+    for (let x = 0; x < size / 2; x += 1) {
+      const i = (y * size + x) * 3;
+      raw[i] = 255;
+      raw[i + 1] = 255;
+      raw[i + 2] = 255;
+    }
+  }
+  let pipeline = sharp(raw, { raw: { width: size, height: size, channels: 3 } });
+  if (orientation !== undefined) pipeline = pipeline.withMetadata({ orientation });
+  const buffer = await pipeline.jpeg().toBuffer();
+  return new Uint8Array(buffer);
+}
+
+/** The luminance of one pixel of a JPEG, by decoded coordinates. */
+async function brightnessAt(bytes: Uint8Array, x: number, y: number): Promise<number> {
+  const { data, info } = await sharp(Buffer.from(bytes))
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const index = (y * info.width + x) * info.channels;
+  return data[index] ?? 0;
+}
+
 async function plainPng(width = 300, height = 300): Promise<Uint8Array> {
   const buffer = await sharp({
     create: { width, height, channels: 3, background: { r: 10, g: 120, b: 200 } },
@@ -77,6 +113,37 @@ describe("canonicalizeAvatarImage", () => {
     const out = await canonicalizeAvatarImage(await photoWithGps());
 
     expect(out.byteLength).toBeLessThan(2 * 1024 * 1024);
+  });
+
+  it("CRITICAL: applies the EXIF orientation before it strips it", async () => {
+    // A portrait phone photo is stored landscape with Orientation 6 and is
+    // rotated at DISPLAY time by the tag. This function removes the tag in the
+    // same pass, so if it does not apply the rotation first, the face is stored
+    // permanently sideways and nothing downstream can recover it.
+    //
+    // The source has a white top-LEFT quadrant. Orientation 6 rotates 90 degrees
+    // clockwise, which moves it to the top-RIGHT.
+    const upright = await canonicalizeAvatarImage(await quadrantPhoto());
+    const tagged = await canonicalizeAvatarImage(await quadrantPhoto({ orientation: 6 }));
+
+    const near = 60;
+    const far = AVATAR_CANONICAL_EDGE - 60;
+
+    expect(await brightnessAt(upright, near, near)).toBeGreaterThan(200);
+    expect(await brightnessAt(upright, far, near)).toBeLessThan(60);
+
+    expect(await brightnessAt(tagged, far, near)).toBeGreaterThan(200);
+    expect(await brightnessAt(tagged, near, near)).toBeLessThan(60);
+  });
+
+  it("does not carry the orientation tag forward after applying it", async () => {
+    // Applying the rotation and KEEPING the tag would rotate it twice: once by
+    // us and once by whatever renders it.
+    const out = await canonicalizeAvatarImage(await quadrantPhoto({ orientation: 6 }));
+    const meta = await sharp(Buffer.from(out)).metadata();
+
+    expect(meta.exif).toBeUndefined();
+    expect(meta.orientation).toBeUndefined();
   });
 
   it("rejects bytes that are not a decodable image", async () => {

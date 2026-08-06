@@ -7,16 +7,18 @@ import { motion, useReducedMotion } from "motion/react";
 import { Button } from "@/components/ui/button";
 import { PendingButton } from "@/components/ui/pending-button";
 import { TextField } from "@/components/ui/text-field";
+import { toErrorMessage } from "@/lib/auth/error-message";
 
 import {
   removeConsumerAvatar,
   saveConsumerAvatar,
   saveConsumerProfile,
 } from "../actions";
-import { AVATAR_ACCEPTED_MIME_TYPES } from "../avatar";
+import { AVATAR_ACCEPTED_MIME_TYPES, AVATAR_MAX_UPLOAD_BYTES, oversizePhotoMessage } from "../avatar";
 import { initialsFrom } from "../display-name";
+import { GENERIC_FAILURE } from "../messages";
 import { DISPLAY_NAME_MAX_LENGTH, profileEditSchema } from "../profile-schema";
-import { CityPicker } from "./city-picker";
+import { CityPicker, useCityPicker } from "./city-picker";
 
 // The one client island on /profile/edit. The page around it stays a server
 // component, and nothing but plain data crosses the boundary into here.
@@ -34,9 +36,16 @@ import { CityPicker } from "./city-picker";
 // one alert region and it is never handed an empty string: `||`, not `??`. A
 // server message of "" is falsy but not nullish, so `??` lets it through and the
 // alert renders an empty box - a live bug this codebase has already shipped
-// once, which is why `toErrorMessage` exists.
-
-const GENERIC_FAILURE = "Something went wrong. Please try again.";
+// once, which is why `toErrorMessage` exists. GENERIC_FAILURE is imported from
+// `messages.ts` rather than redeclared here: that module is the one place this
+// slice's consumer-facing copy lives, and the server actions read the same
+// constants, so the form and the action cannot end up saying different things.
+//
+// EVERY action call is also wrapped. A server action can THROW instead of
+// returning - a 413 past the Server Action body limit, a dropped connection, a
+// deploy mid-request - and before that was handled the rejection went unhandled,
+// the busy flag was never cleared, and the screen sat there with every control
+// disabled and nothing written on it.
 
 export interface ProfileEditFormProps {
   readonly displayName: string;
@@ -62,6 +71,11 @@ export function ProfileEditForm({
   const [busyWithPhoto, setBusyWithPhoto] = React.useState(false);
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  // This form never unmounts the picker, so the placement is not load-bearing
+  // here the way it is in the onboarding wizard - but the hook is where the
+  // ref_cities read lives, so it has to be called by somebody.
+  const cityPicker = useCityPicker();
 
   // Local validation, so the person hears about a name that cannot be stored
   // before spending a round trip on it. The SAME schema runs again server side;
@@ -97,18 +111,29 @@ export function ProfileEditForm({
 
     setSavingProfile(true);
     setError(null);
-    const result = await saveConsumerProfile({ displayName, cityName });
-    setSavingProfile(false);
+    try {
+      const result = await saveConsumerProfile({ displayName, cityName });
 
-    if (!result.ok) {
-      // Stay put with the typed values intact. Navigating away or resetting the
-      // form would throw away work and leave nothing to retry.
-      setError(result.message || GENERIC_FAILURE);
-      return;
+      if (!result.ok) {
+        // Stay put with the typed values intact. Navigating away or resetting
+        // the form would throw away work and leave nothing to retry.
+        setError(result.message || GENERIC_FAILURE);
+        return;
+      }
+
+      setSaved(true);
+      router.refresh();
+    } catch (thrown) {
+      // A server action can THROW rather than return: a 413 past the body
+      // limit, a dropped connection, a deploy mid-request. Before this catch
+      // existed the rejection went unhandled and the screen said nothing.
+      setError(toErrorMessage(thrown));
+    } finally {
+      // In `finally`, not after the await. A throw used to skip the reset, which
+      // left every control disabled with no message - a dead screen until
+      // reload. This is the line that makes the failure honest.
+      setSavingProfile(false);
     }
-
-    setSaved(true);
-    router.refresh();
   }
 
   async function handlePhotoPicked(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
@@ -119,22 +144,38 @@ export function ProfileEditForm({
     event.target.value = "";
     if (!file) return;
 
-    setBusyWithPhoto(true);
-    setError(null);
     setSaved(false);
 
-    const formData = new FormData();
-    formData.set("avatar", file);
-    const result = await saveConsumerAvatar(formData);
-    setBusyWithPhoto(false);
-
-    if (!result.ok) {
-      setError(result.message || GENERIC_FAILURE);
+    // CHECKED HERE, not only in the action. Next answers a Server Action body
+    // past `experimental.serverActions.bodySizeLimit` with a 413 BEFORE the
+    // action function is entered, so the action's own size message is not
+    // something a browser caller can ever be shown. The action keeps its check
+    // for callers that are not this form.
+    if (file.size > AVATAR_MAX_UPLOAD_BYTES) {
+      setError(oversizePhotoMessage());
       return;
     }
 
-    setAvatarUrl(result.avatarUrl);
-    router.refresh();
+    setBusyWithPhoto(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.set("avatar", file);
+      const result = await saveConsumerAvatar(formData);
+
+      if (!result.ok) {
+        setError(result.message || GENERIC_FAILURE);
+        return;
+      }
+
+      setAvatarUrl(result.avatarUrl);
+      router.refresh();
+    } catch (thrown) {
+      setError(toErrorMessage(thrown));
+    } finally {
+      setBusyWithPhoto(false);
+    }
   }
 
   async function handleRemovePhoto(): Promise<void> {
@@ -143,16 +184,21 @@ export function ProfileEditForm({
     setError(null);
     setSaved(false);
 
-    const result = await removeConsumerAvatar();
-    setBusyWithPhoto(false);
+    try {
+      const result = await removeConsumerAvatar();
 
-    if (!result.ok) {
-      setError(result.message || GENERIC_FAILURE);
-      return;
+      if (!result.ok) {
+        setError(result.message || GENERIC_FAILURE);
+        return;
+      }
+
+      setAvatarUrl(result.avatarUrl);
+      router.refresh();
+    } catch (thrown) {
+      setError(toErrorMessage(thrown));
+    } finally {
+      setBusyWithPhoto(false);
     }
-
-    setAvatarUrl(result.avatarUrl);
-    router.refresh();
   }
 
   return (
@@ -232,6 +278,7 @@ export function ProfileEditForm({
           We show you deals near here first.
         </p>
         <CityPicker
+          state={cityPicker}
           value={cityName}
           onChange={setCityName}
           searchInputId="profile-city-search"

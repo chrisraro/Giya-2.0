@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { AVATAR_MAX_UPLOAD_BYTES } from "../avatar";
 import { DISPLAY_NAME_MAX_LENGTH } from "../profile-schema";
 
 // The edit surface itself. /profile has been read-only since it was built, so
@@ -68,10 +69,25 @@ function save(): void {
   fireEvent.click(document.querySelector('button[type="submit"]') as HTMLButtonElement);
 }
 
-function pickPhoto(name = "me.jpg", type = "image/jpeg"): void {
-  const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+function fileInput(): HTMLInputElement {
+  return document.querySelector('input[type="file"]') as HTMLInputElement;
+}
+
+function submitButton(): HTMLButtonElement {
+  return document.querySelector('button[type="submit"]') as HTMLButtonElement;
+}
+
+function pickPhoto(
+  { name = "me.jpg", type = "image/png", size }: { name?: string; type?: string; size?: number } = {},
+): void {
   const file = new File([new Uint8Array([1, 2, 3]) as unknown as BlobPart], name, { type });
-  fireEvent.change(input, { target: { files: [file] } });
+  if (size !== undefined) {
+    // Faking `size` beats allocating the bytes: the component reads the property
+    // and a real 9MB Uint8Array in jsdom costs a second of test time to prove
+    // nothing extra.
+    Object.defineProperty(file, "size", { value: size });
+  }
+  fireEvent.change(fileInput(), { target: { files: [file] } });
 }
 
 beforeEach(() => {
@@ -339,9 +355,96 @@ describe("ProfileEditForm: the avatar", () => {
   it("does nothing at all when the picker is dismissed without a file", () => {
     renderForm({ avatarUrl: null });
 
-    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
-    fireEvent.change(input, { target: { files: [] } });
+    fireEvent.change(fileInput(), { target: { files: [] } });
 
     expect(mocks.saveConsumerAvatar).not.toHaveBeenCalled();
+  });
+
+  it("CRITICAL: refuses an oversized photo here, before it is ever sent", async () => {
+    // The server check is the backstop for a non-browser caller. It is NOT the
+    // thing a consumer meets: a body past the Server Action limit is answered
+    // with a 413 by the framework before the action runs, so the friendly copy
+    // has to be produced on this side to be produced at all.
+    renderForm({ avatarUrl: null });
+
+    pickPhoto({ size: AVATAR_MAX_UPLOAD_BYTES + 1 });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/larger than 8 MB/i);
+    expect(mocks.saveConsumerAvatar).not.toHaveBeenCalled();
+  });
+
+  it("accepts a photo exactly at the ceiling", async () => {
+    renderForm({ avatarUrl: null });
+
+    pickPhoto({ size: AVATAR_MAX_UPLOAD_BYTES });
+
+    await waitFor(() => expect(mocks.saveConsumerAvatar).toHaveBeenCalled());
+  });
+});
+
+// THE FAILURE MODE THE REVIEW FOUND. None of the three action calls was
+// wrapped, and the busy-flag reset sat after the `await`, so a THROWN action -
+// a 413 from the Server Action body limit, a dropped connection, a deploy
+// mid-request - skipped it. The measured result was: no alert, every control
+// disabled, an unhandled rejection, and a screen that stayed dead until reload.
+// That is brief requirement 3 ("an honest failure") failing outright.
+describe("ProfileEditForm: when the action THROWS rather than returning ok:false", () => {
+  const thrown = new Error("Body exceeded 1 MB limit.");
+
+  it("CRITICAL: a thrown save says something and re-enables the button", async () => {
+    mocks.saveConsumerProfile.mockRejectedValue(thrown);
+    renderForm();
+
+    save();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent?.trim().length).toBeGreaterThan(0);
+    await waitFor(() => expect(submitButton()).not.toBeDisabled());
+  });
+
+  it("CRITICAL: a thrown upload says something and re-enables the file input", async () => {
+    mocks.saveConsumerAvatar.mockRejectedValue(thrown);
+    renderForm({ avatarUrl: null });
+
+    pickPhoto();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent?.trim().length).toBeGreaterThan(0);
+    await waitFor(() => expect(fileInput()).not.toBeDisabled());
+  });
+
+  it("CRITICAL: a thrown removal says something and re-enables the controls", async () => {
+    mocks.removeConsumerAvatar.mockRejectedValue(thrown);
+    renderForm({ avatarUrl: AVATAR_URL });
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove photo" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent?.trim().length).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Remove photo" })).not.toBeDisabled(),
+    );
+  });
+
+  it("never renders a blank alert for a throw with no message", async () => {
+    // `new Error("")` is the throw-side twin of the empty server message.
+    mocks.saveConsumerProfile.mockRejectedValue(new Error(""));
+    renderForm();
+
+    save();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent?.trim()).toBe("Something went wrong. Please try again.");
+  });
+
+  it("leaves the typed input alone when the save throws", async () => {
+    mocks.saveConsumerProfile.mockRejectedValue(thrown);
+    renderForm();
+
+    fireEvent.change(nameField(), { target: { value: "Ana Marie Cruz" } });
+    save();
+    await screen.findByRole("alert");
+
+    expect(nameField()).toHaveValue("Ana Marie Cruz");
   });
 });

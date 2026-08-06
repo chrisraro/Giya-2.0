@@ -234,13 +234,31 @@ bytes are CDN-served to anyone holding the URL, in exchange for no
 and a URL a CDN can actually cache. Private would put a signed-URL call on
 `/profile` (already `force-dynamic`) and on every future avatar surface, with a
 TTL that expires inside an open tab. What makes it defensible rather than merely
-convenient is that the bytes published are not the bytes the consumer picked:
-the server action re-encodes every upload through sharp
+convenient is that the bytes **the app** publishes are not the bytes the consumer
+picked: the server action re-encodes every upload through sharp
 (`src/features/identity/server/avatar-image.ts`) before it reaches the bucket,
-which strips the EXIF GPS tag a phone camera writes. Note also that public does
-NOT make the bucket enumerable - `list` reads `storage.objects` and is still
-gated by the SELECT policy, so the only avatars a stranger can fetch are the ones
-whose (uuid) URL they were given.
+which strips the EXIF GPS tag a phone camera writes.
+
+Scope that claim precisely - it is about the app's path, not about the bucket.
+The insert policy authorizes any authenticated session to PUT into its own uid
+prefix directly against the Storage API, bypassing the re-encode, and 0021 lets
+that session point its own `avatar_url` at the result. A consumer therefore *can*
+publish their own raw camera JPEG, GPS tag intact. The fence guarantees only that
+they can do it to themselves: no session can write into another's prefix.
+Self-inflicted EXIF is an accepted residual of a client-writable bucket;
+cross-user planting is not.
+
+Note also that public does NOT make the bucket enumerable - `list` reads
+`storage.objects` and is still gated by the SELECT policy, so the only avatars a
+stranger can fetch are the ones whose (uuid) URL they were given.
+
+On `allowed_mime_types` and SVG: the setting checks the **declared**
+Content-Type, not bytes. A direct caller can upload SVG bytes declaring
+`image/png` and this list will not stop them. What it guarantees is that the
+stored content type is always one of the three, so the object is *served* as a
+raster type and no browser parses it as a document - which is the stored-XSS hole
+that matters on a public origin. "No SVG bytes in the bucket" is not enforced
+here; the byte-level half is the action's magic-byte sniff.
 
 **UPDATE and DELETE policies exist here, unlike `receipts`.** A receipt image is
 evidence and must never be swapped or removed; an avatar is meant to be replaced

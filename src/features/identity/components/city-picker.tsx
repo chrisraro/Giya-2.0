@@ -20,8 +20,20 @@ import { cn } from "@/lib/utils";
 // Controlled on purpose: the selected city is state the CALLER owns.
 // Onboarding gates its Continue button on it and sends it to
 // completeConsumerOnboarding; the edit form sends it to saveConsumerProfile.
-// Everything else - the search text, the filtering, the roving focus - is
-// internal, because nothing outside has ever needed it.
+//
+// THE LOADED LIST AND THE SEARCH TEXT ARE ALSO THE CALLER'S, through
+// `useCityPicker()`, and that is not decoration. The onboarding wizard mounts
+// the city step only while `step === 1`. When this component owned the fetch and
+// the search string internally, every trip to Interests and back UNMOUNTED it:
+// ref_cities was read again on each return, the list started empty so the
+// "No cities match" empty state flashed during the refetch, and whatever had
+// been typed was gone. None of that happened before the extraction, because both
+// pieces of state lived in the page component, which stays mounted for the whole
+// wizard. Splitting the hook out puts them back there without giving anyone a
+// second copy of the query.
+//
+// The roving-focus refs stay internal: they are DOM handles for the rows this
+// render produced, and they are meaningless across an unmount.
 
 /**
  * The active cities from `ref_cities`, by name, alphabetically.
@@ -42,8 +54,22 @@ import { cn } from "@/lib/utils";
  * resolve the chosen name with `.ilike(...).maybeSingle()`, which raises on a
  * tie.
  */
-export function useCities(): string[] {
+export interface CityPickerState {
+  /** Every active city name, alphabetically. Empty until the read lands. */
+  readonly cities: string[];
+  readonly search: string;
+  readonly setSearch: (value: string) => void;
+}
+
+/**
+ * Hold this in a component that stays mounted for as long as the picker should
+ * remember anything - the wizard shell, the edit form - and hand it to
+ * `<CityPicker state={...} />`. See the note at the top of this file for the
+ * regression that makes the placement load-bearing rather than stylistic.
+ */
+export function useCityPicker(): CityPickerState {
   const [cities, setCities] = React.useState<string[]>([]);
+  const [search, setSearch] = React.useState("");
 
   React.useEffect(() => {
     let cancelled = false;
@@ -60,10 +86,12 @@ export function useCities(): string[] {
     };
   }, []);
 
-  return cities;
+  return { cities, search, setSearch };
 }
 
 export interface CityPickerProps {
+  /** From `useCityPicker()`, held by a component that outlives this one. */
+  readonly state: CityPickerState;
   /** The chosen city NAME, or null when none is chosen yet. */
   readonly value: string | null;
   readonly onChange: (city: string) => void;
@@ -74,16 +102,16 @@ export interface CityPickerProps {
 }
 
 export function CityPicker({
+  state,
   value,
   onChange,
   searchInputId = "city-search",
   searchLabel = "Search city",
   groupLabel = "Your city",
 }: CityPickerProps) {
-  const [search, setSearch] = React.useState("");
+  const { cities, search, setSearch } = state;
   const itemRefs = React.useRef<Record<string, HTMLDivElement | null>>({});
 
-  const cities = useCities();
   const filtered = React.useMemo(
     () => cities.filter((city) => city.toLowerCase().includes(search.trim().toLowerCase())),
     [cities, search],

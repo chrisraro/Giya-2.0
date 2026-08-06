@@ -13,7 +13,14 @@ import {
   AVATAR_MAX_UPLOAD_BYTES,
   newAvatarObjectPath,
   objectPathFromPublicUrl,
+  oversizePhotoMessage,
 } from "./avatar";
+import {
+  GENERIC_FAILURE,
+  PHOTO_REMOVE_FAILED,
+  PHOTO_SAVE_FAILED,
+  PROFILE_SAVE_FAILED,
+} from "./messages";
 import { profileEditSchema, type ProfileEditInput } from "./profile-schema";
 import { canonicalizeAvatarImage, sniffImageFormat } from "./server/avatar-image";
 
@@ -46,6 +53,26 @@ const NOT_SIGNED_IN: { ok: false; message: string } = {
 function revalidateProfileSurfaces(): void {
   revalidatePath("/profile");
   revalidatePath("/profile/edit");
+}
+
+/**
+ * Log the infrastructure failure, return the consumer's sentence.
+ *
+ * The database's own message is never the return value. A Postgres or Storage
+ * error reads `new row violates row-level security policy for table "objects"`
+ * or names a check constraint; that is schema leakage and it is not something a
+ * consumer can act on. The detail belongs in the log, where the person who can
+ * act on it is looking - `toErrorMessage` normalises it there so a non-Error
+ * rejection does not land as "[object Object]".
+ *
+ * Errors the consumer CAN act on - the name bounds, an unmatched city, an
+ * oversized or undecodable photo - are authored inline at their call sites and
+ * do not come through here. The split is deliberate: this function is for
+ * failures that are ours, not theirs.
+ */
+function infrastructureFailure(scope: string, error: unknown, copy: string): string {
+  console.error(`[identity] ${scope}`, toErrorMessage(error), error);
+  return copy;
 }
 
 /**
@@ -136,10 +163,7 @@ export async function saveConsumerProfile(input: ProfileEditInput): Promise<Acti
     // `||` and not `??`: a Zod issue with an empty message is falsy but not
     // nullish, and `??` would let "" through to render as a blank alert. That
     // is the live bug toErrorMessage exists for; the same rule applies here.
-    return {
-      ok: false,
-      message: parsed.error.issues[0]?.message || "That did not look right. Have another look.",
-    };
+    return { ok: false, message: parsed.error.issues[0]?.message || GENERIC_FAILURE };
   }
 
   const { displayName, cityName } = parsed.data;
@@ -152,7 +176,12 @@ export async function saveConsumerProfile(input: ProfileEditInput): Promise<Acti
       .ilike("name", cityName)
       .maybeSingle();
 
-    if (cityError) return { ok: false, message: toErrorMessage(cityError) };
+    if (cityError) {
+      return {
+        ok: false,
+        message: infrastructureFailure("city lookup failed", cityError, PROFILE_SAVE_FAILED),
+      };
+    }
 
     // completeConsumerOnboarding tolerates an unknown city and stores null,
     // because onboarding must never be blocked by it. This surface is the
@@ -173,14 +202,24 @@ export async function saveConsumerProfile(input: ProfileEditInput): Promise<Acti
     .update({ display_name: displayName })
     .eq("id", user.id);
 
-  if (profileError) return { ok: false, message: toErrorMessage(profileError) };
+  if (profileError) {
+    return {
+      ok: false,
+      message: infrastructureFailure("profiles update failed", profileError, PROFILE_SAVE_FAILED),
+    };
+  }
 
   const { error: consumerError } = await supabase
     .from("consumers")
     .update({ city_id: cityId })
     .eq("id", user.id);
 
-  if (consumerError) return { ok: false, message: toErrorMessage(consumerError) };
+  if (consumerError) {
+    return {
+      ok: false,
+      message: infrastructureFailure("consumers update failed", consumerError, PROFILE_SAVE_FAILED),
+    };
+  }
 
   revalidateProfileSurfaces();
   return { ok: true };
@@ -216,7 +255,10 @@ async function discardAvatarObject(
 
   const { error } = await supabase.storage.from(AVATARS_BUCKET).remove([path]);
   if (error) {
-    console.error("[avatars] could not remove a replaced avatar object", error);
+    // Logged, never surfaced. The row is already correct at this point; an
+    // orphaned object is an operational problem, not something to tell the
+    // consumer their save failed over.
+    console.error("[identity] could not remove a replaced avatar object", error);
   }
 }
 
@@ -253,12 +295,12 @@ export async function saveConsumerAvatar(formData: FormData): Promise<AvatarActi
     return { ok: false, message: "Pick a photo first, then save." };
   }
 
+  // The BACKSTOP, not the check a consumer meets. Next answers a Server Action
+  // body past `experimental.serverActions.bodySizeLimit` with a 413 before this
+  // function is entered, so for a browser caller the form's own check is the one
+  // that produces this sentence. This one is for a caller that is not the form.
   if (file.size > AVATAR_MAX_UPLOAD_BYTES) {
-    const megabytes = Math.floor(AVATAR_MAX_UPLOAD_BYTES / (1024 * 1024));
-    return {
-      ok: false,
-      message: `That photo is larger than ${megabytes} MB. Try a smaller one.`,
-    };
+    return { ok: false, message: oversizePhotoMessage() };
   }
 
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -291,8 +333,10 @@ export async function saveConsumerAvatar(formData: FormData): Promise<AvatarActi
     });
 
   if (uploadError) {
-    console.error("[avatars] upload failed", uploadError);
-    return { ok: false, message: toErrorMessage(uploadError) };
+    return {
+      ok: false,
+      message: infrastructureFailure("avatar upload failed", uploadError, PHOTO_SAVE_FAILED),
+    };
   }
 
   const {
@@ -309,7 +353,10 @@ export async function saveConsumerAvatar(formData: FormData): Promise<AvatarActi
     // public orphan behind a failed save: this is the one case where cleaning up
     // the NEW object is right, because the profile still points at the old one.
     await discardAvatarObject(supabase, publicUrl);
-    return { ok: false, message: toErrorMessage(updateError) };
+    return {
+      ok: false,
+      message: infrastructureFailure("avatar_url update failed", updateError, PHOTO_SAVE_FAILED),
+    };
   }
 
   // Only now is the previous object unreferenced.
@@ -349,7 +396,12 @@ export async function removeConsumerAvatar(): Promise<AvatarActionResult> {
     .update({ avatar_url: null })
     .eq("id", user.id);
 
-  if (error) return { ok: false, message: toErrorMessage(error) };
+  if (error) {
+    return {
+      ok: false,
+      message: infrastructureFailure("avatar_url clear failed", error, PHOTO_REMOVE_FAILED),
+    };
+  }
 
   await discardAvatarObject(supabase, previousUrl);
 

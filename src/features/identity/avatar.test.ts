@@ -3,13 +3,17 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import nextConfig from "../../../next.config";
+
 import {
   AVATARS_BUCKET,
   AVATAR_ACCEPTED_MIME_TYPES,
+  AVATAR_ACTION_BODY_LIMIT_BYTES,
   AVATAR_BUCKET_MAX_BYTES,
   AVATAR_CANONICAL_EXTENSION,
   AVATAR_CANONICAL_MIME_TYPE,
   AVATAR_FOLDER_DEPTH,
+  AVATAR_MAX_UPLOAD_BYTES,
   AVATAR_OWNER_SEGMENT_INDEX,
   newAvatarObjectPath,
   objectPathFromPublicUrl,
@@ -65,6 +69,28 @@ function folderDepthOf(policy: string): number | null {
 function bucketIdOf(policy: string): string | null {
   const match = policyBody(policy).match(/bucket_id\s*=\s*'([^']+)'/);
   return match ? match[1] ?? null : null;
+}
+
+/**
+ * `for <verb> to <roles>` off the given policy.
+ *
+ * The AUDIENCE is parsed here and not only in pgTAP because it is the
+ * highest-severity thing in the migration and pgTAP does not run in CI today.
+ * `to authenticated` -> `to public` turns a public avatars bucket into an open
+ * file host that anon can write to, and it changes nothing about the bucket id,
+ * the owner segment or the folder depth - so every other assertion in this file
+ * stays green through it.
+ */
+function audienceOf(policy: string): { verb: string; roles: string[] } {
+  const match = policyBody(policy).match(/for\s+(insert|select|update|delete)\s+to\s+([^\n]+)/i);
+  if (!match) throw new Error(`policy ${policy} has no parsable "for <verb> to <roles>" clause`);
+  return {
+    verb: (match[1] as string).toLowerCase(),
+    roles: (match[2] as string)
+      .split(",")
+      .map((role) => role.trim())
+      .filter(Boolean),
+  };
 }
 
 const bucketRow = (() => {
@@ -147,6 +173,27 @@ describe("the object path the app writes satisfies the policy the database enfor
     }
   });
 
+  it("CRITICAL: every policy is granted to `authenticated` only, never anon or public", () => {
+    // The single highest-severity mutation available in 0064: `to public` lets
+    // an unauthenticated caller write into a PUBLIC bucket on the project's own
+    // storage origin. pgTAP asserts this too (A7), but pgTAP does not run in CI
+    // today and this file does.
+    for (const policy of ALL_POLICIES) {
+      expect(audienceOf(policy).roles).toEqual(["authenticated"]);
+    }
+  });
+
+  it("covers all four verbs, exactly once each", () => {
+    // A missing DELETE policy is a "remove photo" that silently removes nothing;
+    // a missing SELECT policy makes the bucket unlistable even to its owner.
+    expect(ALL_POLICIES.map((policy) => audienceOf(policy).verb).sort()).toEqual([
+      "delete",
+      "insert",
+      "select",
+      "update",
+    ]);
+  });
+
   it("a bare filename with no owner segment can never be produced by the builder", () => {
     // The policy denies it (foldername('bare.jpg') is {}, so [1] is NULL and a
     // NULL predicate is not true). This asserts the builder never asks it to.
@@ -184,6 +231,50 @@ describe("what the app stores is what the bucket accepts", () => {
   it("does not allow SVG, which would be a script-bearing document on a public origin", () => {
     expect(bucketRow.mimeTypes).not.toContain("image/svg+xml");
     expect(AVATAR_ACCEPTED_MIME_TYPES).not.toContain("image/svg+xml");
+  });
+});
+
+// THE THIRD AGREEMENT, and the one that was missing.
+//
+// Next.js caps a Server Action's request body at 1 MB by default
+// (`defaultActionBodySizeLimit = '1 MB'` in
+// node_modules/next/dist/build/templates/app-page.js) and answers anything
+// larger with a 413 BEFORE the action function is entered. The avatar upload
+// goes through a Server Action carrying a File, so every photo between 1 MB and
+// AVATAR_MAX_UPLOAD_BYTES was killed by the framework and the action's own size
+// check - and its "larger than 8 MB" copy - could never be reached. A constant
+// in avatar.ts and a limit in next.config.ts are two files that have to agree,
+// so they are asserted against each other rather than each on its own.
+describe("the configured Server Action body limit admits the file the app accepts", () => {
+  const configured = nextConfig.experimental?.serverActions?.bodySizeLimit;
+
+  it("CRITICAL: next.config.ts raises the limit at all", () => {
+    // Without this the framework's 1 MB default applies and a normal phone
+    // photo 413s before saveConsumerAvatar runs.
+    expect(configured).toBeDefined();
+  });
+
+  it("CRITICAL: the configured limit is at least the largest file the action accepts", () => {
+    expect(typeof configured).toBe("number");
+    expect(configured as number).toBeGreaterThanOrEqual(AVATAR_MAX_UPLOAD_BYTES);
+  });
+
+  it("uses the constant rather than a number that merely happens to match today", () => {
+    expect(configured).toBe(AVATAR_ACTION_BODY_LIMIT_BYTES);
+  });
+
+  it("leaves envelope headroom above the file itself", () => {
+    // The body is a multipart action payload, not the raw bytes: boundaries,
+    // headers and the action id ride along. A limit set exactly at the file size
+    // would 413 a file that is exactly at the file size.
+    expect(AVATAR_ACTION_BODY_LIMIT_BYTES).toBeGreaterThan(AVATAR_MAX_UPLOAD_BYTES);
+  });
+
+  it("CRITICAL: is comfortably above the 4-6MB phone photo the comment promises", () => {
+    // avatar.ts justifies AVATAR_MAX_UPLOAD_BYTES by saying a photo straight off
+    // a phone camera is routinely 4-6MB. This asserts the promise is keepable.
+    expect(AVATAR_MAX_UPLOAD_BYTES).toBeGreaterThanOrEqual(6 * 1024 * 1024);
+    expect(configured as number).toBeGreaterThanOrEqual(6 * 1024 * 1024);
   });
 });
 

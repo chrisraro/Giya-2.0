@@ -42,6 +42,10 @@ vi.mock("./server/avatar-image", () => ({
   sniffImageFormat: mocks.sniffImageFormat,
 }));
 
+const { PHOTO_REMOVE_FAILED, PHOTO_SAVE_FAILED, PROFILE_SAVE_FAILED } = await import(
+  "./messages"
+);
+
 const {
   completeConsumerOnboarding,
   registerBusiness,
@@ -49,6 +53,14 @@ const {
   saveConsumerAvatar,
   saveConsumerProfile,
 } = await import("./actions");
+
+/**
+ * The infrastructure failures below are logged on purpose, so the console is
+ * silenced and inspected rather than left to spray Postgres text through the
+ * test output. Two assertions read `consoleError.mock.calls` directly: mapping
+ * the copy must not mean losing the diagnosis.
+ */
+const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 
 const AUTH_USER = { id: "user-1" };
 
@@ -67,10 +79,19 @@ function mockUnauthenticated() {
   mocks.getUser.mockResolvedValue({ data: { user: null } });
 }
 
-/** A FormData carrying one picked file, the way the edit form submits it. */
+/**
+ * A FormData carrying one picked file, the way the edit form submits it.
+ *
+ * The declared type defaults to **image/png**, deliberately. It used to default
+ * to image/jpeg, which is the same string as AVATAR_CANONICAL_MIME_TYPE - so
+ * "the upload is tagged with the canonical type" was green for
+ * `contentType: file.type` too, and the assertion could not tell "we set the
+ * canonical type" from "we echo whatever the browser claimed". A png fixture
+ * separates them. The re-encode makes it a JPEG either way, which is the point.
+ */
 function avatarForm(
   bytes: Uint8Array = ORIGINAL_BYTES,
-  { type = "image/jpeg", name = "me.jpg" } = {},
+  { type = "image/png", name = "me.png" } = {},
 ): FormData {
   const form = new FormData();
   form.set("avatar", new File([bytes as unknown as BlobPart], name, { type }));
@@ -324,30 +345,79 @@ describe("saveConsumerProfile", () => {
 
     const result = await saveConsumerProfile({ displayName: "Ana", cityName: null });
 
-    expect(result).toEqual({ ok: false, message: "profiles is unhappy" });
+    expect(result).toEqual({ ok: false, message: PROFILE_SAVE_FAILED });
     expect(mocks.consumersUpdate).not.toHaveBeenCalled();
   });
 
-  it("surfaces a failed city write specifically", async () => {
+  it("reports a failed city write too", async () => {
     mockAuthed();
     mocks.consumersEq.mockResolvedValue({ error: { message: "consumers is unhappy" } });
 
     expect(await saveConsumerProfile({ displayName: "Ana", cityName: null })).toEqual({
       ok: false,
-      message: "consumers is unhappy",
+      message: PROFILE_SAVE_FAILED,
     });
+  });
+
+  it("CRITICAL: never renders raw Postgres text at the consumer", async () => {
+    // `toErrorMessage(dbError)` passes the database's own message through
+    // verbatim, so a real RLS refusal rendered
+    //   new row violates row-level security policy for table "objects"
+    // and a check violation rendered the constraint name. That leaks schema and
+    // it is not a sentence anybody can act on.
+    mockAuthed();
+    mocks.profilesEq.mockResolvedValue({
+      error: {
+        message: 'new row violates row-level security policy for table "objects"',
+        code: "42501",
+      },
+    });
+
+    const result = await saveConsumerProfile({ displayName: "Ana", cityName: null });
+
+    const message = result.ok ? "" : result.message;
+    expect(message).toBe(PROFILE_SAVE_FAILED);
+    expect(message).not.toMatch(/row-level security|constraint|policy|table "/i);
+  });
+
+  it("CRITICAL: keeps the raw detail in the server log, where it is useful", async () => {
+    // Mapping the copy must not mean losing the diagnosis.
+    mockAuthed();
+    const raw = { message: 'violates check constraint "profiles_display_name_check"' };
+    mocks.profilesEq.mockResolvedValue({ error: raw });
+
+    await saveConsumerProfile({ displayName: "Ana", cityName: null });
+
+    expect(consoleError).toHaveBeenCalled();
+    expect(JSON.stringify(consoleError.mock.calls)).toContain("profiles_display_name_check");
   });
 
   it("CRITICAL: an EMPTY server message becomes real copy, never a blank alert", async () => {
     // The live bug toErrorMessage exists for. `message ?? FALLBACK` does not
     // catch "" - `??` only catches null and undefined - so the alert node
-    // renders nothing at all and the screen looks like it did nothing.
+    // renders nothing at all and the screen looks like it did nothing. Now
+    // closed by construction: the copy is a constant, so no server string
+    // reaches the alert at all.
     mockAuthed();
     mocks.profilesEq.mockResolvedValue({ error: { message: "" } });
 
     const result = await saveConsumerProfile({ displayName: "Ana", cityName: null });
 
-    expect(result).toEqual({ ok: false, message: "Something went wrong. Please try again." });
+    expect(result).toEqual({ ok: false, message: PROFILE_SAVE_FAILED });
+    expect(PROFILE_SAVE_FAILED.length).toBeGreaterThan(0);
+  });
+
+  it("reports a failed city LOOKUP without leaking the query error", async () => {
+    mockAuthed();
+    mocks.citiesMaybeSingle.mockResolvedValue({
+      data: null,
+      error: { message: 'relation "ref_cities" does not exist' },
+    });
+
+    const result = await saveConsumerProfile({ displayName: "Ana", cityName: "Cebu City" });
+
+    expect(result).toEqual({ ok: false, message: PROFILE_SAVE_FAILED });
+    expect(mocks.profilesUpdate).not.toHaveBeenCalled();
   });
 
   it("returns ok:false without touching any table when unauthenticated", async () => {
@@ -408,6 +478,17 @@ describe("saveConsumerAvatar", () => {
     expect(mocks.canonicalizeAvatarImage).toHaveBeenCalled();
     expect(mocks.upload.mock.calls[0]?.[1]).toBe(CANONICAL_BYTES);
     expect(mocks.upload.mock.calls[0]?.[1]).not.toBe(ORIGINAL_BYTES);
+  });
+
+  it("CRITICAL: tags the object with the CANONICAL type, not the browser's claim", async () => {
+    // The fixture declares image/png and the stored object is always a JPEG. If
+    // the action echoed `file.type` the object would be served as image/png
+    // while holding JPEG bytes - and, worse, the assertion would pass for a
+    // jpeg-declaring fixture, which is exactly how this one was green before.
+    mockAuthed();
+
+    await saveConsumerAvatar(avatarForm(ORIGINAL_BYTES, { type: "image/png" }));
+
     expect(mocks.upload.mock.calls[0]?.[2]).toMatchObject({ contentType: "image/jpeg" });
   });
 
@@ -482,6 +563,29 @@ describe("saveConsumerAvatar", () => {
     expect(updatedAt).toBeLessThan(removedAt);
   });
 
+  it("CRITICAL: reads the OLD url BEFORE anything is written", async () => {
+    // The other half of the ordering rule, and the one that was unasserted.
+    // Moving the read to just before the cleanup keeps every other assertion
+    // green - the fake returns the same url whenever it is called - while in
+    // production it would read the url that was just written and delete the
+    // object it just uploaded, leaving profiles.avatar_url pointing at a hole on
+    // EVERY upload. The fake cannot notice; the call order can.
+    mockAuthed();
+    mocks.profilesMaybeSingle.mockResolvedValue({
+      data: { avatar_url: OLD_AVATAR_URL },
+      error: null,
+    });
+
+    await saveConsumerAvatar(avatarForm());
+
+    const readAt = mocks.profilesSelect.mock.invocationCallOrder[0] ?? Infinity;
+    const uploadedAt = mocks.upload.mock.invocationCallOrder[0] ?? -Infinity;
+    const updatedAt = mocks.profilesUpdate.mock.invocationCallOrder[0] ?? -Infinity;
+
+    expect(readAt).toBeLessThan(uploadedAt);
+    expect(readAt).toBeLessThan(updatedAt);
+  });
+
   it("deletes nothing when this is the consumer's first avatar", async () => {
     mockAuthed();
     mocks.profilesMaybeSingle.mockResolvedValue({ data: { avatar_url: null }, error: null });
@@ -516,7 +620,7 @@ describe("saveConsumerAvatar", () => {
 
     const result = await saveConsumerAvatar(avatarForm());
 
-    expect(result).toEqual({ ok: false, message: "row write failed" });
+    expect(result).toEqual({ ok: false, message: PHOTO_SAVE_FAILED });
     expect(mocks.remove).toHaveBeenCalledWith(["user-1/new-object.jpg"]);
     expect(mocks.remove).not.toHaveBeenCalledWith(["user-1/old-object.jpg"]);
   });
@@ -527,17 +631,34 @@ describe("saveConsumerAvatar", () => {
 
     const result = await saveConsumerAvatar(avatarForm());
 
-    expect(result).toEqual({ ok: false, message: "bucket said no" });
+    expect(result).toEqual({ ok: false, message: PHOTO_SAVE_FAILED });
     expect(mocks.profilesUpdate).not.toHaveBeenCalled();
   });
 
-  it("renders the generic copy for an EMPTY storage error message", async () => {
+  it("CRITICAL: never renders raw Storage text at the consumer", async () => {
+    // The storage layer's refusals are the worst strings in the set: an RLS
+    // denial on `storage.objects` names the schema, the table and the policy.
+    mockAuthed();
+    mocks.upload.mockResolvedValue({
+      data: null,
+      error: { message: 'new row violates row-level security policy for table "objects"' },
+    });
+
+    const result = await saveConsumerAvatar(avatarForm());
+
+    const message = result.ok ? "" : result.message;
+    expect(message).toBe(PHOTO_SAVE_FAILED);
+    expect(message).not.toMatch(/row-level security|storage|objects|policy/i);
+    expect(JSON.stringify(consoleError.mock.calls)).toContain("row-level security");
+  });
+
+  it("renders real copy for an EMPTY storage error message", async () => {
     mockAuthed();
     mocks.upload.mockResolvedValue({ data: null, error: { message: "" } });
 
     expect(await saveConsumerAvatar(avatarForm())).toEqual({
       ok: false,
-      message: "Something went wrong. Please try again.",
+      message: PHOTO_SAVE_FAILED,
     });
   });
 
@@ -589,7 +710,7 @@ describe("removeConsumerAvatar", () => {
 
     const result = await removeConsumerAvatar();
 
-    expect(result).toEqual({ ok: false, message: "could not clear" });
+    expect(result).toEqual({ ok: false, message: PHOTO_REMOVE_FAILED });
     expect(mocks.remove).not.toHaveBeenCalled();
   });
 
