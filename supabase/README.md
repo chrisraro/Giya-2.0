@@ -102,7 +102,7 @@ is transaction-wrapped (`begin ... rollback`) and leaves no data behind:
 psql "$DATABASE_URL" -f supabase/tests/rls_identity_smoke.sql
 ```
 
-Fifteen suites, one per domain:
+Nineteen suites, one per domain (this count already trailed the real total before this task's addition; corrected in passing rather than left further stale):
 
 | file | covers |
 |---|---|
@@ -124,6 +124,7 @@ Fifteen suites, one per domain:
 | `rls_integration_connections_smoke.sql` | `integration_connections` (0032): THE TOKEN COLUMN FENCE, asserted as the pair that matters (an owner reading their OWN tenant row gets 42501 on `access_token_encrypted` and `refresh_token_encrypted`, and on `select *`, while every allowlisted column reads cleanly), the owner/manager role list and the marketing narrowing, cross-tenant denial, the consumer and anon matrix rows, no client write path of any kind, the service_role split (insert/update/delete stay, TRUNCATE goes), the no-truncate statement trigger, and the four check constraints: the plaintext envelope fence (a raw `EAAG...` token is refused because its first byte is not the envelope version), the error/status pairing in both directions, and the provider and status vocabularies, plus the account uniqueness rule that reconnect upserts onto |
 | `rpc_routing_breakdown_smoke.sql` | `receipt_routing_breakdown` (0035, decision D10), 14 assertions over two tenants: the four outcome buckets with queued/processing collapsing to `pending`, attribution counted once per receipt including a receipt that tripped two rules (so the reason counts exceed the review count, which is correct rather than a rounding error), D7's `ocr_operator_failure` attributed like any other reason, BACKFILL HONESTY (a review whose `parse_meta` predates `review_reasons` counts as `unattributed` and never inflates a real rule), TENANCY asserted as the pair that matters (one tenant's breakdown never carries the other's reason, and the platform-scoped `p_business_id null` call does see both), the `p_days` window filter and its clamp, and the service_role-only grant that keeps an aggregate from routing around 0017's `parse_meta` column fence |
 | `rpc_points_expiry_smoke.sql` | Task 1.3 points expiry enforcement (0042-0048, both review-fix passes), 67 assertions: doc 35 section 7's FIFO remainder formula ordered by EXPIRY not creation (I1) - a partially-consumed lot, a later untouched lot, a lot fully drained to 0, a clawback-only consumption, and the counter-example where a never-expiring `adjust` must be drained LAST rather than first (a null expiry sorting as `+∞`, not first); the aggregate at two `asof` values and the public wrapper agreeing with it; `public.points_next_expiry` correctly excluding an already-past-due lot; `public.expire_points` (the sweep) - SELF-CLEARING proven with a small `p_limit` (I2: a third pair is reached only once the first two clear a slot, not starved forever), the right `expire` row with the restored `x_expired_sum`/`d_drained_sum` audit fields (I5), the cached balance equal to the ledger sum, nothing for a zero-balance pair, a backfilled-already-past-due lot swept correctly (M5), and idempotency across every pair including the self-clearing trio; `public.points_expiry_warn` (the warn job) using the PROJECTED remainder at both horizons rather than the soonest lot (original I3: a shadowed larger lot fires its own combined total on the first run), ordered by URGENCY - soonest in-window expiry, not UUID - so a p_limit of 1 notifies a 2-days-out pair over a UUID-earlier 25-days-out one (re-review N2), deduped on the WINDOW-STABLE soonest-lot date rather than the moving projected figure, proven by literally aging the ledger between runs to simulate a day passing: a growing aggregate (300->500) produces no duplicate, only a genuine change of the soonest lot does (re-review N3), the restored date in both the copy ("expire by...") and the `data.expires_on` payload (re-review N4), the in_app/email channel split, a backfilled-already-past-due lot never warned (M5), and idempotency; both `cron.job` rows with their exact schedule and command; the append-only fence's one permanent exception (now correctly homed in 0047, not rewriting 0042's history) proven both ways (I4: the null-to-value transition succeeds and lands, every other column and every other `expires_at` transition and DELETE still raise), with its column allowlist pinned exactly (re-review N7); and the full I-A grant matrix including `public.points_expirable_remainder`, missed by the first pass (C1) |
+| `rpc_campaigns_sweep_smoke.sql` | Task 2.1 `campaigns.sweep` (0053), 24 assertions: doc 34's T3 (`scheduled -> active` at `starts_at`) and T7 (`active|paused -> ended` at `ends_at`) as ONE `public.sweep_campaigns` function with two independent candidate scans; a due scheduled campaign on an ACTIVE business activates with a `campaign.activated` audit row (`actor_kind='system'`, `after.trigger='sweep'` - the app's own vocabulary from `src/features/campaigns/server/audit.ts`, never a parallel verb); a not-yet-due scheduled campaign and both an already-`ended` and an already-`archived` campaign are left completely untouched with no audit row; an `active` campaign AND a `paused` campaign both past `ends_at` are ended with `campaign.ended` recording the correct source status in `before`; G1 (business standing) gates T3 alone - a due scheduled campaign on a SUSPENDED business is SKIPPED (stays `scheduled`, no audit row, no error) and then genuinely activates once the business is set back to `active`, proving the skip re-checks live standing rather than caching a verdict; a second run transitions nothing further (self-clearing, the 0045 lesson); the widened `campaigns_active_window_idx` (now covering `paused`, which 0012's original predicate excluded); the `cron.job` row's exact schedule (`*/5 * * * *`) and command; no `points_transactions` row written by any of it; and the service_role-only grant |
 
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
@@ -213,12 +214,13 @@ raised.
 | `receipts.stuck_sweep` | `50 * * * *` | `public.sweep_stuck_receipts(200)` | :50 is doc 39's hourly jobs-reconciler slot, which is what this is. Against a 24h threshold, 23 runs in 24 find nothing and each empty run is one partial-index probe. The payoff is bounded discovery latency: a receipt reaches the operator's queue within the hour of crossing the threshold rather than within a day. |
 | `points.expiry_sweep` | `10 18 * * *` | `public.expire_points(200)` | Doc 39's registered slot (02:10 Manila), right after the daily rollup (01:40). Points expire on a flat 12-month clock (0042), so a day's latency on the sweep is negligible against that TTL - daily is the doc-registered cadence and there is no tighter invariant to protect the way claims' sub-day TTL argues for hourly. |
 | `points.expiry_warn` | `25 18 * * *` | `public.points_expiry_warn(200)` | Doc 39's registered slot (02:25 Manila), immediately after the expiry sweep itself, so a lot the sweep just expired can never also be warned about in the same run. |
+| `campaigns.sweep` | `*/5 * * * *` | `public.sweep_campaigns(200)` | Doc 34 section 3's own cadence for this queue ("every 5 minutes"), driving both the T3 (`scheduled -> active` at `starts_at`) and T7 (`active|paused -> ended` at `ends_at`) transitions. Tighter than the daily points-expiry cadence because a campaign's schedule is merchant-authored down to the minute (a "starts at 9am" promo), unlike a flat 12-month expiry clock; looser than a per-campaign timer because doc 34's own latency contract is "state visible within one sweep interval (~6 minutes)" and consumer-facing liveness additionally checks `isCampaignLive`'s window, so sweep lag can never show an expired promo as claimable in the meantime. |
 
-All four jobs run as `postgres`, which owns every function and so retains
-EXECUTE independently of the `service_role`-only grants. All four functions
+All five jobs run as `postgres`, which owns every function and so retains
+EXECUTE independently of the `service_role`-only grants. All five functions
 are idempotent (`points.expiry_sweep`/`points.expiry_warn` by recomputing the
 same FIFO formula from the ledger each run - see `rpc_points_expiry_smoke.sql`
-- the other two via `for update skip locked`), so an overlapping run or a
+- the other three via `for update skip locked`), so an overlapping run or a
 concurrent application write is safe.
 
 ### Points expiry (0042-0048, task 1.3 + two review-fix passes)
@@ -300,6 +302,53 @@ wallet is enforced by three pieces, all sharing ONE FIFO formula
 The wallet's own "what expires when" line (`public.points_next_expiry`) reads
 the identical formula, so the number a consumer sees is the number the sweep
 will eventually take.
+
+### Campaign sweep (0053, task 2.1)
+
+`public.sweep_campaigns` closes doc 34's two time-driven lifecycle
+transitions that had nothing firing them (`service.ts`'s
+`emitLifecycleEvent` carried `// TODO(api): wire ... the ends_at sweep
+worker` since task 1.7): T3 `scheduled -> active` at `starts_at`, and T7
+`active|paused -> ended` at `ends_at`. One function, two independent
+candidate scans, each bounded by its own `p_limit`:
+
+- **T3** re-checks G1 (business standing) alone, not the full G1-G3 doc 34
+  names for this trigger - see the migration's own header for why G2/G3 are
+  scoped out (they were already true at schedule time and are not the
+  sweep's to silently fix if they regressed). A business that is not
+  currently `status = 'active'` gets its due campaign SKIPPED - left
+  `scheduled`, re-evaluated every subsequent run, never activated and never
+  errored.
+- **T7** is unconditional: an ended window ends regardless of business
+  standing. Both `active` and `paused` sources share one scan; the
+  transitioning UPDATE's own `status = <source>` predicate is what keeps
+  each row self-clearing regardless of which of the two it started from.
+
+Both transitions write an `audit_logs` row reusing the app's OWN verb
+registry (`src/features/campaigns/server/audit.ts`'s
+`CAMPAIGN_LIFECYCLE_ACTIONS` - `campaign.activated` / `campaign.ended`) with
+`actor_kind='system'`, `actor_id` null, and `after.trigger='sweep'` - the
+same discriminator task 1.7's `service.ts` writes `'manual'` for every
+staff-initiated transition, not a parallel verb like
+`campaign.activated_by_sweep` that would fragment the vocabulary 0022/task
+1.7 unified. A skipped campaign gets no audit row at all: nothing happened
+to it, so there is nothing to record beyond the `RAISE NOTICE` an operator
+can read in `cron.job_run_details`/server logs.
+
+Self-clearing per 0045's lesson: neither scan's predicate can stay true for
+a row this function itself just transitioned, because the only write either
+loop body makes is the very `status` flip the predicate tests, re-asserted
+on the UPDATE. The one row shape that legitimately keeps re-matching is a
+SKIPPED scheduled campaign - that is not the 0045 bug, it is this task's own
+intended behaviour: "not yet activated, still due" stays true of it until
+the business regains standing or a human intervenes.
+
+0012's `campaigns_active_window_idx` predated this sweep and only covered
+`status in ('scheduled','active')`; widened here (drop + create, since a
+partial index predicate cannot be altered in place) to include `paused`, so
+the T7 scan's paused half is index-assisted too.
+
+Covered by `rpc_campaigns_sweep_smoke.sql`, 24 assertions.
 
 ### What the receipts sweep does and does not do
 
@@ -422,6 +471,26 @@ outcome is visible; the push is owed to the notifications slice.
   rate-limit repeated claim/cancel cycles, if it proves to matter in
   practice.
 
+- **`campaigns.sweep` (0053, task 2.1) transitions carry no cache/embed/send
+  side effects.** `public.sweep_campaigns` writes `campaigns.status` and its
+  own `audit_logs` row directly - it is plpgsql, so it cannot call
+  `src/features/campaigns/server/service.ts`'s `emitLifecycleEvent` seam the
+  way every staff-initiated transition does, and therefore cannot fire doc
+  34 section 2's "side effects" table entries for T3 (`->active`: cache
+  invalidation, `ai.embed_refresh`, marketing-send materialization) or T7
+  (`->ended`: cache invalidation, embed downrank). A sweep-driven activation
+  is correct in the database and in the audit trail from the first instant,
+  but a portal page cached under the old status, or the assistant's RAG
+  index, will not reflect it until whatever normally refreshes those runs
+  again for an unrelated reason. Same species of gap as
+  `points.expiry_warn`'s unsent email row below: the database sweep can only
+  ever do the honest SQL-reachable half. Owed: either a TypeScript-side
+  poller that reads what the sweep just changed, or moving the side-effect
+  triggers to fire off the `audit_logs` row itself (`action` LIKE
+  `'campaign.%'`) rather than off the `emitLifecycleEvent` call site, so a
+  swept transition and a manual one are indistinguishable to every reader
+  downstream of the audit trail.
+
 - `private.jwt_biz_role()` keeps doc 12's table-lookup fallback for `biz_overflow` users (>20 memberships). Under RLS this recurses (policy -> helper -> same table) and Postgres aborts the query for those users. [SCALE]-only surface; fixing requires a security definer lookup variant and an ADR against the Locked doc 12. Do not ship overflow accounts before that ADR.
 - The custom access token hook runs as `supabase_auth_admin` with explicit grants/policies (current Supabase-documented pattern) instead of doc 12's literal `security definer` wording. Functionally equivalent; noted as doc drift.
 - ~~**`consumers.scan_blocked_until` is now load-bearing and still self-writable.**~~ **CLOSED by `0021_consumer_selfupdate_column_fence.sql`.** `consumers_owner_update` and `profiles_owner_update` are still row-scoped only (RLS cannot express column grants), but `authenticated` no longer holds table-level UPDATE on either table. It now holds UPDATE on exactly these columns, and nothing else:
@@ -486,6 +555,14 @@ outcome is visible; the push is owed to the notifications slice.
   the definer-callable warnings because it is plain `SECURITY INVOKER`
   (called from inside `cancel_claim`/`expire_claims`, which already run as
   the owner) and is revoked from every role including `service_role`.
+- Migration 0053 (task 2.1: `sweep_campaigns`, the widened
+  `campaigns_active_window_idx`, the `campaigns.sweep` cron job) added no new
+  advisor of any level. Verified live on 2026-08-06: still 0 ERROR, same WARN
+  set. `public.sweep_campaigns` does not appear in the authenticated-callable
+  definer warnings, because EXECUTE is granted to `service_role` only and it
+  pins `search_path = ''`. The freshly-built index shows as "has not been
+  used" on the performance advisor, which is expected of any index checked
+  immediately after creation and not itself a finding.
 
 ### `cancel_claim` (0050-0051, task 1.4 + review-fix pass)
 
@@ -603,6 +680,8 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0049_points_expiry_warn_honest_deadline.sql | (applied 2026-08-06) | 0049_points_expiry_warn_honest_deadline |
 | 0050_cancel_claim.sql | (applied 2026-08-06) | 0050_cancel_claim |
 | 0051_cancel_claim_review_fixes.sql | (applied 2026-08-06) | 0051_cancel_claim_review_fixes |
+| 0052_definer_service_role_hygiene.sql | 20260806082050 | 0052_definer_service_role_hygiene |
+| 0053_campaigns_sweep.sql | 20260806084550 | 0053_campaigns_sweep |
 
 **Rows 0001-0035 are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`; rows 0036-0049 were applied later, and 0042-0049 on 2026-08-06.** The
 sentence below describes the replay only. It does NOT describe 0042-0049: one

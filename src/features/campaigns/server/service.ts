@@ -36,14 +36,31 @@ import { createServiceRoleClient } from "@/lib/supabase/service";
 
 /**
  * Notifies downstream consumers that a campaign's lifecycle state changed.
- * Today this is just a log line; it is the seam a future analytics/sweep
- * job hangs off of once it exists.
+ * Today this is just a log line; it is the seam a future analytics job
+ * hangs off of once it exists.
  *
  * `requestId` is logged alongside the rest (review round 2, item 4) so this
  * line can be correlated with the request log and with the `audit_logs` row
  * `writeLifecycleAuditRow` writes for the SAME call - same pattern
  * `receipts/server/review.ts`'s `request=${requestId}` suffix uses. null for
  * a caller with no single inbound request to correlate to.
+ *
+ * The T3/T7 sweep worker (doc 39) is now built (task 2.1,
+ * `public.sweep_campaigns`, `supabase/migrations/0053_campaigns_sweep.sql`)
+ * and DOES fire `starts_at`/`ends_at` transitions - but as a plpgsql
+ * SECURITY DEFINER function, it cannot reach this TypeScript seam and never
+ * calls it: it writes `campaigns.status` and its own `audit_logs` row
+ * directly, the same "database can't reach TypeScript" gap
+ * `points.expiry_warn`'s unsent email row already documents
+ * (`supabase/README.md`). So a sweep-driven transition still gets NO cache
+ * invalidation, embed refresh or marketing-send materialization - the doc
+ * 34 section 2 "side effects" table entries for T3/→active and T7/→ended -
+ * where a staff-initiated transition through THIS function does. TODO(api):
+ * wire analytics for every transition, staff-initiated or swept, and give
+ * the sweep's own transitions the same cache/embed side effects a manual
+ * one gets (would need either a TypeScript-side poller reading what the
+ * sweep just changed, or moving those side effects to fire off the
+ * `audit_logs` row itself rather than off this call site).
  */
 export function emitLifecycleEvent(
   businessId: string,
@@ -54,7 +71,7 @@ export function emitLifecycleEvent(
   console.info(
     `[campaigns] campaign.lifecycle business=${businessId} campaign=${campaignId} action=${action} request=${requestId}`,
   );
-  // TODO(api): wire analytics + the ends_at sweep worker (doc 39)
+  // TODO(api): wire analytics (see doc comment above for the sweep gap)
 }
 
 // exactOptionalPropertyTypes is on for this project, so `{ code: maybeUndefined }`
