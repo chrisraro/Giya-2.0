@@ -189,7 +189,10 @@ describe("applyCooldownIfEarned: the audit row", () => {
     expect(row.after).toMatchObject({
       scan_blocked_until: new Date(NOW.getTime() + 24 * 3_600_000).toISOString(),
       hours: 24,
-      strikes: 3,
+      // M2: named for what it is - the (capped) count the strike-check read -
+      // not `strikes`, which would misrepresent a `.limit(...)`-bounded read
+      // as an exact fact about the consumer.
+      strikes_at_or_above: 3,
     });
     expect(row.before).toEqual({ scan_blocked_until: null });
   });

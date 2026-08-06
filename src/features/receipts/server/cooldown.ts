@@ -41,20 +41,46 @@ import type { FraudRejectReason, ReceiptRejectReason } from "../types";
 // system row with a null reason is already legal under the live schema. No
 // migration is needed to record this.
 //
-// GATE OR BEST EFFORT? `receipts/server/review.ts` gates its own audit write
-// (aborts the decision) because a FAILED gate there would mint UNAUDITABLE
-// POINTS - threat-model item 6, doc 15's one unforgivable failure mode. This
-// function mints nothing: the cooldown itself is the consequence, and it is
-// already correct and durable on `consumers.scan_blocked_until` by the time
-// the audit insert below runs. Aborting it now would not undo the block (this
-// function NEVER THROWS and NEVER UNDOES a write that already landed - see
-// the doc above); it would only turn one missing log line into a second one.
-// So this follows `receipts/server/escalate.ts`'s posture, not review.ts's:
-// log loudly, at error level, naming the consumer and the block, and carry
-// on. The block is real either way, and it is not the only trace of itself -
-// `consumers.scan_blocked_until` is durable state a support engineer can read
-// directly, exactly as escalate.ts notes `escalated_at` is for its own
-// best-effort row.
+// GATE OR BEST EFFORT? Three comparisons, and the one a reader reaches for
+// first is the one most likely to mislead, so it goes first here too.
+//
+//   * `admin/consequences.ts` writes this ladder step's OTHER half - the
+//     identical verb (`fraud.cooldown_applied`) on the identical entity
+//     (`consumer`) - and chooses to REVERT the state change when its audit
+//     write fails. That looks like the precedent to follow and is not: its
+//     revert exists to serve doc 15's admin-reason requirement, which is a
+//     control over ADMINS ("admin actions on tenant data always require a
+//     recorded reason"). Nothing here is an admin action - `reason` is
+//     structurally null on a system row and 0022 never asks this row for
+//     one - so the control that justifies consequences.ts's revert simply
+//     does not apply to this one, and copying the shape without the reason
+//     it exists for would just be ceremony.
+//   * `receipts/server/review.ts` gates its own audit write (aborts the
+//     decision) because a FAILED gate there would mint UNAUDITABLE POINTS -
+//     threat-model item 6, doc 15's one unforgivable failure mode. This
+//     function mints nothing: the cooldown itself is the consequence, and it
+//     is already correct and durable on `consumers.scan_blocked_until` by
+//     the time the audit insert below runs. Aborting it now would not undo
+//     the block (this function NEVER THROWS and NEVER UNDOES a write that
+//     already landed - see the doc above); it would only turn one missing
+//     log line into a second one.
+//   * So this follows `receipts/server/escalate.ts`'s posture instead: log
+//     loudly, at error level, naming the consumer and the block, and carry
+//     on. The block is real either way, and it is not the only trace of
+//     itself - `consumers.scan_blocked_until` is durable state a support
+//     engineer can read directly, exactly as escalate.ts notes
+//     `escalated_at` is for its own best-effort row.
+//
+// NOTE ON RE-PROCESSING (append-only, and deliberately so). A receipt that
+// is re-processed after already earning a block (a reclaim, a manual re-run)
+// re-evaluates the strike count and, if it still meets the threshold, writes
+// a SECOND `fraud.cooldown_applied` row and may extend `scan_blocked_until`
+// further into the future (never shorten it - see the never-shorten guard
+// below). This is not a bug: `audit_logs` is append-only by design (0022),
+// and two rows both correctly describe two real evaluations. Said explicitly
+// here because nothing else in this file would tell a reader whether a
+// second row on the same consumer means a second offense or a duplicate
+// write.
 // ===========================================================================
 
 /** Doc 37 consequences ladder step 2: strikes counted over 30 days. */
@@ -101,7 +127,13 @@ async function writeCooldownAuditRow(
     previousBlockedUntil: string | null;
     blockedUntil: string;
     hours: number;
-    strikes: number;
+    /** The count the strike-check READ, which is capped at
+     * `settings.cooldownStrikes` by the `.limit(...)` on that query (a
+     * consumer with 9 fraud rejections reads back exactly 3 here when the
+     * threshold is 3). Recorded under a name that says so, rather than as
+     * `strikes`, which would misstate a cost-bounded read as an exact count
+     * of the consumer's own rejections (M2). */
+    strikesAtOrAbove: number;
     requestId: string | null;
   },
 ): Promise<void> {
@@ -119,7 +151,7 @@ async function writeCooldownAuditRow(
     after: {
       scan_blocked_until: input.blockedUntil,
       hours: input.hours,
-      strikes: input.strikes,
+      strikes_at_or_above: input.strikesAtOrAbove,
     },
     reason: null,
     request_id: input.requestId,
@@ -250,7 +282,7 @@ export async function applyCooldownIfEarned(
     previousBlockedUntil: consumer?.scan_blocked_until ?? null,
     blockedUntil: blockedUntil.toISOString(),
     hours: settings.cooldownHours,
-    strikes,
+    strikesAtOrAbove: strikes,
     requestId,
   });
 }

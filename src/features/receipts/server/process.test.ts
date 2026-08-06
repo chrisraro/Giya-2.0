@@ -2234,8 +2234,9 @@ describe("validateParsedReceipt", () => {
     });
 
     it("adds the catalog's closed-hours signal for a receipt outside them", () => {
-      // 2026-07-24T23:00:00Z = Friday 07:00 Manila, two hours before open
-      // (well past the 1h grace).
+      // 2026-07-23T23:00:00Z = Friday 07:00 Manila, two hours before open
+      // (well past the 1h grace). M5: this comment previously said
+      // 2026-07-24, a day off from the instant the code actually uses.
       const outsideHours = new Date("2026-07-23T23:00:00.000Z");
       const result = validate({
         parsed: { ...parsed, receiptDate: outsideHours },
@@ -2249,7 +2250,23 @@ describe("validateParsedReceipt", () => {
         severity: "warn",
         score: 0.4,
       });
-      expect(signal?.evidence).toMatchObject({ receipt_time: "07:00", weekday: 5 });
+      // Doc 37 line 82's evidence contract.
+      expect(signal?.evidence).toMatchObject({
+        receipt_date: outsideHours.toISOString(),
+        opening_hours_day: { day: 5, open: "09:00", close: "21:00" },
+      });
+    });
+
+    it("adds nothing when the receipt's date was ambiguous (C3)", () => {
+      // Same outside-hours instant as the test above - would otherwise fire.
+      const outsideHours = new Date("2026-07-23T23:00:00.000Z");
+      const result = validate({
+        parsed: { ...parsed, receiptDate: outsideHours, dateAmbiguous: true },
+        businessOpeningHours: FRIDAY_9_TO_21,
+      });
+      expect(
+        result.signals.some((item) => (item.evidence as { kind?: string }).kind === "closed_hours"),
+      ).toBe(false);
     });
 
     it("adds nothing when the receipt carries no extracted time", () => {

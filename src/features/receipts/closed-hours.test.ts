@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { CLOSED_HOURS_GRACE_MINUTES, checkClosedHours } from "./closed-hours";
+import type { ClosedHoursCheckInput } from "./closed-hours";
 
 // ===========================================================================
 // Doc 37 S5's closed-hours case, in isolation from the pipeline.
@@ -22,6 +23,19 @@ function manila(dateStr: string, hour: number, minute: number): Date {
   return new Date(`${dateStr}T${hh}:${mm}:00+08:00`);
 }
 
+/** Every test states only what it is about; `timeExtracted`/`dateAmbiguous`
+ * default to the values that let the check run at all. */
+function check(overrides: Partial<ClosedHoursCheckInput> & { receiptDate: Date }): ReturnType<
+  typeof checkClosedHours
+> {
+  return checkClosedHours({
+    timeExtracted: true,
+    dateAmbiguous: false,
+    openingHours: [],
+    ...overrides,
+  });
+}
+
 interface DayEntry {
   day: number;
   open: string;
@@ -40,147 +54,216 @@ function week(overrides: Record<number, Partial<Omit<DayEntry, "day">>> = {}): D
   }));
 }
 
-describe("checkClosedHours: the null-not-a-verdict cases", () => {
-  it("never runs when the receipt carries no extracted time", () => {
-    // 2026-07-20 is a Monday, 10:00 Manila - well inside a Monday 08:00-20:00
-    // window, so ONLY `timeExtracted` explains a null here.
-    const result = checkClosedHours({
-      receiptDate: manila("2026-07-20", 10, 0),
-      timeExtracted: false,
-      openingHours: week({ 1: { open: "08:00", close: "20:00", closed: false } }),
-    });
-    expect(result).toBeNull();
-  });
-
-  it("never runs when the business has no configured hours at all", () => {
-    // 23:00 - clearly outside any reasonable window - and still null,
-    // because the business has never opened the hours editor.
+// ---------------------------------------------------------------------------
+// C1 — the exact false-positive shapes the review demonstrated by execution
+// against the previous (rejected) implementation. Each of these MUST return
+// null: absent or malformed data reads as "the check did not run," never as
+// "closed," because a false signal on a real purchase is the worst outcome
+// this system can produce.
+// ---------------------------------------------------------------------------
+describe("checkClosedHours: C1 — malformed/partial opening_hours never fabricates a signal", () => {
+  it("never invents hours from an unparseable time (numeric day, bad HHMM)", () => {
+    // The previous implementation's normalizer (`parseOpeningHours`)
+    // substituted 09:00-21:00 for "8am"/"10pm" and signalled at 22:30.
+    const openingHours = [{ day: 1, open: "8am", close: "10pm" }];
     expect(
-      checkClosedHours({
-        receiptDate: manila("2026-07-20", 23, 0),
-        timeExtracted: true,
-        openingHours: [],
-      }),
+      check({ receiptDate: manila("2026-07-20", 22, 30), openingHours }), // Monday 22:30
     ).toBeNull();
   });
 
-  it("treats a non-array or missing opening_hours the same as empty", () => {
-    for (const openingHours of [null, undefined, "not an array", 42, {}]) {
+  it("never signals a day the raw array never covers (a Mon-Fri-only week, Saturday receipt)", () => {
+    const mondayToFriday = [1, 2, 3, 4, 5].map((day) => ({
+      day,
+      open: "09:00",
+      close: "21:00",
+      closed: false,
+    }));
+    expect(
+      check({ receiptDate: manila("2026-07-25", 13, 0), openingHours: mondayToFriday }), // Saturday 13:00
+    ).toBeNull();
+  });
+
+  it("never treats seven bare {day:N} rows (no open/close/closed at all) as open", () => {
+    const bareRows = [1, 2, 3, 4, 5, 6, 7].map((day) => ({ day }));
+    expect(
+      check({ receiptDate: manila("2026-07-20", 23, 30), openingHours: bareRows }), // Monday 23:30
+    ).toBeNull();
+  });
+
+  it("trusts a well-formed entry with a MISSING closed key (real times, not a substitution)", () => {
+    // Distinct from the bare-row case above: real open/close strings were
+    // actually written down, so `isHoursEntry` treats the day as open - this
+    // is the one shape that is legitimately data, not fiction, and firing
+    // here is correct, not a bug.
+    const openingHours = [{ day: 1, open: "09:00", close: "21:00" }];
+    const signal = check({ receiptDate: manila("2026-07-20", 23, 0), openingHours }); // Monday 23:00, past close+grace
+    expect(signal).not.toBeNull();
+    expect(check({ receiptDate: manila("2026-07-20", 12, 0), openingHours })).toBeNull(); // inside it
+  });
+
+  it("treats a genuinely well-formed but entirely-closed week the same as unconfigured", () => {
+    // Every entry here is individually VALID (real day, real closed:true) -
+    // the point is that a week with no open day anywhere is operationally
+    // indistinguishable from "nobody has told us this business's hours" and
+    // must not flag literally every receipt at that business.
+    expect(
+      check({ receiptDate: manila("2026-07-20", 23, 0), openingHours: week() }),
+    ).toBeNull();
+  });
+
+  it("never signals a day the receipt falls on that simply has no entry", () => {
+    const onlyTuesday = [{ day: 2, open: "09:00", close: "21:00", closed: false }];
+    expect(
+      check({ receiptDate: manila("2026-07-20", 23, 0), openingHours: onlyTuesday }), // Monday
+    ).toBeNull();
+  });
+
+  it("never runs on an empty, non-array, or absent opening_hours", () => {
+    for (const openingHours of [[], null, undefined, "not an array", 42, {}]) {
       expect(
         checkClosedHours({
           receiptDate: manila("2026-07-20", 23, 0),
           timeExtracted: true,
+          dateAmbiguous: false,
           openingHours,
         }),
       ).toBeNull();
     }
   });
 
-  it("treats an unparseable non-empty array as 'no hours configured', never as 'closed'", () => {
-    // Every entry here fails `parseOpeningHours`'s validation, so it
-    // normalizes to seven defaulted-closed rows - which must NOT be read as
-    // "this business is closed every day of the week."
-    expect(
-      checkClosedHours({
-        receiptDate: manila("2026-07-20", 23, 0),
-        timeExtracted: true,
-        openingHours: [{ garbage: true }, "nonsense", 7],
-      }),
-    ).toBeNull();
-  });
-
-  it("treats a genuinely all-closed configured week the same way, conservatively", () => {
-    expect(
-      checkClosedHours({
-        receiptDate: manila("2026-07-20", 23, 0),
-        timeExtracted: true,
-        openingHours: week(),
-      }),
-    ).toBeNull();
+  it("never runs when the receipt carries no extracted time, even inside real hours", () => {
+    const result = check({
+      receiptDate: manila("2026-07-20", 10, 0), // Monday 10:00, inside the window below
+      timeExtracted: false,
+      openingHours: week({ 1: { open: "08:00", close: "20:00", closed: false } }),
+    });
+    expect(result).toBeNull();
   });
 });
 
-describe("checkClosedHours: ordinary same-day windows", () => {
-  const MONDAY_8_TO_20 = week({ 1: { open: "08:00", close: "20:00", closed: false } });
-
-  it("passes with no signal comfortably inside the window", () => {
-    // 2026-07-20 is a Monday, 12:30.
-    expect(
-      checkClosedHours({
-        receiptDate: manila("2026-07-20", 12, 30),
-        timeExtracted: true,
-        openingHours: MONDAY_8_TO_20,
-      }),
-    ).toBeNull();
-  });
-
-  it("fires a warn signal, at doc 37's catalog score, for a receipt well outside hours", () => {
-    const signal = checkClosedHours({
-      receiptDate: manila("2026-07-20", 2, 0), // 02:00 Monday
-      timeExtracted: true,
-      openingHours: MONDAY_8_TO_20,
+// ---------------------------------------------------------------------------
+// C3 — an ambiguous date's weekday is not reliable, so the check must not run.
+// ---------------------------------------------------------------------------
+describe("checkClosedHours: C3 — an ambiguous date never drives the check", () => {
+  it("returns null when dateAmbiguous is true, even for an otherwise-clear violation", () => {
+    const openingHours = week({ 1: { open: "08:00", close: "20:00", closed: false } });
+    // Same instant that WOULD signal (see the "fires a warn signal" test
+    // below) if dateAmbiguous were false.
+    const result = check({
+      receiptDate: manila("2026-07-20", 2, 0),
+      dateAmbiguous: true,
+      openingHours,
     });
+    expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M4 — an Invalid Date must degrade quietly, matching every other
+// `receiptDate` use in `validateParsedReceipt`, rather than letting
+// `Intl.DateTimeFormat.formatToParts` throw through the pipeline.
+// ---------------------------------------------------------------------------
+describe("checkClosedHours: M4 — an Invalid Date degrades quietly", () => {
+  it("returns null rather than throwing", () => {
+    const openingHours = week({ 1: { open: "08:00", close: "20:00", closed: false } });
+    expect(() =>
+      check({ receiptDate: new Date(Number.NaN), openingHours }),
+    ).not.toThrow();
+    expect(check({ receiptDate: new Date(Number.NaN), openingHours })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C2 — the evidence carries the exact window the receipt was measured
+// against (doc 37 line 82), not a convenience shape of this module's own
+// invention.
+// ---------------------------------------------------------------------------
+describe("checkClosedHours: C2 — evidence matches doc 37 line 82 exactly", () => {
+  it("emits {kind, receipt_date, opening_hours_day: {day, open, close}}", () => {
+    const receiptDate = manila("2026-07-20", 2, 0); // Monday 02:00
+    const openingHours = week({ 1: { open: "08:00", close: "20:00", closed: false } });
+    const signal = check({ receiptDate, openingHours });
+
     expect(signal).toEqual({
       signal: "timestamp_anomaly",
       severity: "warn",
       score: 0.4,
-      evidence: { kind: "closed_hours", receipt_time: "02:00", weekday: 1 },
+      evidence: {
+        kind: "closed_hours",
+        receipt_date: receiptDate.toISOString(),
+        opening_hours_day: { day: 1, open: "08:00", close: "20:00" },
+      },
     });
   });
 
-  it("fires for a receipt on a day the business states it is closed", () => {
-    // Tuesday defaults to closed in this fixture, and Monday's normal
-    // daytime hours cannot spill into it.
-    const signal = checkClosedHours({
-      receiptDate: manila("2026-07-21", 12, 0), // Tuesday noon
-      timeExtracted: true,
+  it("reports the RECEIPT's own weekday's entry even when a closed day fires the signal", () => {
+    // Tuesday closed outright in this fixture.
+    const openingHours = week({ 1: { open: "08:00", close: "20:00", closed: false } });
+    const signal = check({ receiptDate: manila("2026-07-21", 12, 0), openingHours }); // Tuesday
+    expect(signal?.evidence).toMatchObject({
+      opening_hours_day: { day: 2, open: "09:00", close: "21:00" },
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Confirmed-correct arithmetic (verified by the reviewer via direct
+// execution) - preserved unchanged in behaviour, updated only for the new
+// required `dateAmbiguous` field and the new evidence shape.
+// ---------------------------------------------------------------------------
+describe("checkClosedHours: ordinary same-day windows", () => {
+  const MONDAY_8_TO_20 = week({ 1: { open: "08:00", close: "20:00", closed: false } });
+
+  it("passes with no signal comfortably inside the window", () => {
+    expect(
+      check({ receiptDate: manila("2026-07-20", 12, 30), openingHours: MONDAY_8_TO_20 }),
+    ).toBeNull();
+  });
+
+  it("fires a warn signal, at doc 37's catalog score, for a receipt well outside hours", () => {
+    const signal = check({
+      receiptDate: manila("2026-07-20", 2, 0), // 02:00 Monday
       openingHours: MONDAY_8_TO_20,
     });
-    expect(signal?.evidence).toMatchObject({ weekday: 2 });
+    expect(signal).toMatchObject({ signal: "timestamp_anomaly", severity: "warn", score: 0.4 });
+  });
+
+  it("fires for a receipt on a day the business states it is closed", () => {
+    const signal = check({
+      receiptDate: manila("2026-07-21", 12, 0), // Tuesday noon, closed in this fixture
+      openingHours: MONDAY_8_TO_20,
+    });
+    expect(signal?.evidence).toMatchObject({ opening_hours_day: { day: 2 } });
   });
 
   describe("the grace margin, exactly at its edges", () => {
     it("is inside the window AT the grace boundary on the open side", () => {
       // open 08:00 - 60min grace = 07:00, inclusive.
       expect(
-        checkClosedHours({
-          receiptDate: manila("2026-07-20", 7, 0),
-          timeExtracted: true,
-          openingHours: MONDAY_8_TO_20,
-        }),
+        check({ receiptDate: manila("2026-07-20", 7, 0), openingHours: MONDAY_8_TO_20 }),
       ).toBeNull();
     });
 
     it("fires one minute earlier than the open-side grace boundary", () => {
-      const signal = checkClosedHours({
-        receiptDate: manila("2026-07-20", 6, 59),
-        timeExtracted: true,
-        openingHours: MONDAY_8_TO_20,
-      });
-      expect(signal).not.toBeNull();
+      expect(
+        check({ receiptDate: manila("2026-07-20", 6, 59), openingHours: MONDAY_8_TO_20 }),
+      ).not.toBeNull();
     });
 
     it("is inside the window AT the grace boundary on the close side", () => {
       // close 20:00 + 60min grace = 21:00, inclusive.
       expect(
-        checkClosedHours({
-          receiptDate: manila("2026-07-20", 21, 0),
-          timeExtracted: true,
-          openingHours: MONDAY_8_TO_20,
-        }),
+        check({ receiptDate: manila("2026-07-20", 21, 0), openingHours: MONDAY_8_TO_20 }),
       ).toBeNull();
     });
 
     it("fires one minute later than the close-side grace boundary", () => {
-      const signal = checkClosedHours({
-        receiptDate: manila("2026-07-20", 21, 1),
-        timeExtracted: true,
-        openingHours: MONDAY_8_TO_20,
-      });
-      expect(signal).not.toBeNull();
+      expect(
+        check({ receiptDate: manila("2026-07-20", 21, 1), openingHours: MONDAY_8_TO_20 }),
+      ).not.toBeNull();
     });
 
-    it("uses exactly doc 37 S5's stated margin (60 minutes)", () => {
+    it("is the task brief's own margin (60 minutes) - not attributed to doc 37 (M1)", () => {
       expect(CLOSED_HOURS_GRACE_MINUTES).toBe(60);
     });
   });
@@ -193,82 +276,48 @@ describe("checkClosedHours: overnight windows crossing midnight", () => {
   const SATURDAY_NIGHT = week({ 6: { open: "18:00", close: "02:00", closed: false } });
 
   it("passes for a receipt the same evening, well before midnight", () => {
-    // 2026-07-25 is a Saturday, 23:00.
     expect(
-      checkClosedHours({
-        receiptDate: manila("2026-07-25", 23, 0),
-        timeExtracted: true,
-        openingHours: SATURDAY_NIGHT,
-      }),
+      check({ receiptDate: manila("2026-07-25", 23, 0), openingHours: SATURDAY_NIGHT }),
     ).toBeNull();
   });
 
   it("passes for a receipt in the small hours of the NEXT calendar day", () => {
-    // 2026-07-26 is the Sunday after that Saturday, 01:00 - Sunday's OWN
-    // entry is closed, so only Saturday's overnight spillover explains this.
     expect(
-      checkClosedHours({
-        receiptDate: manila("2026-07-26", 1, 0),
-        timeExtracted: true,
-        openingHours: SATURDAY_NIGHT,
-      }),
+      check({ receiptDate: manila("2026-07-26", 1, 0), openingHours: SATURDAY_NIGHT }),
     ).toBeNull();
   });
 
   it("still fires for a Sunday receipt once the overnight spillover has run out", () => {
-    // 02:00 + 60min grace = 03:00 is the last legal minute; 11:00 Sunday is
-    // long past it and Sunday's own entry is closed.
-    const signal = checkClosedHours({
+    const signal = check({
       receiptDate: manila("2026-07-26", 11, 0),
-      timeExtracted: true,
       openingHours: SATURDAY_NIGHT,
     });
-    expect(signal?.evidence).toMatchObject({ weekday: 7, receipt_time: "11:00" });
+    expect(signal?.evidence).toMatchObject({ opening_hours_day: { day: 7 } });
   });
 
   it("still fires for a Saturday AFTERNOON receipt, before the evening window opens", () => {
-    // 14:00 Saturday is neither in Saturday's own 18:00-02:00 window (even
-    // with grace, open - 60min = 17:00) nor in Friday's spillover (Friday is
-    // closed in this fixture).
-    const signal = checkClosedHours({
+    const signal = check({
       receiptDate: manila("2026-07-25", 14, 0),
-      timeExtracted: true,
       openingHours: SATURDAY_NIGHT,
     });
-    expect(signal?.evidence).toMatchObject({ weekday: 6, receipt_time: "14:00" });
+    expect(signal?.evidence).toMatchObject({ opening_hours_day: { day: 6 } });
   });
 
   it("honours grace across the overnight boundary on both ends", () => {
     // 17:00 Saturday = open (18:00) - 60min grace, inclusive.
     expect(
-      checkClosedHours({
-        receiptDate: manila("2026-07-25", 17, 0),
-        timeExtracted: true,
-        openingHours: SATURDAY_NIGHT,
-      }),
+      check({ receiptDate: manila("2026-07-25", 17, 0), openingHours: SATURDAY_NIGHT }),
     ).toBeNull();
     // 03:00 Sunday = close (02:00) + 60min grace, inclusive.
     expect(
-      checkClosedHours({
-        receiptDate: manila("2026-07-26", 3, 0),
-        timeExtracted: true,
-        openingHours: SATURDAY_NIGHT,
-      }),
+      check({ receiptDate: manila("2026-07-26", 3, 0), openingHours: SATURDAY_NIGHT }),
     ).toBeNull();
     // One minute past grace on each side fires.
     expect(
-      checkClosedHours({
-        receiptDate: manila("2026-07-25", 16, 59),
-        timeExtracted: true,
-        openingHours: SATURDAY_NIGHT,
-      }),
+      check({ receiptDate: manila("2026-07-25", 16, 59), openingHours: SATURDAY_NIGHT }),
     ).not.toBeNull();
     expect(
-      checkClosedHours({
-        receiptDate: manila("2026-07-26", 3, 1),
-        timeExtracted: true,
-        openingHours: SATURDAY_NIGHT,
-      }),
+      check({ receiptDate: manila("2026-07-26", 3, 1), openingHours: SATURDAY_NIGHT }),
     ).not.toBeNull();
   });
 });
@@ -294,11 +343,7 @@ describe("checkClosedHours: the 24-hour business", () => {
       ["2026-07-26", 0, 0],
     ] as const) {
       expect(
-        checkClosedHours({
-          receiptDate: manila(dateStr, hour, minute),
-          timeExtracted: true,
-          openingHours: ALWAYS_OPEN,
-        }),
+        check({ receiptDate: manila(dateStr, hour, minute), openingHours: ALWAYS_OPEN }),
       ).toBeNull();
     }
   });
@@ -310,11 +355,10 @@ describe("checkClosedHours: the 24-hour business", () => {
       6: { open: "00:00", close: "00:00", closed: false },
       7: { open: "00:00", close: "00:00", closed: true },
     });
-    const signal = checkClosedHours({
+    const signal = check({
       receiptDate: manila("2026-07-26", 11, 0), // Sunday
-      timeExtracted: true,
       openingHours: withSundayClosed,
     });
-    expect(signal?.evidence).toMatchObject({ weekday: 7 });
+    expect(signal?.evidence).toMatchObject({ opening_hours_day: { day: 7 } });
   });
 });

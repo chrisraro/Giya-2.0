@@ -345,31 +345,46 @@ function formatDateValue(value: string | null): string {
   return parsed.toISOString().slice(0, 10);
 }
 
-/** Index 0 is day 1 (Monday), the same convention `../businesses/settings/hours.ts`
- * uses for the same jsonb column - kept as its own tiny copy here rather than an
- * import so this display module does not pull in the settings feature's editor
- * code for one label array. */
-const WEEKDAY_LABELS: readonly string[] = [
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
-  "Sunday",
-];
+/**
+ * `receipt_date` (a full ISO instant) rendered as the Manila wall clock the
+ * closed-hours signal actually compared against: `{ weekday: "Sunday", clock:
+ * "2:14 AM" }`, or null on anything that does not parse.
+ *
+ * Derives the weekday NAME straight from the instant via `Intl` rather than
+ * keeping a second `day 1..7 -> label` array here: `closed-hours.ts` already
+ * derives the number from the identical instant in the identical zone via
+ * `deriveLocalDayTime`, so the two are guaranteed to agree, and this module
+ * needs no import of `../businesses/settings/hours.ts`'s editor-facing
+ * `WEEKDAY_LABELS` (or a second copy of it) for one label.
+ */
+function manilaClock(iso: string | null): { weekday: string; clock: string } | null {
+  if (iso === null) return null;
+  const instant = new Date(iso);
+  if (Number.isNaN(instant.getTime())) return null;
 
-/** `"14:05"` -> `"2:05 PM"`, for the closed-hours signal's evidence. Falls
- * back to the raw HH:mm on anything that does not parse, rather than hiding
- * it. */
-function formatClockLabel(hhmm: string): string {
-  const [hourText, minuteText] = hhmm.split(":");
-  const hour24 = Number(hourText);
-  const minute = Number(minuteText);
-  if (!Number.isFinite(hour24) || !Number.isFinite(minute)) return hhmm;
-  const period = hour24 < 12 ? "AM" : "PM";
-  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
-  return `${hour12}:${String(minute).padStart(2, "0")} ${period}`;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Manila",
+    weekday: "long",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).formatToParts(instant);
+
+  const find = (type: string): string => parts.find((part) => part.type === type)?.value ?? "";
+  const weekday = find("weekday");
+  const hour = find("hour");
+  const minute = find("minute");
+  const dayPeriod = find("dayPeriod");
+  if (weekday === "" || hour === "" || minute === "") return null;
+
+  return { weekday, clock: `${hour}:${minute}${dayPeriod === "" ? "" : ` ${dayPeriod}`}` };
+}
+
+function readRecord(evidence: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  const value = evidence[key];
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 /**
@@ -454,11 +469,17 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
 
     case "timestamp_anomaly": {
       const kind = readString(evidence, "kind");
-      const receiptDate = formatDateValue(readString(evidence, "receipt_date"));
+      const rawReceiptDate = readString(evidence, "receipt_date");
+      const receiptDate = formatDateValue(rawReceiptDate);
       const maxAgeDays = readNumber(evidence, "max_age_days");
       const verifiedAt = readString(evidence, "business_verified_at");
-      const receiptTime = readString(evidence, "receipt_time");
-      const weekday = readNumber(evidence, "weekday");
+      // Doc 37 line 82's evidence contract for the closed-hours case:
+      // `{kind, receipt_date, opening_hours_day: {day, open, close}}`.
+      const openingHoursDay = readRecord(evidence, "opening_hours_day");
+      const openingHoursDayNumber = openingHoursDay !== null ? readNumber(openingHoursDay, "day") : null;
+      const statedOpen = openingHoursDay !== null ? readString(openingHoursDay, "open") : null;
+      const statedClose = openingHoursDay !== null ? readString(openingHoursDay, "close") : null;
+      const clock = kind === "closed_hours" ? manilaClock(rawReceiptDate) : null;
 
       let summary: string;
       if (kind === "future_dated") {
@@ -476,9 +497,9 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
         // the printed time against the business's own stated hours, never a
         // claim about the customer.
         summary =
-          receiptTime === null
+          clock === null
             ? "The printed time is outside this business's stated hours."
-            : `Receipt time ${formatClockLabel(receiptTime)} is outside this business's stated hours.`;
+            : `Receipt time ${clock.clock} is outside this business's stated hours.`;
       } else {
         summary = `The printed date is ${receiptDate}.`;
       }
@@ -487,8 +508,18 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
       if (verifiedAt !== null) {
         rows.push({ label: "Business live since", value: formatDateValue(verifiedAt) });
       }
-      if (kind === "closed_hours" && weekday !== null) {
-        rows.push({ label: "Day", value: WEEKDAY_LABELS[weekday - 1] ?? String(weekday) });
+      if (kind === "closed_hours") {
+        // C2: without the window the receipt was measured against, a
+        // reviewer cannot tell a real closure from hours nobody entered -
+        // this is the row that makes that legible on the one screen the
+        // signal exists to serve.
+        rows.push({
+          label: "Day",
+          value: clock?.weekday ?? (openingHoursDayNumber === null ? "Unknown" : String(openingHoursDayNumber)),
+        });
+        if (statedOpen !== null && statedClose !== null) {
+          rows.push({ label: "Stated hours", value: `${statedOpen} - ${statedClose}` });
+        }
       }
       return {
         title,
@@ -500,8 +531,7 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
             "receipt_date",
             "max_age_days",
             "business_verified_at",
-            "receipt_time",
-            "weekday",
+            "opening_hours_day",
           ]),
         ],
         meter: null,

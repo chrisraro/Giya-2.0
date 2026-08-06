@@ -1318,11 +1318,13 @@ export function validateParsedReceipt(input: {
     // history row on a receipt that ends up rejected as too_old, exactly the
     // way `timestamp_too_old` itself is "a history row only" on that path.
     // `checkClosedHours` is null-safe about everything it needs: a missing
-    // extracted time or unconfigured hours simply means the check did not
-    // run, never that it passed.
+    // extracted time, an ambiguous date (its weekday is not reliable either),
+    // or unconfigured/malformed hours simply mean the check did not run,
+    // never that it passed.
     const closedHoursSignal = checkClosedHours({
       receiptDate,
       timeExtracted: parsed.timeExtracted,
+      dateAmbiguous: parsed.dateAmbiguous,
       openingHours: businessOpeningHours,
     });
     if (closedHoursSignal !== null) signals.push(closedHoursSignal);

@@ -261,10 +261,16 @@ describe("describeSignal renders evidence rather than dumping it", () => {
   });
 
   it("renders the closed-hours case with the brief's own worked example, non-accusatory", () => {
+    // 2026-07-25T18:14:00Z = Sunday 02:14 Asia/Manila.
     const view = describeSignal(
       signal({
         signal: "timestamp_anomaly",
-        evidence: { kind: "closed_hours", receipt_time: "02:14", weekday: 7 },
+        evidence: {
+          kind: "closed_hours",
+          receipt_date: "2026-07-25T18:14:00.000Z",
+          // Doc 37 line 82's evidence contract, verbatim shape.
+          opening_hours_day: { day: 7, open: "08:00", close: "22:00" },
+        },
       }),
     );
 
@@ -272,19 +278,24 @@ describe("describeSignal renders evidence rather than dumping it", () => {
       "Receipt time 2:14 AM is outside this business's stated hours.",
     );
     expect(view.rows).toContainEqual({ label: "Day", value: "Sunday" });
+    // C2: the window the receipt was measured against must be legible on the
+    // same screen, not just implied by a fact the reviewer cannot see.
+    expect(view.rows).toContainEqual({ label: "Stated hours", value: "08:00 - 22:00" });
     // Raw jsonb keys never survive into a row.
-    expect(view.rows.map((row) => row.label)).not.toContain("Receipt time");
-    expect(view.rows.map((row) => row.label)).not.toContain("Weekday");
+    expect(view.rows.map((row) => row.label)).not.toContain("Opening hours day");
 
     const accusatory = /fraud|fake|stole|stolen|cheat|lying|lied|scam|dishonest/i;
-    expect(`${view.title} ${view.summary}`).not.toMatch(accusatory);
+    expect(`${view.title} ${view.summary} ${view.rows.map((r) => r.value).join(" ")}`).not.toMatch(
+      accusatory,
+    );
   });
 
-  it("degrades gracefully when the closed-hours evidence carries no receipt_time", () => {
+  it("degrades gracefully when the closed-hours evidence carries no receipt_date", () => {
     const view = describeSignal(
       signal({ signal: "timestamp_anomaly", evidence: { kind: "closed_hours" } }),
     );
     expect(view.summary).toBe("The printed time is outside this business's stated hours.");
+    expect(view.rows).toContainEqual({ label: "Day", value: "Unknown" });
   });
 
   it("formats amount evidence as pesos, not centavos", () => {
