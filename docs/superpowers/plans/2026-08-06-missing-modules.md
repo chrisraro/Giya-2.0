@@ -42,6 +42,21 @@
    artifact did its job. Assert the effect, and where you cannot reach the
    effect, assert the identity that produces it.
 
+   **Agreement is necessary, not sufficient — also pin the shared value to its
+   source of truth.** Two call sites both reading one helper prove they cannot
+   *drift*; they prove nothing about whether the helper is *right*. T3.4a hit
+   this immediately after adopting the rule above: both sides quoted
+   `oversizePhotoMessage()`, and changing that helper to say "4 MB" against an
+   8 MB ceiling left both new assertions green, because each compared rendered
+   text against the helper's own output. The fix is a third assertion that
+   parses the figure back out of the sentence and compares it to
+   `AVATAR_MAX_UPLOAD_BYTES`. Three variants of this one class appeared in a
+   single task: a fixture whose value coincided with the constant under test,
+   a `JSON.stringify` that flattened `new Error("x")` to `"{}"` so a log
+   assertion passed against discarded evidence, and two sides agreeing on a
+   shared wrong value. **When an assertion's expected value comes from the
+   same place as its actual value, it cannot disagree with the code.**
+
    Name the mutant concretely: "delete `and pt.business_id = c.business_id` → these four assertions fail", not "tested the filter".
 
 1. **TDD.** Red first. Each task names its test files; implementer reports test output. Full suite green (baseline 3820) before DONE.

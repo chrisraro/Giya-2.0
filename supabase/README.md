@@ -1288,21 +1288,40 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0058_balance_check_deployment_correction.sql | 20260806111225 | 0058_balance_check_deployment_correction |
 | 0059_balance_check_trigger_privilege_fix.sql | 20260806114840 | 0059_balance_check_trigger_privilege_fix |
 | 0061_job_health_terminal_failures.sql | 20260806120833 | 0061_job_health_terminal_failures |
-| 0064_avatars_storage.sql | (pending) | 0064_avatars_storage |
+| 0062_feature_flags.sql | 20260806142215 | 0062_feature_flags |
+| 0063_find_auth_user_by_email.sql | 20260806181414 | 0063_find_auth_user_by_email |
+| 0064_avatars_storage.sql | 20260806214609 | avatars_storage |
 
-Two files carry no row above and should get one when their live versions are
-known: `0062_feature_flags.sql` and `0063_find_auth_user_by_email.sql`. They
-were committed without a ledger entry; this is recorded rather than guessed,
-because inventing a version here is exactly how the 0047 out-of-band incident
-below became hard to reconstruct. `0064_avatars_storage.sql` is marked
-`(pending)` because T3.4a deliberately did not apply it: the file, its
+**0062 and 0063 were applied live but committed without a ledger row here.**
+T3.4a found the gap and recorded it rather than inventing versions — the right
+call, and the reason the rows above are real: they were read back out of
+`supabase_migrations.schema_migrations` after the fact, not reconstructed.
+Guessing a version is exactly how the 0047 out-of-band incident below became
+hard to untangle.
+
+**0064's live name is `avatars_storage`, not `0064_avatars_storage`.** Same
+class of mismatch as `0060_job_health_alerts.sql` → `0058_job_health_alerts`
+further up: `apply_migration` takes a bare snake_case name and stamps its own
+timestamp, so the ordinal prefix only exists in the filename. Match on the
+version, never on the name.
+
+T3.4a deliberately did **not** apply 0064 — the file, its
 `supabase/tests/rls_avatars_storage_smoke.sql` suite and this ledger row were
-written first, and the coordinator applies it and verifies the deployed objects
-against `pg_policies` afterwards. What should be true live once it lands: one
-`storage.buckets` row `avatars` (`public = true`, `file_size_limit = 2097152`,
+written first, and the coordinator applied it and verified the deployed objects
+afterwards. **Verified live on 2026-08-07, and it matches the file exactly:**
+one `storage.buckets` row `avatars` (`public = true`,
+`file_size_limit = 2097152`,
 `allowed_mime_types = {image/jpeg,image/png,image/webp}`) and exactly four
-`pg_policies` rows on `storage.objects` named `avatars_objects_owner_insert` /
-`_select` / `_update` / `_delete`, every one of them `{authenticated}` only.
+`pg_policies` rows on `storage.objects` — `avatars_objects_owner_insert`
+(WITH CHECK, depth pin), `_select` (USING), `_update` (both), `_delete`
+(USING) — every one `{authenticated}` only.
+
+Worth recording for anyone writing `pg_policies` assertions: the predicate
+deparses as `((storage.foldername(name))[1] = (( SELECT auth.uid() AS uid))::text)`.
+The doubled parens and the `AS uid` alias are the server's own rendering of
+`(select auth.uid())`, so a `like` pattern written against the source text will
+not match. This was an open "cannot verify" item in T3.4a's review; it is
+closed, and the suite's pattern is correct.
 
 **Rows 0001-0035 are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`; rows 0036-0049 were applied later, and 0042-0049 on 2026-08-06.** The
 sentence below describes the replay only. It does NOT describe 0042-0049: one
