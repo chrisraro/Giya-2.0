@@ -4,6 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/types";
 
+import { HEARTBEAT_INTERVAL_MS } from "./heartbeat";
 import { QUEUE_REGISTRY } from "./queues";
 import type { QueueName } from "./queues";
 
@@ -71,8 +72,41 @@ const LOG_PREFIX = "[queue/claim]";
  * done twice; doubling it means a reclaim only ever happens after the original
  * invocation has provably been killed (Vercel enforces `maxDuration` itself),
  * and the cost of the extra wait is a delay on an already-failed job.
+ *
+ * This is the FALLBACK budget only - for a job with no LIVE heartbeat to
+ * judge instead. See `HEARTBEAT_STALE_MS` and `isStale` below for why a live
+ * one is judged differently, and why judging it against this instead is the
+ * bug t2-6's follow-up fixed.
  */
 const RECLAIM_TIMEOUT_MULTIPLIER = 2;
+
+/**
+ * How long a LIVE heartbeat may go without a refresh before the job it
+ * belongs to is considered dead, independent of the queue's own maxDuration.
+ *
+ * Doc 39's own design for this predates `jobs.heartbeat_at`: Redis `SET
+ * {env}:jobs:hb:{job_id} EX 60`, refreshed every `HEARTBEAT_INTERVAL_MS`
+ * (20s) - a TTL that survives two missed refreshes and expires only on the
+ * third. The `EX 60` figure is doc 39 line 45's, cited above. 0029's column
+ * comment then ports the storage from Redis to Postgres, noting that "doc 39
+ * puts the beat in Redis with a TTL and that is right for the 20-second
+ * refresh" - it does not restate the TTL value itself. This constant carries
+ * doc 39's TTL the rest of the way.
+ *
+ * `RECLAIM_TIMEOUT_MULTIPLIER * maxDurationSeconds` is the WRONG window for a
+ * job that is actively heartbeating: `ocr.process` heartbeats every 20s until
+ * Vercel kills it at its 120s `maxDuration`, so a dead worker's last
+ * heartbeat is only ever a few seconds old at t=120s - judging that against
+ * `2 * 120s = 240s` (as this file did before t2-6's follow-up) delays reclaim
+ * to t=360s and lets every QStash redelivery in between land on `held` and
+ * be permanently consumed, since a dead row does not get less dead by
+ * waiting. A worker with no live heartbeat yet - dead before its first
+ * refresh, or a queue with no heartbeat wiring at all (`notify.email`) -
+ * still has nothing better than the maxDuration-based fallback, which is
+ * exactly why `isStale` only reaches for this constant once it can tell the
+ * heartbeat is actually live (see the comment there).
+ */
+const HEARTBEAT_STALE_MS = HEARTBEAT_INTERVAL_MS * 3;
 
 export interface JobRow {
   readonly id: string;
@@ -227,15 +261,56 @@ export async function claimJob(input: ClaimJobInput): Promise<ClaimResult> {
 /**
  * Has a `running` job gone quiet long enough to be taken over?
  *
- * The heartbeat wins when there is one; otherwise the claim time stands in for
- * it, which is correct for every worker short enough not to need a heartbeat at
- * all (doc 39 requires one only above 60s). A row with neither is treated as
- * stale, because a `running` job that never recorded when it started is a row
- * no invocation is going to finish.
+ * Two different windows, for two different situations, and telling them apart
+ * is the whole function:
+ *
+ *   A LIVE heartbeat - one that has advanced past the claim-time instant
+ *   `claimJob`'s CAS wrote into BOTH `started_at` and `heartbeat_at` - is
+ *   judged against `HEARTBEAT_STALE_MS` (60s), because a live heartbeat is
+ *   the fresher and more direct signal doc 39 designed it to be: a worker
+ *   heartbeating every `HEARTBEAT_INTERVAL_MS` is provably alive within
+ *   seconds of its last refresh, and - after `HEARTBEAT_STALE_MS` of silence -
+ *   overwhelmingly likely to be dead, independent of the queue's own
+ *   `maxDuration` budget.
+ *
+ *   "Likely", not "provably". The fallback arm below inherits a genuine
+ *   proof: `2 * maxDuration` is past the point Vercel itself kills the
+ *   invocation, so a reclaim there cannot race a live worker. The live arm
+ *   has no such guarantee, because it rests on the refreshes succeeding -
+ *   which is precisely the thing a heartbeat cannot assume about itself.
+ *   Three consecutive failed `UPDATE`s, or 60s of event-loop starvation,
+ *   and this arm will reclaim a worker that is still running. That trade is
+ *   deliberate and is doc 39's own design (60s of exposure beats 120s of
+ *   wasted `held` responses on a dead row), but it is an inference, not a
+ *   proof, and the difference matters downstream: see `finishJob`, which
+ *   filters on `id` alone and was previously protected by the guarantee this
+ *   arm gives up.
+ *
+ *   Everything else - no `heartbeat_at` at all, or one still equal to
+ *   `started_at` because no refresh has landed yet - falls back to
+ *   `2 * maxDuration` on whichever marker exists. This is deliberately the
+ *   coarser, slower check: it is what queues with no heartbeat wiring
+ *   (`notify.email`, whose 60s budget doc 39 does not require one for) have
+ *   always relied on, and it is the right answer for a worker that has not
+ *   heartbeated yet either, because "hasn't heartbeated yet" and "will never
+ *   heartbeat" are indistinguishable from a single reading.
+ *
+ * A row with neither marker at all is treated as stale, because a `running`
+ * job that never recorded when it started is a row no invocation is going to
+ * finish.
  */
 function isStale(job: RawJob, queue: QueueName, now: Date): boolean {
   const marker = job.heartbeat_at ?? job.started_at;
   if (marker === null) return true;
+
+  if (job.heartbeat_at !== null && job.started_at !== null) {
+    const heartbeatAtMs = new Date(job.heartbeat_at).getTime();
+    const startedAtMs = new Date(job.started_at).getTime();
+    if (heartbeatAtMs > startedAtMs) {
+      // A live heartbeat: at least one refresh has landed since the claim.
+      return now.getTime() - heartbeatAtMs > HEARTBEAT_STALE_MS;
+    }
+  }
 
   const elapsedMs = now.getTime() - new Date(marker).getTime();
   const budgetMs =
