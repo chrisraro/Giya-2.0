@@ -776,13 +776,19 @@ select lives_ok(
   'review fix C2: service_role can delete a business_customers row without error - the pair-cleanup trigger now runs SECURITY DEFINER, so its internal DELETE on balance_check_findings no longer hits service_role''s own revoke');
 reset role;
 
+-- REVIEW FIX (I11): this assertion previously queried
+-- `balance_check_findings` for a pair that never had a finding row - true
+-- before the delete, after it, if the delete did nothing, and if the C2 fix
+-- were reverted entirely. It asserted nothing while its message claimed to
+-- confirm the delete "truly went through". The right table to ask is the one
+-- the delete targeted.
 select ok(
   not exists (
-    select 1 from public.balance_check_findings
+    select 1 from public.business_customers
      where business_id = current_setting('test.biz')::uuid
        and consumer_id = 'e5555555-5555-4555-8555-555555555555'
   ),
-  'pair M (never checked, no finding row ever existed) confirms the delete truly went through as service_role, not merely that no error surfaced');
+  'the business_customers row is actually gone - the service_role delete committed, not merely raised no error');
 
 -- ------------------------------------------------------------ the schedule
 select is(

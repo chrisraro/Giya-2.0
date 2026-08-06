@@ -13,6 +13,14 @@
 
 ## Global constraints (binding on every task)
 
+1. **Every new or modified assertion must be red-verified against a named mutant, and the report must name the mutant for each.** An assertion with no stated mutant is an assertion nobody has shown can fail.
+
+   This is not a style preference. Across the first two waves, reviewers found the same defect class in *seven* tasks: a test that passes without exercising the property its name claims. A concurrency proxy that tested summation breadth. A pair-scoping filter whose fixtures all used one business. A "no statement boundary" predicate that could not hold against its own migration. A `status: running` fixture paired with `failures: 0`, a combination the source function cannot return. A cascade assertion querying a table the deleted row was never in. Each was invisible to a full green suite.
+
+   The discriminator is empirical and visible in the record: every assertion an implementer red-verified against a specific mutant turned out to be sound, and every one that was not is on the list above. The practice is already in use — it is just applied selectively. Make it universal.
+
+   Name the mutant concretely: "delete `and pt.business_id = c.business_id` → these four assertions fail", not "tested the filter".
+
 1. **TDD.** Red first. Each task names its test files; implementer reports test output. Full suite green (baseline 3820) before DONE.
 2. **Money path:** ledger writes ONLY via SECURITY DEFINER RPCs. New RPCs/migrations carry the three-layer fence (RLS + privilege revokes + raising triggers) and pgTAP tests.
    - **Every new `public.` SECURITY DEFINER function needs pgTAP grant assertions in the same commit** — `anon`/`authenticated` denied, `service_role` allowed — and any `private.` helper it wraps asserted as not executable even by `service_role`. Correct grants in the migration are not enough; the assertion is what catches a future misgrant. Pattern: `rpc_award_smoke.sql`'s I-A block. This was an Important review finding on both T1.1 and T1.2 — do not make it a third.
