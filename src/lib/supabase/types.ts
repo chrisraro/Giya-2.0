@@ -2690,6 +2690,13 @@ export type Database = {
       }
       expire_claims: { Args: { p_limit?: number }; Returns: number }
       expire_points: { Args: { p_limit?: number }; Returns: number }
+      find_auth_user_by_email: {
+        Args: { p_email: string }
+        Returns: {
+          email: string
+          id: string
+        }[]
+      }
       fixed_per_visit_already_paid: {
         Args: {
           p_business_id: string
