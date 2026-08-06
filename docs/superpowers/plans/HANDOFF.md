@@ -1,16 +1,26 @@
 # Giya 2.0 — Build Handoff
 
-**Written:** 2026-08-06 · **Last refreshed:** 2026-08-07 · **Repo state:** `main` at or after `cf34416` (the T3.1 merge), pushed, clean
-**Suite:** 232 files / 4,600 tests green · **Types:** 3 known pre-existing errors · **Migrations:** 0037–0063 live
+**Written:** 2026-08-06 · **Last refreshed:** 2026-08-07 · **Repo state:** `main` at or after `042abcf` (the T3.4b merge, which closed Wave 3), pushed, clean
+**Suite:** 248 files / 4,923 tests green · **Types:** 3 known pre-existing errors · **Migrations:** 0037–0064 live
 
 You are picking up a multi-wave build-out of every module the docs specify and the code lacked. This document is the whole context. Read it top to bottom once; you should not need the prior conversation.
+
+---
+
+## 0. Read this first — the scope you are actually being handed
+
+**Waves 1, 2 and 3 are complete: 21 tasks, all merged, all pushed. You own Waves 4-7 — 22 tasks.** Start at §8.
+
+The user drew this boundary deliberately. An earlier session set a standing goal of *"execute all missing modules from the docs"*, and that instruction is still quoted in the plan file — but the user has since decided the remaining waves go to a fresh owner. **Do not treat the plan's standing goal as authority to keep going past a task the user has not asked for.** Ask.
+
+Nothing is in flight. No worktree holds unfinished work. Every migration through 0064 is applied live and verified against the catalogue, not just against its file.
 
 ---
 
 ## 1. Verify you're starting from a good state
 
 ```bash
-npx vitest run                    # expect 232 files / 4600 tests, all green
+npx vitest run                    # expect 248 files / 4923 tests, all green
 npx tsc --noEmit                  # expect EXACTLY 3 errors (see below)
 scripts/sdd/check-grants.sh 090bc96   # expect "OK"
 git status --porcelain            # expect empty
@@ -56,7 +66,7 @@ write brief → dispatch implementer (TDD, isolated) → adversarial review
 
 ---
 
-## 4. What is DONE (19 tasks, merged and pushed)
+## 4. What is DONE (21 tasks, merged and pushed)
 
 ### Wave 1 — money correctness (7/7 complete)
 
@@ -84,20 +94,69 @@ write brief → dispatch implementer (TDD, isolated) → adversarial review
 | T2.4 | Dead-lettered jobs were invisible and unrecoverable through any interface |
 | T2.7 | No AI kill switch, no budget caps; `budgetMicros` existed and no caller passed it |
 
-### Wave 3 — auth + suspension (3/4 merged)
+### Wave 3 — auth + account completeness (4/4 COMPLETE)
 
 | Task | What it closed |
 |---|---|
 | T3.2 | Suspension was written by the admin ladder and read by **nothing** — a suspended user kept scanning, claiming and redeeming |
 | T3.3 | Owners could not add teammates at all — no roster, no invite, no accept |
 | T3.1 | The login page's "Forgot password" link was `href="#"` — no recovery flow existed |
+| T3.4a | Profile was read-only; `avatar_url` had zero writers and there was no bucket |
+| T3.4b | Four consent columns had grants and no UI; `user_devices` had zero references in `src/`; the "Devices" row pointed nowhere |
 
 ---
 
 ## 5. IN FLIGHT — nothing
 
-**No worktree holds unfinished work.** T3.1 was the last one open; it is
-reviewed, approved and merged. Start at §8 with T3.4.
+**No worktree holds unfinished work.** T3.4b was the last one open; it is
+reviewed, approved and merged. Start at §8 with Wave 4.
+
+### What Wave 3 left behind that you should know
+
+**Two lessons cost a review round each and generalise past their tasks.**
+
+**1. Assert the *claim*, not the words that happen to express it.** T3.4b's
+device list guarded against overclaiming ("signs you out everywhere") with a
+denylist of regexes. A reviewer wrote three plausible overclaims in unlisted
+phrasings and all 343 tests stayed green. Fixed layered: **fixed prose is
+pinned with `toBe`** — the full paragraph, the failed-revoke sentence, both
+button labels — so any reworded sentence fails and a human is forced to read
+the new claim; the denylist stays underneath for genuinely composed text an
+allowlist cannot cover. If you write copy that makes a promise about security
+behaviour, pin it exactly.
+
+**2. An assertion whose expected value comes from the same place as its
+actual value cannot disagree with the code.** Three variants appeared in one
+task: a fixture whose declared type coincided with the constant under test; a
+`JSON.stringify` that flattened `new Error("x")` to `"{}"` so a log assertion
+passed against discarded evidence; and two call sites agreeing on a shared
+helper whose value was wrong. **Agreement proves two sides cannot drift — it
+proves nothing about whether the shared value is right.** Pin the shared
+value to its source of truth as well.
+
+**The product must not state a control it does not have — in either
+direction.** T3.2 shipped `/suspended` telling users they could not redeem
+while redemption was ungated. T3.4b shipped the inverse: a footer saying
+device removal "does not sign that browser out", unqualified, when removing
+your *current* device signs you out immediately — with the only warning in an
+`aria-label`, which **replaces** the accessible name, so sighted users saw
+nothing. Both are the same defect. Check copy against behaviour for the row
+that is different, not the common case.
+
+**Deleting a `user_devices` row does not invalidate that browser's session.**
+The refresh token lives in GoTrue, not that table. Revoking the current
+device calls a real `auth.signOut()`; revoking any other genuinely does not
+end its session, and the copy now says so. Do not "improve" that copy into a
+promise the system cannot keep.
+
+**Device registration is enforced, not enumerated.**
+`src/app/device-registration-coverage.test.ts` walks `src/app` and asserts
+every module establishing a session also reaches a registration seam. It is
+**AST-based on purpose**, and a third test pins that: `verifyOtp` appears
+inside a comment in the forgot-password route, so a grep-shaped scan would
+flag prose and invite someone to register a device on a route that mints no
+session. Its limits, stated: same-module only, `src/app` only, and it cannot
+tell whether registration sits on the success branch (other tests carry that).
 
 ### What T3.1 left behind that you should know
 
@@ -175,6 +234,39 @@ DEFINER function:
 narrow-column property is structural, not a `.select()` string a caller can
 widen.
 
+### Recorded against T3.4, none blocking
+
+From T3.4a: `saveConsumerProfile` is **not atomic** — `profiles.display_name`
+writes, then `consumers.city_id`, so a failure on the second leaves the name
+saved while the UI reports failure. Zod's `.max(80)` counts UTF-16 code units
+while the DB's `char_length` counts code points, so 45 emoji are refused by
+the form and accepted by the column (Zod is the stricter side, so no `23514`
+escapes). `revalidateProfileSurfaces()` is unasserted on both avatar actions.
+`AVATAR_BUCKET_MAX_BYTES` is used by nothing but its own test. The uid in the
+object path is not pinned to the *session* (the insert policy denies a
+foreign segment, so defence in depth holds). The city picker cannot **clear**
+a city. `updated_by` is unstamped, matching the existing writer.
+`avatar-image.ts` imports `sniffImageFormat` across the feature boundary.
+
+From T3.4b: **`saveConsent` reports success on a zero-row UPDATE** — an
+`.update().eq("id", user.id)` returns no error when RLS or a missing row
+matches nothing, so the optimistic flip stays and the database never changed.
+A `.select("id").maybeSingle()` closes it. Same pre-existing pattern as
+`saveConsumerProfile`. Device rows can duplicate under a same-instant race
+(no unique index behind `(user_id, platform, user_agent)`; a migration would
+be needed), and duplicates would both badge "This device". `is_revoked` is
+still dead, and `user_devices` has **no column fence**, so `authenticated`
+can UPDATE `fcm_token`/`is_revoked` on their own rows — both pre-existing.
+`server/devices.ts` imports `relativeTime` from `@/features/analytics/metrics`.
+
+### Pre-existing debt found along the way, not caused by these tasks
+
+**`0019_receipts_storage.sql`'s fence has no pgTAP suite.** There was no
+`storage.objects` assertion anywhere under `supabase/tests/` until T3.4a
+wrote `rls_avatars_storage_smoke.sql`. The receipts bucket's fence — the one
+guarding uploaded receipt images — is still untested. That suite is the
+template if you take it on.
+
 ## 6. STANDING RULES — read before writing any task
 
 These are in the plan's global constraints. They were each earned.
@@ -182,6 +274,10 @@ These are in the plan's global constraints. They were each earned.
 ### Rule 1 — every assertion needs a NAMED mutant
 
 **And when you clone a mechanism, clone its mutants too.** The commonest way a gap survives this rule is copying a correct neighbour's *code* without its *test* — seen twice in one task, once with the omission argued in a comment that did not hold.
+
+**And an assertion whose expected value comes from the same place as its actual value cannot disagree with the code.** Three variants of this shipped green in Wave 3: a fixture whose declared MIME type coincided with the constant under test; a `JSON.stringify` that flattened `new Error("x")` to `"{}"`, so a log assertion passed against evidence the code had discarded; and two call sites agreeing on a shared helper that held the wrong number. Agreement proves two sides cannot *drift* — never that the shared value is *right*. Pin it to its source of truth as well.
+
+**And a test that pins particular words does not pin the claim those words make.** A denylist of regexes over consumer-facing copy let three plausible rewordings of a false security promise pass a 343-test suite. For *fixed* prose, assert the full string with `toBe`; keep pattern matching underneath for text that is genuinely composed at runtime.
 
 > Every new or modified assertion must be red-verified against a named mutant, and the report must name the mutant for each. An assertion with no stated mutant is one nobody has shown can fail.
 
@@ -214,12 +310,9 @@ A row that does no work and writes nothing still matches the scan forever. With 
 
 ---
 
-## 8. REMAINING WORK — 24 tasks
+## 8. REMAINING WORK — 22 tasks
 
-### Wave 3 — auth + suspension (3/4 merged)
-
-**Remaining in Wave 3:**
-- **T3.4** Profile edit + preferences + devices — profile is read-only with a dead "Devices" row; the four consent toggles exist in the schema with no UI. **NPC Circular 2023-04 requires separate, un-ticked marketing consent** — bundling it is non-compliant.
+**Waves 1-3 are done. Wave 4 is where you start.**
 
 ### Wave 4 — consumer surfaces (6)
 - **T4.1** Promotions visible — merchants create them; consumers never see them anywhere
