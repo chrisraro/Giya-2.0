@@ -287,6 +287,8 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   "customer.segment_changed": "Customer segment changed",
   "consumer.suspended": "Account suspended",
   "consumer.unsuspended": "Suspension lifted",
+  "job.replayed": "Job replayed",
+  "job.replay_failed": "Replay attempted (not delivered)",
 };
 
 export function describeAuditAction(action: string): string {
@@ -304,6 +306,56 @@ export function describeAuditAction(action: string): string {
 export function describeActor(actorKind: string, actorName: string | null): string {
   if (actorKind === "system" || actorKind === "worker") return "Giya (automatic)";
   return actorName ?? "Unknown";
+}
+
+// ---------------------------------------------------------------------------
+// Queue Status (doc 31 §5 `/admin/monitoring/queues`, doc 39's DLQ view)
+// ---------------------------------------------------------------------------
+
+/** `_id` or `_ids`, case-sensitive: doc 39's own payload vocabulary
+ * (`receipt_id`, `notification_ids`, `business_id`, ...). */
+const PAYLOAD_IDENTITY_KEY = /_ids?$/;
+
+/** `job_id` names the row itself (added by the publisher, `src/lib/queue/
+ * publish.ts`) - showing it beside the dead-letter row that already carries
+ * that id twice would say the same fact twice and nothing else. */
+const PAYLOAD_IDENTITY_EXCLUDED_KEY = "job_id";
+
+const MAX_PAYLOAD_IDENTITY_LENGTH = 120;
+
+function truncate(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+
+/**
+ * A short, stable label for WHICH unit of work a dead job's payload names -
+ * doc 31 §5's "payload identity" column on the dead-letter list.
+ *
+ * Doc 39: "payloads carry identifiers, never denormalized state that can go
+ * stale" - every queue's payload is `{job_id, ...identifiers}`, so pulling out
+ * the `_id`/`_ids` keys (job_id excluded, see above) is a general rule that
+ * needs no per-queue schema knowledge. A payload shape this cannot read (not
+ * an object, or an object with no identifier keys) falls back to a truncated
+ * JSON dump rather than an empty cell, because "unrecognised" must still say
+ * something an operator can search a log for.
+ */
+export function describePayloadIdentity(payload: unknown): string {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return truncate(JSON.stringify(payload) ?? "null", MAX_PAYLOAD_IDENTITY_LENGTH);
+  }
+
+  const entries = Object.entries(payload as Record<string, unknown>).filter(
+    ([key]) => key !== PAYLOAD_IDENTITY_EXCLUDED_KEY && PAYLOAD_IDENTITY_KEY.test(key),
+  );
+
+  if (entries.length === 0) {
+    return truncate(JSON.stringify(payload), MAX_PAYLOAD_IDENTITY_LENGTH);
+  }
+
+  const summary = entries
+    .map(([key, value]) => `${key}=${Array.isArray(value) ? `[${value.length}]` : String(value)}`)
+    .join(" ");
+  return truncate(summary, MAX_PAYLOAD_IDENTITY_LENGTH);
 }
 
 // ---------------------------------------------------------------------------
