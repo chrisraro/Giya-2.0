@@ -69,14 +69,24 @@ import type { FraudSignal } from "./fraud";
 //     mode of treating it as real data (flagging literally every receipt at
 //     that business) is exactly the one this file exists to prevent;
 //   * there is no valid, well-formed entry for the RECEIPT's OWN weekday.
-//     Missing (a partial week) and malformed (bad HHMM, a non-boolean
-//     `closed`, or any other shape `isHoursEntry` refuses) are treated
-//     identically: no opinion, not "closed".
+//     Missing (a partial week) and malformed (a `day` outside 1-7, or an
+//     `open`/`close` that fails HHMM) are treated identically: no opinion,
+//     not "closed".
 //
 // A day's own valid entry with no `closed` key at all but well-formed
 // `open`/`close` IS trusted as an open window (`isHoursEntry`'s own rule):
 // that is real data - two specific times were actually written down - not a
 // substitution this module invented.
+//
+// NAMED RATHER THAN HIDDEN: `isHoursEntry` (`src/lib/hours.ts:34`) only
+// early-returns on `closed === true`; it does not require `closed` to be a
+// boolean at all. `closed: "yes"` or `closed: 1` is therefore NOT refused -
+// it falls through to the same open/close validation a legitimate
+// `closed: false` row goes through, and a row with well-formed times is
+// trusted as OPEN. The direction is safe for a check built to never
+// fabricate a closure (it can only under-count one), so this is left as
+// `isHoursEntry`'s behavior rather than special-cased here - but it is real,
+// and a previous version of this comment claimed the opposite.
 //
 // ---------------------------------------------------------------------------
 // OVERNIGHT WINDOWS AND THE GRACE MARGIN
@@ -228,14 +238,29 @@ export function checkClosedHours(input: ClosedHoursCheckInput): FraudSignal | nu
   );
   if (withinStatedHours) return null;
 
-  // Doc 37 line 82's evidence contract, verbatim shape: `{kind, receipt_date,
-  // opening_hours_day: {day, open, close}}`. `receipt_date` is the full
-  // instant (not just the clock reading) so a reviewer - or a future reader
-  // of this evidence - can see exactly what this module compared against
-  // `opening_hours_day` without a second lookup (C2).
+  // Doc 37 line 82's evidence contract is `{kind, receipt_date,
+  // opening_hours_day: {day, open, close}}`, and that example is an OPEN
+  // day - it says nothing about the far more common firing path, a day
+  // `today` itself states is closed. `closed` is added here (the doc's
+  // example does not forbid it) because omitting the one field that
+  // explains the finding is the worse deviation: without it, a Sunday-closed
+  // business's Sunday receipt would render evidence naming Monday-Saturday's
+  // OWN open/close times next to a receipt time those hours plainly contain,
+  // which reads as the detector being broken rather than as the real reason
+  // (N1). `open`/`close` are only read - and only present in the evidence -
+  // on the OPEN branch: `HoursEntry.open`/`close` are typed `string` but are
+  // genuinely `undefined` at runtime on a bare `{day, closed:true}` row
+  // (`isHoursEntry` never validates them once `closed === true` short-
+  // circuits it), so branching on `closed` first is what keeps this from
+  // ever reading through that unsound typing (N3).
+  const openingHoursDay =
+    today.closed === true
+      ? { day: weekday, closed: true }
+      : { day: weekday, closed: false, open: today.open, close: today.close };
+
   return buildSignal("timestamp_closed_hours", {
     kind: "closed_hours",
     receipt_date: input.receiptDate.toISOString(),
-    opening_hours_day: { day: weekday, open: today.open, close: today.close },
+    opening_hours_day: openingHoursDay,
   });
 }

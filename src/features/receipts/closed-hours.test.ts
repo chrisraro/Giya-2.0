@@ -179,7 +179,7 @@ describe("checkClosedHours: M4 — an Invalid Date degrades quietly", () => {
 // invention.
 // ---------------------------------------------------------------------------
 describe("checkClosedHours: C2 — evidence matches doc 37 line 82 exactly", () => {
-  it("emits {kind, receipt_date, opening_hours_day: {day, open, close}}", () => {
+  it("emits {kind, receipt_date, opening_hours_day: {day, closed, open, close}} on the OPEN branch", () => {
     const receiptDate = manila("2026-07-20", 2, 0); // Monday 02:00
     const openingHours = week({ 1: { open: "08:00", close: "20:00", closed: false } });
     const signal = check({ receiptDate, openingHours });
@@ -191,18 +191,52 @@ describe("checkClosedHours: C2 — evidence matches doc 37 line 82 exactly", () 
       evidence: {
         kind: "closed_hours",
         receipt_date: receiptDate.toISOString(),
-        opening_hours_day: { day: 1, open: "08:00", close: "20:00" },
+        opening_hours_day: { day: 1, closed: false, open: "08:00", close: "20:00" },
       },
     });
   });
 
-  it("reports the RECEIPT's own weekday's entry even when a closed day fires the signal", () => {
-    // Tuesday closed outright in this fixture.
+  it("N1: carries closed:true and NO open/close when the day itself is stated closed - never a window that contradicts the finding", () => {
+    // Tuesday closed outright in this fixture, but `week()`'s CLOSED default
+    // still fills real-looking open/close strings ("09:00"/"21:00", the same
+    // way a merchant's editor-authored row would after they toggle a day
+    // shut - `businesses/settings/hours.ts`'s own stated reason for keeping
+    // them). The receipt below (12:00) falls INSIDE those default times on
+    // purpose: a naive `{open, close}`-only evidence shape would read as the
+    // detector contradicting its own finding ("1:00 PM is plainly inside
+    // 09:00-21:00" was the exact review finding, N1) - this is the test that
+    // would have caught it, not one that asserts the contradiction as
+    // correct.
     const openingHours = week({ 1: { open: "08:00", close: "20:00", closed: false } });
-    const signal = check({ receiptDate: manila("2026-07-21", 12, 0), openingHours }); // Tuesday
-    expect(signal?.evidence).toMatchObject({
-      opening_hours_day: { day: 2, open: "09:00", close: "21:00" },
-    });
+    const signal = check({ receiptDate: manila("2026-07-21", 12, 0), openingHours }); // Tuesday noon
+    expect(signal?.evidence).toMatchObject({ opening_hours_day: { day: 2, closed: true } });
+
+    const openingHoursDay = (
+      signal?.evidence as { opening_hours_day?: Record<string, unknown> }
+    ).opening_hours_day;
+    expect(openingHoursDay).not.toHaveProperty("open");
+    expect(openingHoursDay).not.toHaveProperty("close");
+  });
+
+  it("N1/N3 second variant: a closed row with NO open/close at all (legal per isHoursEntry) is handled the same way", () => {
+    // `{day, closed:true}` with no `open`/`close` keys is a legal
+    // `isHoursEntry` row - `src/lib/hours.ts:34` returns true on
+    // `closed === true` before ever looking at open/close. `HoursEntry.open`/
+    // `close` are typed `string` but are genuinely `undefined` here at
+    // runtime; reading them into the evidence unconditionally (N3) is what
+    // let N1's second variant through. Monday is real, open data so
+    // `hasAnyValidOpenDay` lets the check run at all.
+    const openingHours = [
+      { day: 1, open: "08:00", close: "20:00", closed: false },
+      { day: 2, closed: true },
+    ];
+    const signal = check({ receiptDate: manila("2026-07-21", 12, 0), openingHours }); // Tuesday noon
+    expect(signal?.evidence).toMatchObject({ opening_hours_day: { day: 2, closed: true } });
+    const openingHoursDay = (
+      signal?.evidence as { opening_hours_day?: Record<string, unknown> }
+    ).opening_hours_day;
+    expect(openingHoursDay).not.toHaveProperty("open");
+    expect(openingHoursDay).not.toHaveProperty("close");
   });
 });
 

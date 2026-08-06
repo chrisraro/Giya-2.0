@@ -474,11 +474,21 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
       const maxAgeDays = readNumber(evidence, "max_age_days");
       const verifiedAt = readString(evidence, "business_verified_at");
       // Doc 37 line 82's evidence contract for the closed-hours case:
-      // `{kind, receipt_date, opening_hours_day: {day, open, close}}`.
+      // `{kind, receipt_date, opening_hours_day: {day, closed, open?, close?}}`.
+      // `closed` decides which of `open`/`close` even mean anything (N1): a
+      // day `closed-hours.ts` found stated CLOSED never carries them (N3),
+      // so reading them here is only ever attempted on the open branch.
       const openingHoursDay = readRecord(evidence, "opening_hours_day");
       const openingHoursDayNumber = openingHoursDay !== null ? readNumber(openingHoursDay, "day") : null;
-      const statedOpen = openingHoursDay !== null ? readString(openingHoursDay, "open") : null;
-      const statedClose = openingHoursDay !== null ? readString(openingHoursDay, "close") : null;
+      const openingHoursDayClosed = openingHoursDay !== null ? readBoolean(openingHoursDay, "closed") : null;
+      const statedOpen =
+        openingHoursDay !== null && openingHoursDayClosed !== true
+          ? readString(openingHoursDay, "open")
+          : null;
+      const statedClose =
+        openingHoursDay !== null && openingHoursDayClosed !== true
+          ? readString(openingHoursDay, "close")
+          : null;
       const clock = kind === "closed_hours" ? manilaClock(rawReceiptDate) : null;
 
       let summary: string;
@@ -517,7 +527,13 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
           label: "Day",
           value: clock?.weekday ?? (openingHoursDayNumber === null ? "Unknown" : String(openingHoursDayNumber)),
         });
-        if (statedOpen !== null && statedClose !== null) {
+        // N1: on the (most common) firing path where the day is stated
+        // CLOSED, printing its open/close times next to a receipt that falls
+        // inside them reads as the detector contradicting itself - so a
+        // closed day says exactly that, never a window.
+        if (openingHoursDayClosed === true) {
+          rows.push({ label: "Stated hours", value: "Closed that day" });
+        } else if (statedOpen !== null && statedClose !== null) {
           rows.push({ label: "Stated hours", value: `${statedOpen} - ${statedClose}` });
         }
       }
