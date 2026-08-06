@@ -44,10 +44,27 @@ export default async function ProfilePage() {
       <h1 className="text-headline-m text-on-surface">Profile</h1>
 
       <div className="mt-6 flex items-center gap-4">
-        <span className="flex size-16 shrink-0 items-center justify-center rounded-full bg-secondary-container text-title-l text-on-secondary-container">
-          {initials}
-        </span>
-        <div className="min-w-0">
+        {/* The initials circle is not a placeholder waiting to be deleted: it is
+            the correct empty state for a consumer who has never set a photo,
+            which is most of them, and it stays. The <img> is the exception.
+
+            A bare <img> and not next/image, matching every other remote image in
+            this app: the avatars bucket is public and CDN-served, and routing it
+            through the optimizer would add a proxy hop and a second cache for a
+            64px circle. */}
+        {profile.avatarUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element -- public storage-CDN object; next/image domain allowlisting is not set up for this slice
+          <img
+            src={profile.avatarUrl}
+            alt=""
+            className="size-16 shrink-0 rounded-full bg-secondary-container object-cover"
+          />
+        ) : (
+          <span className="flex size-16 shrink-0 items-center justify-center rounded-full bg-secondary-container text-title-l text-on-secondary-container">
+            {initials}
+          </span>
+        )}
+        <div className="min-w-0 flex-1">
           <p className="truncate text-title-m text-on-surface">{name}</p>
           {profile.email ? (
             <p className="truncate text-body-s text-on-surface-variant">{profile.email}</p>
@@ -56,6 +73,18 @@ export default async function ProfilePage() {
             <p className="truncate text-body-s text-on-surface-variant">{profile.cityName}</p>
           ) : null}
         </div>
+        {/* The only way in to /profile/edit. It sits with the identity block it
+            edits rather than in the settings list below, which is a list of
+            other screens. */}
+        <Link
+          href="/profile/edit"
+          aria-label="Edit profile"
+          className="flex size-12 shrink-0 items-center justify-center rounded-full text-on-surface-variant outline-none transition-colors duration-200 ease-standard hover:bg-surface-container focus-visible:ring-2 focus-visible:ring-primary"
+        >
+          <span aria-hidden className="material-symbols-rounded">
+            edit
+          </span>
+        </Link>
       </div>
 
       <section className="mt-8 divide-y divide-outline-variant overflow-hidden rounded-md3-md border border-outline-variant">

@@ -6,55 +6,16 @@ import { motion, useReducedMotion } from "motion/react";
 import { Stepper } from "@/components/auth/stepper";
 import { OptInSwitch } from "@/components/auth/opt-in-switch";
 import { Chip } from "@/components/ui/chip";
-import { TextField } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/brand/logo";
-import { cn } from "@/lib/utils";
 import { completeConsumerOnboarding } from "@/features/identity/actions";
-import { createClient } from "@/lib/supabase/client";
+import {
+  CityPicker,
+  useCityPicker,
+  type CityPickerState,
+} from "@/features/identity/components/city-picker";
 
 const STEP_COUNT = 4;
-
-/**
- * The city step reads `ref_cities` rather than a hardcoded list.
- *
- * It used to be `const CITIES = ["Cebu", "Manila", "Davao", "Iloilo",
- * "Baguio", "Cagayan de Oro"]`, a client-side copy of the six-row stub seed in
- * 0002_identity.sql. 0027_reference_data.sql seeds all 149 chartered
- * Philippine cities, and that seed reaches nobody through a literal, so a
- * consumer in Naga or Bacolod still had no way to say where they live.
- *
- * `ref_cities` carries a public select policy (`ref_cities_public_select`), so
- * the browser client can read it without a session, which is what this step
- * needs: onboarding runs before the profile exists. The step already had a
- * search field, an empty state and a `max-h-64 overflow-y-auto` list, so it was
- * built for more rows than it was ever given.
- *
- * The names are unique by construction (0027 disambiguates San Fernando, San
- * Carlos, Talisay and Naga with a parenthesised province) because
- * `completeConsumerOnboarding` resolves the chosen name with `.ilike(...)
- * .maybeSingle()`, which raises on a tie.
- */
-function useCities() {
-  const [cities, setCities] = React.useState<string[]>([]);
-
-  React.useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const { data } = await createClient()
-        .from("ref_cities")
-        .select("name")
-        .eq("is_active", true)
-        .order("name");
-      if (!cancelled && data) setCities(data.map((row) => row.name));
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return cities;
-}
 
 const INTERESTS = [
   "Milk tea",
@@ -95,25 +56,19 @@ function WelcomeStep() {
   );
 }
 
+// Heading plus the shared picker. Everything that used to live here - the
+// ref_cities read, the search field, the roving-focus list and the arrow-key
+// handler - is now src/features/identity/components/city-picker.tsx, so
+// /profile/edit uses the same control rather than a second copy of it.
 function CityStep({
-  cities,
-  search,
-  onSearchChange,
+  picker,
   selected,
   onSelect,
-  onArrowKey,
-  itemRef,
 }: {
-  cities: string[];
-  search: string;
-  onSearchChange: (value: string) => void;
+  picker: CityPickerState;
   selected: string | null;
   onSelect: (city: string) => void;
-  onArrowKey: (direction: 1 | -1) => void;
-  itemRef: (city: string, el: HTMLDivElement | null) => void;
 }) {
-  const selectedVisible = selected !== null && cities.includes(selected);
-
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1 text-center">
@@ -122,68 +77,7 @@ function CityStep({
           We will show you deals nearby first.
         </p>
       </div>
-      <TextField
-        id="city-search"
-        label="Search city"
-        placeholder="Type a city name"
-        value={search}
-        onChange={(event) => onSearchChange(event.target.value)}
-      />
-      <div
-        role="radiogroup"
-        aria-label="Your city"
-        className="flex max-h-64 flex-col gap-2 overflow-y-auto"
-      >
-        {cities.length === 0 ? (
-          <p className="py-4 text-center text-body-m text-on-surface-variant">
-            No cities match &quot;{search}&quot;.
-          </p>
-        ) : (
-          cities.map((city, index) => {
-            const isSelected = city === selected;
-            const isRovingFallback = !selectedVisible && index === 0;
-            return (
-              <div
-                key={city}
-                ref={(el) => itemRef(city, el)}
-                role="radio"
-                aria-checked={isSelected}
-                tabIndex={isSelected || isRovingFallback ? 0 : -1}
-                onClick={() => onSelect(city)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    onSelect(city);
-                    return;
-                  }
-                  if (event.key === "ArrowDown") {
-                    event.preventDefault();
-                    onArrowKey(1);
-                  } else if (event.key === "ArrowUp") {
-                    event.preventDefault();
-                    onArrowKey(-1);
-                  }
-                }}
-                className={cn(
-                  "flex cursor-pointer items-center justify-between rounded-md3-md border px-4 py-3 text-left",
-                  "outline-none transition-colors duration-200 ease-standard",
-                  "focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface",
-                  isSelected
-                    ? "border-primary bg-primary-container/40"
-                    : "border-outline-variant bg-surface hover:bg-surface-container",
-                )}
-              >
-                <span className="text-body-l text-on-surface">{city}</span>
-                {isSelected ? (
-                  <span aria-hidden className="material-symbols-rounded is-filled text-primary">
-                    check_circle
-                  </span>
-                ) : null}
-              </div>
-            );
-          })
-        )}
-      </div>
+      <CityPicker state={picker} value={selected} onChange={onSelect} />
     </div>
   );
 }
@@ -253,18 +147,17 @@ export default function OnboardingPage() {
   const [step, setStep] = React.useState(0);
   const [direction, setDirection] = React.useState<1 | -1>(1);
   const [city, setCity] = React.useState<string | null>(null);
-  const [citySearch, setCitySearch] = React.useState("");
   const [interests, setInterests] = React.useState<Set<string>>(new Set());
   const [notifications, setNotifications] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [pending, setPending] = React.useState(false);
-  const cityRefs = React.useRef<Record<string, HTMLDivElement | null>>({});
 
-  const cities = useCities();
-  const filteredCities = React.useMemo(
-    () => cities.filter((c) => c.toLowerCase().includes(citySearch.trim().toLowerCase())),
-    [cities, citySearch],
-  );
+  // Held HERE, not inside the city step, and this component is the reason: the
+  // step is mounted only while `step === 1`, so state living inside it is thrown
+  // away every time somebody moves to Interests and back. The ref_cities read
+  // would repeat, the list would flash its empty state on the way back, and the
+  // typed search would be gone.
+  const cityPicker = useCityPicker();
 
   const canContinue = step !== 1 || city !== null;
 
@@ -341,17 +234,6 @@ export default function OnboardingPage() {
     });
   }
 
-  function handleCityArrowKey(dir: 1 | -1) {
-    if (filteredCities.length === 0) return;
-    const idx = filteredCities.findIndex((c) => c === city);
-    const currentIndex = idx === -1 ? 0 : idx;
-    const nextIndex = (currentIndex + dir + filteredCities.length) % filteredCities.length;
-    const next = filteredCities[nextIndex];
-    if (!next) return;
-    setCity(next);
-    cityRefs.current[next]?.focus();
-  }
-
   // Entrance-only animation: exit animations under AnimatePresence mode="wait"
   // deadlocked in production (old step never unmounted, next step never
   // mounted), so each step slides in on mount and the old one unmounts
@@ -386,17 +268,7 @@ export default function OnboardingPage() {
           >
             {step === 0 && <WelcomeStep />}
             {step === 1 && (
-              <CityStep
-                cities={filteredCities}
-                search={citySearch}
-                onSearchChange={setCitySearch}
-                selected={city}
-                onSelect={setCity}
-                onArrowKey={handleCityArrowKey}
-                itemRef={(id, el) => {
-                  cityRefs.current[id] = el;
-                }}
-              />
+              <CityStep picker={cityPicker} selected={city} onSelect={setCity} />
             )}
             {step === 2 && <InterestsStep selected={interests} onToggle={toggleInterest} />}
             {step === 3 && (
