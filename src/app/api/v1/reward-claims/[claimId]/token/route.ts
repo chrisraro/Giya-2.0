@@ -5,6 +5,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { assertClaimOwner } from "@/features/rewards/server/claim-ownership";
 import * as repo from "@/features/rewards/server/repo";
 import { mintRedemptionToken } from "@/features/rewards/server/token";
+import { ACCOUNT_SUSPENDED, readConsumerSuspension } from "@/lib/auth/suspension";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { redisKey } from "@/lib/redis";
 import { createClient } from "@/lib/supabase/server";
@@ -58,6 +59,36 @@ export async function POST(
       401,
       "UNAUTHENTICATED",
       "Please sign in to generate a redemption code.",
+      requestId,
+    );
+  }
+
+  // SUSPENSION GATE (doc 30 section 2.8) + review finding C1: a suspended
+  // consumer must not be able to keep minting fresh redemption codes for
+  // rewards they claimed before being suspended. Checked here, before any
+  // other work (claim lookup, rate limit), because it is about the CALLER,
+  // not the claim - a suspended user gets the same answer for every claim id,
+  // so checking first creates no new oracle (doc 13's "not found" vs "not
+  // yours" distinction below is unaffected). This is the companion half of
+  // validateRedemption's own consumer-suspension check
+  // (rewards/server/service.ts): that one stops an ALREADY-minted token from
+  // being redeemed after suspension; this one stops a NEW one from being
+  // minted at all. Together they bound the exposure window to, at most, one
+  // token's remaining TTL (5 minutes, server/token.ts).
+  const suspension = await readConsumerSuspension(supabase, user.id);
+  if (suspension === "suspended") {
+    return errorResponse(
+      403,
+      ACCOUNT_SUSPENDED,
+      "Your account is suspended. Please contact support.",
+      requestId,
+    );
+  }
+  if (suspension === "unknown") {
+    return errorResponse(
+      503,
+      "DEPENDENCY_UNAVAILABLE",
+      "This service is temporarily unavailable. Please try again shortly.",
       requestId,
     );
   }

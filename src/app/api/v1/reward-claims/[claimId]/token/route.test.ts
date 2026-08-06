@@ -1,6 +1,11 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// src/lib/auth/suspension.ts (imported transitively by this route) is marked
+// "server-only", which throws outside Next's react-server condition (vitest
+// does not set it) - mocked to a no-op, same as every other server-only test.
+vi.mock("server-only", () => ({}));
+
 // CRITICAL regression coverage: reward_claims RLS is a UNION of
 // reward_claims_consumer_select (consumer_id = auth.uid()) and
 // reward_claims_staff_select (staff of the business) - see
@@ -16,11 +21,20 @@ const mocks = vi.hoisted(() => ({
   getClaim: vi.fn(),
   mintRedemptionToken: vi.fn(),
   checkRateLimit: vi.fn(),
+  profileMaybeSingle: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
     auth: { getUser: mocks.getUser },
+    // Backs the suspension gate (src/lib/auth/suspension.ts's
+    // readConsumerSuspension), checked before the claim lookup below.
+    from: (table: string) => {
+      if (table === "profiles") {
+        return { select: () => ({ eq: () => ({ maybeSingle: mocks.profileMaybeSingle }) }) };
+      }
+      throw new Error(`unexpected table read: ${table}`);
+    },
   })),
 }));
 
@@ -87,6 +101,7 @@ async function callRoute() {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.checkRateLimit.mockResolvedValue({ ok: true, remaining: 4, resetSeconds: 60 });
+  mocks.profileMaybeSingle.mockResolvedValue({ data: { is_suspended: false }, error: null });
 });
 
 describe("POST /api/v1/reward-claims/{claimId}/token", () => {
@@ -99,6 +114,50 @@ describe("POST /api/v1/reward-claims/{claimId}/token", () => {
     expect(response.status).toBe(401);
     expect(body.error.code).toBe("UNAUTHENTICATED");
     expect(mocks.getClaim).not.toHaveBeenCalled();
+  });
+
+  // Doc 30 section 2.8 + review finding C1: a suspended consumer must not be
+  // able to mint a fresh redemption code, even for a claim they legitimately
+  // own, even by calling this route directly.
+  it("CRITICAL: refuses a suspended consumer's mint request with 403 ACCOUNT_SUSPENDED", async () => {
+    mockAuthed(CONSUMER_ID);
+    mocks.profileMaybeSingle.mockResolvedValue({ data: { is_suspended: true }, error: null });
+
+    const response = await callRoute();
+    const body = await response.json();
+
+    expect(response.status).toBe(403);
+    expect(body.error.code).toBe("ACCOUNT_SUSPENDED");
+    expect(mocks.getClaim).not.toHaveBeenCalled();
+    expect(mocks.mintRedemptionToken).not.toHaveBeenCalled();
+  });
+
+  it("does not affect an unsuspended consumer's mint request (the negative case)", async () => {
+    mockAuthed(CONSUMER_ID);
+    mocks.profileMaybeSingle.mockResolvedValue({ data: { is_suspended: false }, error: null });
+    mocks.getClaim.mockResolvedValue(baseClaim());
+    mocks.mintRedemptionToken.mockResolvedValue({
+      token: "signed.jwt.token",
+      expiresAt: "2026-07-25T12:05:00.000Z",
+      jti: "jti-1",
+    });
+
+    const response = await callRoute();
+
+    expect(response.status).toBe(200);
+    expect(mocks.mintRedemptionToken).toHaveBeenCalledWith(CLAIM_ID, BUSINESS_ID);
+  });
+
+  it("fails CLOSED (503, refuses to mint) when suspension state cannot be read", async () => {
+    mockAuthed(CONSUMER_ID);
+    mocks.profileMaybeSingle.mockResolvedValue({ data: null, error: { message: "boom" } });
+
+    const response = await callRoute();
+    const body = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(body.error.code).toBe("DEPENDENCY_UNAVAILABLE");
+    expect(mocks.mintRedemptionToken).not.toHaveBeenCalled();
   });
 
   it("returns 404 NOT_FOUND when the claim does not exist", async () => {

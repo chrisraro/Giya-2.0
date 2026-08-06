@@ -89,11 +89,20 @@ export const resolveReviewerContext = cache(async function resolveReviewerContex
 
   const { data: business } = await supabase
     .from("businesses")
-    .select("id, name")
+    .select("id, name, status")
     .eq("id", membership.business_id)
-    .maybeSingle<{ id: string; name: string }>();
+    .maybeSingle<{ id: string; name: string; status: string }>();
 
   if (business === null) return null;
+
+  // Doc 30 section 2.8: a suspended business is refused here too, not only by
+  // the portal layout's redirect. The layout is a courtesy screen; THIS is
+  // the control approveReceiptAction/rejectReceiptAction actually depend on -
+  // both mint points (doc 35), and calling either directly, bypassing the
+  // portal entirely, must not succeed for a suspended tenant. Same fail shape
+  // as every other refusal here ("null is the only failure shape on
+  // purpose"): a caller cannot distinguish "suspended" from "no membership".
+  if (business.status === "suspended") return null;
 
   return {
     userId: user.id,

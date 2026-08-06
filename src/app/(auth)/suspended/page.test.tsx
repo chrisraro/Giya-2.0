@@ -47,4 +47,22 @@ describe("SuspendedPage", () => {
     const appealLink = screen.getByRole("link", { name: /appeal|contact/i });
     expect(appealLink.getAttribute("href")).toMatch(/^mailto:/);
   });
+
+  // The header comment's claim ("must NEVER echo suspended_reason") had no
+  // assertion behind it - review finding. This is that assertion: even if a
+  // caller smuggles a reason-shaped field into searchParams (simulating a
+  // future edit to one of the two callers, or a crafted URL), the page must
+  // not render it. The component only ever destructures `type`, so this also
+  // guards against a future change that starts interpolating more of
+  // searchParams into the JSX.
+  it("CRITICAL: never renders reason-like text smuggled into searchParams", async () => {
+    const sneaky = "Repeated fraudulent receipts, ring flagged";
+    render(
+      await SuspendedPage({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        searchParams: Promise.resolve({ type: "account", reason: sneaky } as any),
+      }),
+    );
+    expect(screen.queryByText(sneaky)).not.toBeInTheDocument();
+  });
 });

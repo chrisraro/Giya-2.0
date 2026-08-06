@@ -5,6 +5,7 @@ import {
   readConsumerSuspension,
 } from "@/lib/auth/suspension";
 import { createClient } from "@/lib/supabase/server";
+import { createServiceRoleClient } from "@/lib/supabase/service";
 
 import { consumeRedemptionToken, RedemptionTokenError } from "./token";
 import type { ActionResult } from "../types";
@@ -55,10 +56,21 @@ export interface ClaimRewardData {
  * Claims a reward for the signed-in consumer via the claim_reward RPC. All
  * of the eligibility/inventory/points guards live inside that RPC (single
  * atomic transaction under a row lock, doc 35 s6); this function only calls
- * it and maps the result. Session verification is the caller's job
- * (actions.ts) - this function assumes it is already running with an
- * authenticated Supabase client, though it still maps the RPC's own
- * UNAUTHENTICATED (42501) response defensively.
+ * it and maps the result.
+ *
+ * `userId` is REQUIRED, not re-derived. It used to call
+ * `supabase.auth.getUser()` itself to learn who was claiming, and a review
+ * caught why that was wrong: `getUser()` is a GoTrue network call, distinct
+ * from the local JWT verification PostgREST does when the RPC itself reads
+ * `auth.uid()`. On a transient `getUser()` failure this function saw
+ * `user: null`, the suspension check below was SKIPPED entirely (wrapped in
+ * `if (user)`), and the RPC call beneath it still succeeded off the same
+ * cookie's locally-verified JWT - a suspended consumer's claim would go
+ * through exactly when the network hiccuped. Taking `userId` as a parameter
+ * (the caller, actions.ts, already resolved it via its OWN `getUser()` call
+ * before ever reaching here - see the `NOT_SIGNED_IN` check) removes the
+ * conditional entirely: the suspension check below is unconditional, so it
+ * cannot silently no-op.
  *
  * SUSPENSION GATE (doc 30 section 2.8): claim_reward's own SQL guards
  * `business_customers.segment = 'blacklisted'`, a DIFFERENT, per-tenant
@@ -74,28 +86,22 @@ export interface ClaimRewardData {
  * `campaignPointsAwarded`/`campaignCustomerEarnCount`, admin/consequences.ts's
  * `assertCanAct`).
  */
-export async function claimReward(rewardId: string): Promise<ActionResult<ClaimRewardData>> {
+export async function claimReward(
+  rewardId: string,
+  userId: string,
+): Promise<ActionResult<ClaimRewardData>> {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
 
-  // No session: fall through to the RPC, whose own auth.uid() check raises
-  // UNAUTHENTICATED (mapped below) - actions.ts already refuses this case
-  // before reaching here, so this branch is defensive only, matching every
-  // other defensive UNAUTHENTICATED mapping in this file.
-  if (user) {
-    const suspension = await readConsumerSuspension(supabase, user.id);
-    if (suspension === "suspended") {
-      return {
-        ok: false,
-        message: "Your account is suspended. Contact us if you think this is a mistake.",
-        code: ACCOUNT_SUSPENDED,
-      };
-    }
-    if (suspension === "unknown") {
-      return { ok: false, message: GENERIC_CLAIM_ERROR, code: "DEPENDENCY_UNAVAILABLE" };
-    }
+  const suspension = await readConsumerSuspension(supabase, userId);
+  if (suspension === "suspended") {
+    return {
+      ok: false,
+      message: "Your account is suspended. Contact us if you think this is a mistake.",
+      code: ACCOUNT_SUSPENDED,
+    };
+  }
+  if (suspension === "unknown") {
+    return { ok: false, message: GENERIC_CLAIM_ERROR, code: "DEPENDENCY_UNAVAILABLE" };
   }
 
   const { data, error } = await supabase.rpc("claim_reward", { p_reward_id: rewardId });
@@ -190,28 +196,87 @@ export async function validateRedemption(
 
   const supabase = await createClient();
 
-  // SUSPENSION GATE (doc 30 section 2.8): validate_redemption's own SQL
-  // guards the CLAIM's `business_customers.segment = 'blacklisted'` (a
-  // different, per-customer mechanism); nothing inside the RPC reads
-  // `businesses.status`. `payload.businessId` is the claim's business, taken
-  // from the JWT's own signed claim (server/token.ts's mintRedemptionToken
-  // embeds `claim.businessId` at mint time), never from the validating
-  // staff member's session - so a staff member cannot pass a different
-  // business's id to dodge this check. Checked here, after the token is
-  // consumed but before the RPC runs, closing the gap at the one call site
-  // this RPC has. Fails CLOSED, same posture as claimReward's own suspension
-  // gate above and for the same reason: a status this function cannot trust
-  // must not let a redemption through.
-  const businessSuspension = await readBusinessSuspension(supabase, payload.businessId);
-  if (businessSuspension === "suspended") {
-    return {
-      ok: false,
-      message: "Redemptions are paused for this business account.",
-      code: BUSINESS_SUSPENDED,
-    };
-  }
-  if (businessSuspension === "unknown") {
+  // SUSPENSION GATE (doc 30 section 2.8), BOTH sides of the redemption.
+  //
+  // validate_redemption's own SQL guards the CLAIM's
+  // `business_customers.segment = 'blacklisted'` (a different, per-customer
+  // mechanism); nothing inside the RPC reads `businesses.status` or
+  // `profiles.is_suspended`. Two separate refusals belong here, not one:
+  //
+  //   * BUSINESS_SUSPENDED - a suspended merchant's staff must not be able to
+  //     process a redemption at all.
+  //   * ACCOUNT_SUSPENDED  - the CLAIMING CONSUMER'S own suspension. Points
+  //     already moved at claim time (0013: "NO ledger entry here"), so this
+  //     is not about stopping a second spend - it is about the merchandise:
+  //     redemption is the irreversible step where points convert into
+  //     inventory or service handed to that specific person, and doc 37's
+  //     usual reason to reach this ladder step is that the points behind the
+  //     claim were fraudulently earned in the first place. Without this
+  //     check, a consumer could pre-claim rewards, get suspended, and keep
+  //     minting fresh tokens (or simply hand off an existing one) to walk out
+  //     with goods for every held claim - the token route itself is ALSO
+  //     gated (see reward-claims/[claimId]/token/route.ts) so new tokens
+  //     cannot be minted post-suspension, but a token minted just before
+  //     suspension is still live for its 5-minute TTL, which is what this
+  //     check closes.
+  //
+  // Read via the SERVICE ROLE client, not the caller's session-scoped one:
+  // `profiles_owner_select` RLS is self-select only, so a staff member's own
+  // session can never see whether the CUSTOMER's account is suspended - that
+  // fact is simply invisible to them, by design, for every other profile
+  // field too. The claim's own `business_id`/`consumer_id` are read fresh
+  // here (rather than trusted from the token payload) so this is the
+  // authoritative pair the redemption is actually about.
+  //
+  // Fails CLOSED throughout: a claim read this function cannot trust, or a
+  // suspension status it cannot trust, refuses the redemption rather than
+  // risk letting one through - same posture as claimReward's own gate.
+  const serviceClient = createServiceRoleClient();
+  if (serviceClient === null) {
+    console.error(
+      "[rewards/service] SUPABASE_SERVICE_ROLE_KEY is not configured; cannot verify suspension state for a redemption",
+    );
     return { ok: false, message: GENERIC_VALIDATE_ERROR, code: "DEPENDENCY_UNAVAILABLE" };
+  }
+
+  const { data: claimRow, error: claimError } = await serviceClient
+    .from("reward_claims")
+    .select("business_id, consumer_id")
+    .eq("id", payload.claimId)
+    .maybeSingle<{ business_id: string; consumer_id: string }>();
+
+  if (claimError !== null) {
+    console.error("[rewards/service] could not read the claim for suspension checks", claimError);
+    return { ok: false, message: GENERIC_VALIDATE_ERROR, code: "DEPENDENCY_UNAVAILABLE" };
+  }
+
+  // A genuinely unknown claim id is not this gate's problem to report - the
+  // RPC below already answers FORBIDDEN for that case (doc 13: never
+  // distinguish absent from outside-caller-scope), so skip straight to it
+  // rather than invent a second "not found" shape.
+  if (claimRow !== null) {
+    const [businessSuspension, consumerSuspension] = await Promise.all([
+      readBusinessSuspension(serviceClient, claimRow.business_id),
+      readConsumerSuspension(serviceClient, claimRow.consumer_id),
+    ]);
+
+    if (businessSuspension === "suspended") {
+      return {
+        ok: false,
+        message: "Redemptions are paused for this business account.",
+        code: BUSINESS_SUSPENDED,
+      };
+    }
+    if (consumerSuspension === "suspended") {
+      return {
+        ok: false,
+        message: "This customer's account is suspended and cannot redeem rewards.",
+        code: ACCOUNT_SUSPENDED,
+      };
+    }
+    if (businessSuspension === "unknown" || consumerSuspension === "unknown") {
+      return { ok: false, message: GENERIC_VALIDATE_ERROR, code: "DEPENDENCY_UNAVAILABLE" };
+    }
   }
 
   const { data, error } = await supabase.rpc("validate_redemption", {
