@@ -288,7 +288,7 @@ interface World {
   receipt: Record<string, unknown> | null;
   ocrAttempts: Array<{ attempt: number }>;
   templates: Array<{ id: string; source_kind: string; parse_config: unknown }>;
-  business: { id: string; name: string; verified_at: string | null } | null;
+  business: { id: string; name: string; verified_at: string | null; opening_hours?: unknown } | null;
   customer: { segment: string; visit_count: number } | null;
   phashNeighbours: Array<{ id: string; user_id: string; image_hash: string }>;
   numberMatches: Array<{ id: string; user_id: string; status: string }>;
@@ -314,7 +314,16 @@ function createWorld(overrides: Partial<World> = {}): World {
     },
     ocrAttempts: [],
     templates: [],
-    business: { id: BUSINESS_ID, name: "Sari Sari Express", verified_at: "2026-01-01T00:00:00.000Z" },
+    business: {
+      id: BUSINESS_ID,
+      name: "Sari Sari Express",
+      verified_at: "2026-01-01T00:00:00.000Z",
+      // No hours configured by default: the closed-hours check (S5) must
+      // stand down for every pre-existing test in this file that never
+      // opted in, exactly as it does for the platform's real businesses that
+      // have never opened the hours editor.
+      opening_hours: [],
+    },
     customer: { segment: "regular", visit_count: 3 },
     phashNeighbours: [],
     numberMatches: [],
@@ -1621,6 +1630,28 @@ describe("consequences ladder step 2", () => {
     expect(blockedUntil).toBe(new Date(NOW.getTime() + 24 * 3_600_000).toISOString());
   });
 
+  it("writes the automatic path's own system-actor audit row, with no request id to give", async () => {
+    // The pipeline runs with "no request context, no session, no supplied
+    // payload" (process.ts's own documented shape), so unlike the reviewer
+    // path this one's `request_id` is genuinely null rather than omitted.
+    const harness = createHarness({ world: blockedWorld(3) });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    const rows = harness.insertedRows("audit_logs");
+    const cooldownRow = rows.find((row) => row.action === "fraud.cooldown_applied");
+    expect(cooldownRow).toMatchObject({
+      actor_id: null,
+      actor_kind: "system",
+      actor_role: null,
+      business_id: null,
+      entity_type: "consumer",
+      entity_id: CONSUMER_ID,
+      reason: null,
+      request_id: null,
+    });
+  });
+
   it("never shortens a longer block that is already in place", async () => {
     const world = blockedWorld(3);
     world.scanBlockedUntil = new Date(NOW.getTime() + 72 * 3_600_000).toISOString();
@@ -2066,6 +2097,7 @@ describe("validateParsedReceipt", () => {
       maxTotalCentavos: DEFAULT_RECEIPT_SETTINGS.maxTotalCentavos,
       templateMaxTotalCentavos: null,
       businessVerifiedAt: null,
+      businessOpeningHours: [],
       ...overrides,
     });
   }
@@ -2172,6 +2204,126 @@ describe("validateParsedReceipt", () => {
     });
     expect(result.forceReview).toBe(false);
     expect(result.signals).toHaveLength(0);
+  });
+
+  // =========================================================================
+  // Doc 37 S5's closed-hours case (../closed-hours.ts), wired through here.
+  // The arithmetic itself (grace boundaries, overnight windows, the 24-hour
+  // business) is exhaustively covered in closed-hours.test.ts; these tests
+  // pin the WIRING: that this function reads `parsed.timeExtracted` and the
+  // caller-supplied `businessOpeningHours` rather than something else, and
+  // that the resulting signal joins `signals` exactly like the other two S5
+  // cases already do.
+  // =========================================================================
+  describe("closed-hours (doc 37 S5)", () => {
+    // CLEAN_RECEIPT_TEXT reads "07/24/2026 13:45" -> 2026-07-24T05:45:00Z, a
+    // Friday 13:45 in Asia/Manila.
+    const FRIDAY_9_TO_21 = [1, 2, 3, 4, 5, 6, 7].map((day) => ({
+      day,
+      open: "09:00",
+      close: "21:00",
+      closed: day !== 5,
+    }));
+
+    it("adds no signal for a receipt inside the business's stated hours", () => {
+      const result = validate({
+        businessOpeningHours: FRIDAY_9_TO_21,
+        businessVerifiedAt: new Date("2026-01-01T00:00:00.000Z"),
+      });
+      expect(result.signals).toHaveLength(0);
+    });
+
+    it("adds the catalog's closed-hours signal for a receipt outside them", () => {
+      // 2026-07-23T23:00:00Z = Friday 07:00 Manila, two hours before open
+      // (well past the 1h grace). M5: this comment previously said
+      // 2026-07-24, a day off from the instant the code actually uses.
+      const outsideHours = new Date("2026-07-23T23:00:00.000Z");
+      const result = validate({
+        parsed: { ...parsed, receiptDate: outsideHours },
+        businessOpeningHours: FRIDAY_9_TO_21,
+      });
+      const signal = result.signals.find(
+        (item) => (item.evidence as { kind?: string }).kind === "closed_hours",
+      );
+      expect(signal).toMatchObject({
+        signal: "timestamp_anomaly",
+        severity: "warn",
+        score: 0.4,
+      });
+      // Doc 37 line 82's evidence contract.
+      expect(signal?.evidence).toMatchObject({
+        receipt_date: outsideHours.toISOString(),
+        opening_hours_day: { day: 5, open: "09:00", close: "21:00" },
+      });
+    });
+
+    it("adds nothing when the receipt's date was ambiguous (C3)", () => {
+      // Same outside-hours instant as the test above - would otherwise fire.
+      const outsideHours = new Date("2026-07-23T23:00:00.000Z");
+      const result = validate({
+        parsed: { ...parsed, receiptDate: outsideHours, dateAmbiguous: true },
+        businessOpeningHours: FRIDAY_9_TO_21,
+      });
+      expect(
+        result.signals.some((item) => (item.evidence as { kind?: string }).kind === "closed_hours"),
+      ).toBe(false);
+    });
+
+    it("adds nothing when the receipt carries no extracted time", () => {
+      const result = validate({
+        parsed: { ...parsed, timeExtracted: false },
+        businessOpeningHours: FRIDAY_9_TO_21,
+      });
+      expect(
+        result.signals.some((item) => (item.evidence as { kind?: string }).kind === "closed_hours"),
+      ).toBe(false);
+    });
+
+    it("adds nothing when the business has no configured hours (the default)", () => {
+      const result = validate({ businessOpeningHours: [] });
+      expect(
+        result.signals.some((item) => (item.evidence as { kind?: string }).kind === "closed_hours"),
+      ).toBe(false);
+    });
+
+    it("understands an overnight window crossing midnight", () => {
+      // Friday (day 5) 18:00 - Saturday 02:00, every other day closed.
+      const overnight = [1, 2, 3, 4, 5, 6, 7].map((day) => ({
+        day,
+        open: "18:00",
+        close: "02:00",
+        closed: day !== 5,
+      }));
+      // 2026-07-24T17:00:00Z = Saturday 01:00 Manila - the naive
+      // same-day-only reading would call this closed (Saturday's own entry
+      // never opens), but it is really Friday night's spillover.
+      const smallHours = new Date("2026-07-24T17:00:00.000Z");
+      const result = validate({
+        parsed: { ...parsed, receiptDate: smallHours },
+        businessOpeningHours: overnight,
+      });
+      expect(
+        result.signals.some((item) => (item.evidence as { kind?: string }).kind === "closed_hours"),
+      ).toBe(false);
+    });
+
+    it("still records the signal on a receipt that also gets rejected as too_old", () => {
+      // Doc 37 S5 treats `timestamp_too_old` as "a history row only" on the
+      // rejection path; closed-hours is recorded the same way, since it runs
+      // before the freshness early-return rather than after it.
+      // 2026-01-01T23:00:00Z = Friday 07:00 Manila: months stale, and still
+      // an hour before FRIDAY_9_TO_21's grace-adjusted 08:00 open.
+      const staleAndClosed = new Date("2026-01-01T23:00:00.000Z");
+      const result = validate({
+        parsed: { ...parsed, receiptDate: staleAndClosed },
+        businessOpeningHours: FRIDAY_9_TO_21,
+        maxAgeDays: 3,
+      });
+      expect(result.rejection).toBe("too_old");
+      expect(
+        result.signals.some((item) => (item.evidence as { kind?: string }).kind === "closed_hours"),
+      ).toBe(true);
+    });
   });
 });
 

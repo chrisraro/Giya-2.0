@@ -346,6 +346,48 @@ function formatDateValue(value: string | null): string {
 }
 
 /**
+ * `receipt_date` (a full ISO instant) rendered as the Manila wall clock the
+ * closed-hours signal actually compared against: `{ weekday: "Sunday", clock:
+ * "2:14 AM" }`, or null on anything that does not parse.
+ *
+ * Derives the weekday NAME straight from the instant via `Intl` rather than
+ * keeping a second `day 1..7 -> label` array here: `closed-hours.ts` already
+ * derives the number from the identical instant in the identical zone via
+ * `deriveLocalDayTime`, so the two are guaranteed to agree, and this module
+ * needs no import of `../businesses/settings/hours.ts`'s editor-facing
+ * `WEEKDAY_LABELS` (or a second copy of it) for one label.
+ */
+function manilaClock(iso: string | null): { weekday: string; clock: string } | null {
+  if (iso === null) return null;
+  const instant = new Date(iso);
+  if (Number.isNaN(instant.getTime())) return null;
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Manila",
+    weekday: "long",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).formatToParts(instant);
+
+  const find = (type: string): string => parts.find((part) => part.type === type)?.value ?? "";
+  const weekday = find("weekday");
+  const hour = find("hour");
+  const minute = find("minute");
+  const dayPeriod = find("dayPeriod");
+  if (weekday === "" || hour === "" || minute === "") return null;
+
+  return { weekday, clock: `${hour}:${minute}${dayPeriod === "" ? "" : ` ${dayPeriod}`}` };
+}
+
+function readRecord(evidence: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  const value = evidence[key];
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/**
  * One fraud signal as a reviewer should read it. The switch is on the
  * `fraud_signals.signal` value rather than on the catalog case, because the
  * database stores the type and the case is a build-time concept.
@@ -427,9 +469,27 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
 
     case "timestamp_anomaly": {
       const kind = readString(evidence, "kind");
-      const receiptDate = formatDateValue(readString(evidence, "receipt_date"));
+      const rawReceiptDate = readString(evidence, "receipt_date");
+      const receiptDate = formatDateValue(rawReceiptDate);
       const maxAgeDays = readNumber(evidence, "max_age_days");
       const verifiedAt = readString(evidence, "business_verified_at");
+      // Doc 37 line 82's evidence contract for the closed-hours case:
+      // `{kind, receipt_date, opening_hours_day: {day, closed, open?, close?}}`.
+      // `closed` decides which of `open`/`close` even mean anything (N1): a
+      // day `closed-hours.ts` found stated CLOSED never carries them (N3),
+      // so reading them here is only ever attempted on the open branch.
+      const openingHoursDay = readRecord(evidence, "opening_hours_day");
+      const openingHoursDayNumber = openingHoursDay !== null ? readNumber(openingHoursDay, "day") : null;
+      const openingHoursDayClosed = openingHoursDay !== null ? readBoolean(openingHoursDay, "closed") : null;
+      const statedOpen =
+        openingHoursDay !== null && openingHoursDayClosed !== true
+          ? readString(openingHoursDay, "open")
+          : null;
+      const statedClose =
+        openingHoursDay !== null && openingHoursDayClosed !== true
+          ? readString(openingHoursDay, "close")
+          : null;
+      const clock = kind === "closed_hours" ? manilaClock(rawReceiptDate) : null;
 
       let summary: string;
       if (kind === "future_dated") {
@@ -441,6 +501,15 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
             : `The printed date is ${receiptDate}, more than ${plural(maxAgeDays, "day")} old.`;
       } else if (kind === "predates_activation") {
         summary = `The printed date is ${receiptDate}, before this business went live on Giya.`;
+      } else if (kind === "closed_hours") {
+        // doc 37 S5's third case. Non-accusatory on purpose, per the D3
+        // principle merchant-check.test.tsx pins: this states a fact about
+        // the printed time against the business's own stated hours, never a
+        // claim about the customer.
+        summary =
+          clock === null
+            ? "The printed time is outside this business's stated hours."
+            : `Receipt time ${clock.clock} is outside this business's stated hours.`;
       } else {
         summary = `The printed date is ${receiptDate}.`;
       }
@@ -448,6 +517,25 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
       const rows: EvidenceRow[] = [];
       if (verifiedAt !== null) {
         rows.push({ label: "Business live since", value: formatDateValue(verifiedAt) });
+      }
+      if (kind === "closed_hours") {
+        // C2: without the window the receipt was measured against, a
+        // reviewer cannot tell a real closure from hours nobody entered -
+        // this is the row that makes that legible on the one screen the
+        // signal exists to serve.
+        rows.push({
+          label: "Day",
+          value: clock?.weekday ?? (openingHoursDayNumber === null ? "Unknown" : String(openingHoursDayNumber)),
+        });
+        // N1: on the (most common) firing path where the day is stated
+        // CLOSED, printing its open/close times next to a receipt that falls
+        // inside them reads as the detector contradicting itself - so a
+        // closed day says exactly that, never a window.
+        if (openingHoursDayClosed === true) {
+          rows.push({ label: "Stated hours", value: "Closed that day" });
+        } else if (statedOpen !== null && statedClose !== null) {
+          rows.push({ label: "Stated hours", value: `${statedOpen} - ${statedClose}` });
+        }
       }
       return {
         title,
@@ -459,6 +547,7 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
             "receipt_date",
             "max_age_days",
             "business_verified_at",
+            "opening_hours_day",
           ]),
         ],
         meter: null,

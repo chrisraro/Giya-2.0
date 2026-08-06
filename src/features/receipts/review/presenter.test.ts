@@ -260,6 +260,90 @@ describe("describeSignal renders evidence rather than dumping it", () => {
     expect(predates.rows).toContainEqual({ label: "Business live since", value: "2026-06-01" });
   });
 
+  it("renders the closed-hours case with the brief's own worked example, non-accusatory", () => {
+    // 2026-07-25T18:14:00Z = Sunday 02:14 Asia/Manila.
+    const view = describeSignal(
+      signal({
+        signal: "timestamp_anomaly",
+        evidence: {
+          kind: "closed_hours",
+          receipt_date: "2026-07-25T18:14:00.000Z",
+          // Doc 37 line 82's evidence contract, OPEN-day branch.
+          opening_hours_day: { day: 7, closed: false, open: "08:00", close: "22:00" },
+        },
+      }),
+    );
+
+    expect(view.summary).toBe(
+      "Receipt time 2:14 AM is outside this business's stated hours.",
+    );
+    expect(view.rows).toContainEqual({ label: "Day", value: "Sunday" });
+    // C2: the window the receipt was measured against must be legible on the
+    // same screen, not just implied by a fact the reviewer cannot see.
+    expect(view.rows).toContainEqual({ label: "Stated hours", value: "08:00 - 22:00" });
+    // Raw jsonb keys never survive into a row.
+    expect(view.rows.map((row) => row.label)).not.toContain("Opening hours day");
+
+    const accusatory = /fraud|fake|stole|stolen|cheat|lying|lied|scam|dishonest/i;
+    expect(`${view.title} ${view.summary} ${view.rows.map((r) => r.value).join(" ")}`).not.toMatch(
+      accusatory,
+    );
+  });
+
+  it("N1: never renders a window that contradicts its own finding on a CLOSED day", () => {
+    // The review's exact end-to-end scenario: a business open Mon-Sat
+    // 09:00-21:00, closed Sunday; a receipt Sunday 13:00. Before this fix,
+    // the evidence carried no `closed` flag, so the presenter printed
+    // Monday-Saturday's OWN 09:00-21:00 window - which the receipt's 1:00 PM
+    // falls squarely inside - right next to the "outside stated hours"
+    // finding, reading as the detector being broken.
+    // 2026-07-26T05:00:00Z = Sunday 13:00 Asia/Manila.
+    const view = describeSignal(
+      signal({
+        signal: "timestamp_anomaly",
+        evidence: {
+          kind: "closed_hours",
+          receipt_date: "2026-07-26T05:00:00.000Z",
+          // The CLOSED branch of the fixed evidence contract: no open/close.
+          opening_hours_day: { day: 7, closed: true },
+        },
+      }),
+    );
+
+    expect(view.summary).toBe("Receipt time 1:00 PM is outside this business's stated hours.");
+    expect(view.rows).toContainEqual({ label: "Day", value: "Sunday" });
+    // The fix: a closed day says so, and never claims a window that would
+    // contain the very receipt time the signal is about.
+    expect(view.rows).toContainEqual({ label: "Stated hours", value: "Closed that day" });
+    expect(view.rows.map((row) => row.value)).not.toContain("09:00 - 21:00");
+  });
+
+  it("N1 (second variant): a closed day with no open/close at all still names itself closed", () => {
+    // `{day, closed:true}` with no times is legal - `isHoursEntry` never
+    // validates open/close once `closed === true` short-circuits it - so the
+    // evidence carrying only `closed:true` (no open/close keys) must still
+    // render an honest "Closed that day" row rather than silently dropping it.
+    const view = describeSignal(
+      signal({
+        signal: "timestamp_anomaly",
+        evidence: {
+          kind: "closed_hours",
+          receipt_date: "2026-07-26T05:00:00.000Z",
+          opening_hours_day: { day: 7, closed: true },
+        },
+      }),
+    );
+    expect(view.rows).toContainEqual({ label: "Stated hours", value: "Closed that day" });
+  });
+
+  it("degrades gracefully when the closed-hours evidence carries no receipt_date", () => {
+    const view = describeSignal(
+      signal({ signal: "timestamp_anomaly", evidence: { kind: "closed_hours" } }),
+    );
+    expect(view.summary).toBe("The printed time is outside this business's stated hours.");
+    expect(view.rows).toContainEqual({ label: "Day", value: "Unknown" });
+  });
+
   it("formats amount evidence as pesos, not centavos", () => {
     const view = describeSignal(
       signal({

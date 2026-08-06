@@ -766,6 +766,7 @@ async function reject(context: DecisionContext): Promise<ReviewOutcome> {
       { supabase, now: deps.now },
       receipt.user_id,
       settings,
+      requestId,
     );
   }
 

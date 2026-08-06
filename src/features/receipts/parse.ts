@@ -114,6 +114,18 @@ export interface ParsedReceipt {
   /** True when two readings of a numeric date were both valid; the older one
    * was taken. The caller adds a review note (doc 36 Stage 7). */
   dateAmbiguous: boolean;
+  /**
+   * Whether `receiptDate`'s time-of-day came from an actual HH:mm token
+   * printed on the receipt (`findAdjoiningTime`), as opposed to the noon
+   * default `extractDate` fills in when no clock is adjoining the date.
+   *
+   * This is the flag doc 37 S5's closed-hours check (`../closed-hours.ts`)
+   * gates on: a defaulted noon is not evidence of anything printed on the
+   * paper, and scoring it against a business's opening hours would score a
+   * fact this parser never observed. False whenever `receiptDate` is null,
+   * since there is no time to have extracted.
+   */
+  timeExtracted: boolean;
   subtotalCentavos: number | null;
   taxCentavos: number | null;
   totalCentavos: number | null;
@@ -748,7 +760,9 @@ function findAdjoiningTime(text: string, dateIndex: number): { hour: number; min
  * assumed to be 12:00, which is the middle of the trading day and therefore
  * the reading least likely to fall on the wrong side of a day boundary.
  */
-export function extractDate(input: ParseInput): { date: Date; ambiguous: boolean } | null {
+export function extractDate(
+  input: ParseInput,
+): { date: Date; ambiguous: boolean; timeExtracted: boolean } | null {
   const text = resolveText(input);
   if (text.trim().length === 0) return null;
   const timeZone = input.timeZone ?? RECEIPT_TIMEZONE;
@@ -790,6 +804,7 @@ export function extractDate(input: ParseInput): { date: Date; ambiguous: boolean
         timeZone,
       ),
       ambiguous,
+      timeExtracted: time !== null,
     };
   }
   return null;
@@ -1253,6 +1268,7 @@ export function parseReceipt(input: ParseInput): ParsedReceipt {
     receiptNumber,
     receiptDate: dateHit?.date ?? null,
     dateAmbiguous: dateHit?.ambiguous ?? false,
+    timeExtracted: dateHit?.timeExtracted ?? false,
     subtotalCentavos: amounts.subtotalCentavos,
     taxCentavos: amounts.taxCentavos,
     totalCentavos: amounts.totalCentavos,

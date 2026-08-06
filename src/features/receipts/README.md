@@ -25,7 +25,7 @@ catalog, scoring, the evidence display contract, the consequences ladder),
 | parse | template `parse_config` tier, then generic PH heuristics; VAT sanity | `parse.ts` |
 | match | best-of business scoring; a pre-bound receipt is never silently re-bound, but see the matching note under "The pure engines" for what that does and does not verify | `matching.ts` |
 | validate | readability, freshness, not-future, postdates-activation, amount sanity | `validateParsedReceipt` in `server/process.ts` |
-| fraud | pHash neighbours, receipt-number duplicates, Redis velocity windows, amount anomalies, staff self-scan, low confidence | `fraud.ts`, `velocity.ts`, `phash.ts`, the detectors in `server/process.ts` |
+| fraud | pHash neighbours, receipt-number duplicates, Redis velocity windows, closed-hours, amount anomalies, staff self-scan, low confidence | `fraud.ts`, `velocity.ts`, `closed-hours.ts`, `phash.ts`, the detectors in `server/process.ts` |
 | route | confidence formula and the doc 36 Stage 9 routing table, merged with the fraud verdict | `confidence.ts`, `resolveOutcome` in `server/process.ts` |
 | review queue | receipts routed to `review` are listed at `/business/receipts` for owner and manager, oldest first, with queue age against doc 36's 24h SLA; the sidebar and the dashboard carry the pending count | `review/queue.ts`, `review/queue-screen.tsx`, `review/access.ts`, `src/app/(business)/business/(portal)/receipts/page.tsx`, `components/business/sidebar.tsx`, `src/app/(business)/business/(portal)/dashboard/page.tsx` |
 | review decision | the image beside pre-filled editable fields with per-field source and confidence chips, plus the fraud signals rendered as sentences; approve with corrections or reject with a reason | `review/decision-screen.tsx`, `review/evidence.tsx`, `review/presenter.ts`, `review/types.ts`, `review/actions.ts`, `src/app/(business)/business/(portal)/receipts/[receiptId]/page.tsx` |
@@ -481,11 +481,15 @@ by tests; do not remove the rounding.
   `fieldChip` shows that plus the receipt's `parse_confidence` rather than a
   per-field confidence, which does not exist. Genuine per-field provenance is a
   `parse.ts` change.
-- **`fraud.cooldown_applied` is not audited.** Doc 37 wants an audit row when
-  the strike ladder fires. 0022 landed the table with this slice, but the row
-  needs an actor and a request id and the pipeline has neither
-  (`actor_kind='system'`); wiring a system-actor write belongs to the jobs
-  slice. Marked `TODO(audit)` in `server/cooldown.ts`.
+- **`fraud.cooldown_applied` is audited on both paths.** The automatic path
+  (`applyCooldownIfEarned` in `server/cooldown.ts`) now writes an
+  `actor_kind='system'` row with `actor_id`/`reason` both null - legal under
+  0022 as landed, since `audit_logs_admin_reason_required` is scoped to
+  `actor_kind='admin'` alone. Best-effort, like `server/escalate.ts`'s own row:
+  the cooldown itself is already durable on `consumers.scan_blocked_until` by
+  the time the audit insert runs, so a failed insert is logged loudly rather
+  than reverting a block that already landed. The manual path
+  (`admin/consequences.ts`'s `applyCooldown`) is unchanged.
 - **Processing runs inline.** `server/submit.ts` calls `processReceipt` directly
   after the insert, marked `TODO(queue)`. `processReceipt` is already queue
   shaped (an id and nothing else, every fact re-read under the service role), so
@@ -520,13 +524,15 @@ by tests; do not remove the rounding.
   which needs the template management UI plus generic-scan candidate scoring.
   This is the highest-value item in the V1 matching slice. See "The pure
   engines" above for exactly what is and is not verified today.
-- **S5 closed-hours is not implemented.** `parse.ts` reads an adjoining time
-  token when one exists but does not report whether it found one; a dateless time
-  defaults to 12:00 in the returned `receiptDate`, so a noon timestamp is
-  indistinguishable from "no time printed". Doc 37 S5 says the check is skipped
-  when the time is not extracted, and that skip is not expressible today. Adding
-  a `timeExtracted` flag (or an optional time field) to `ParsedReceipt` is the
-  prerequisite. The future-dated and too-old halves of S5 are implemented.
+- **S5 closed-hours is implemented.** `ParsedReceipt.timeExtracted` (`parse.ts`)
+  now says whether `receiptDate`'s time-of-day came from a real HH:mm token, as
+  opposed to `extractDate`'s noon default, so the closed-hours check can refuse
+  to run on a defaulted time instead of scoring it. `closed-hours.ts` compares
+  the receipt's Manila wall-clock weekday/time against `businesses.opening_hours`
+  (reusing `../businesses/settings/hours.ts`'s normalizer), with a 1-hour grace
+  margin and correct overnight-window handling; `validateParsedReceipt` in
+  `server/process.ts` wires it in as doc 37 S5's third case, alongside the
+  already-implemented future-dated and too-old halves.
 - **S2 `ocr_similarity_dup`, S6 `gps_mismatch`, and ring detection are V1.**
   `submitted_lat` / `submitted_lng` are accepted at submit and gated on
   `consumers.gps_fraud_opt_in`, but no detector consumes them yet.
