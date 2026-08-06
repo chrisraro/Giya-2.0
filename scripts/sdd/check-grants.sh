@@ -35,6 +35,21 @@ mapfile -t NEW_MIGRATIONS < <(git diff --name-only --diff-filter=AM "$BASE"..HEA
 PINNED="$(rg -oUi --no-filename "(?s)has_function_privilege\s*\(.*?\)" supabase/tests/ 2>/dev/null \
   | rg -oiP "'\s*\K(public|private)\.\w+" | tr 'A-Z' 'a-z' | sort -u)"
 
+# Per-role pinning, because "has SOME assertion" is not the property that
+# matters. Supabase grants EXECUTE on new public-schema functions to
+# service_role via PROJECT-LEVEL DEFAULT PRIVILEGES at CREATE time, entirely
+# independent of any `revoke ... from public, anon` the migration writes. So a
+# function can carry perfectly good anon/authenticated assertions and still
+# ship reachable by the service role - which is what cancel_claim did in 0050
+# (caught by hand in review), and what the sweep then found still open on
+# claim_reward, validate_redemption and register_business (0052).
+# A gate that cannot see the service_role row cannot catch that class.
+pinned_for_role() {  # $1 = role, $2 = schema.name
+  rg -oUi --no-filename "(?s)has_function_privilege\s*\(\s*'$1'.*?\)" supabase/tests/ 2>/dev/null \
+    | rg -oiP "'\s*\K(public|private)\.\w+" | tr 'A-Z' 'a-z' | sort -u \
+    | grep -qix "$2"
+}
+
 missing=0
 for f in "${NEW_MIGRATIONS[@]}"; do
   # public.<name>(  preceded somewhere by security definer in the same file
@@ -46,7 +61,15 @@ for f in "${NEW_MIGRATIONS[@]}"; do
       printf '%s\n' "$PINNED" | grep -qix "private.${fn}" \
         && echo "         (private.${fn} IS pinned - the public wrapper is the reachable one and still needs its own)"
       missing=1
+      continue
     fi
+    for role in anon authenticated service_role; do
+      if ! pinned_for_role "$role" "public.${fn}"; then
+        echo "UNPINNED ROLE: public.${fn} (${f}) has no has_function_privilege assertion for '${role}'"
+        [ "$role" = service_role ] && echo "         (service_role gets EXECUTE from Supabase default privileges at CREATE time - revoking from public/anon does NOT cover it)"
+        missing=1
+      fi
+    done
   done < <(grep -oiP 'create\s+(or\s+replace\s+)?function\s+public\.\K\w+' "$f" | sort -u)
 done
 

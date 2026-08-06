@@ -20,7 +20,7 @@ begin;
 
 set local search_path = public, extensions;
 
-select plan(76);
+select plan(79);
 
 -- ---------------------------------------------------------------- fixtures
 -- Six fixed test users: two business owners, one consumer with a balance,
@@ -989,6 +989,29 @@ select ok(
 select ok(
   has_function_privilege('authenticated', 'public.validate_redemption(uuid, text, text)', 'EXECUTE'),
   'authenticated (staff) can execute validate_redemption');
+
+-- 73-75. service_role denials for the three session-only definer RPCs that
+-- 0052 revoked. These exist because of the class of bug M6 found on
+-- cancel_claim: Supabase grants EXECUTE on new public-schema functions to
+-- service_role through PROJECT-LEVEL DEFAULT PRIVILEGES at CREATE time, which
+-- no `revoke ... from public, anon` in the migration touches. All three of
+-- these are invoked with the CALLER'S session (verified at every call site -
+-- they all use createClient, never createServiceRoleClient), so a service_role
+-- grant is reach the fence is supposed to deny: claim_reward and
+-- validate_redemption are ledger writers, and the whole point of the
+-- three-layer fence is that even a leaked service key cannot mint outside the
+-- intended paths. Pinned so a future migration cannot silently restore them.
+select ok(
+  not has_function_privilege('service_role', 'public.validate_redemption(uuid, text, text)', 'EXECUTE'),
+  'service_role cannot execute validate_redemption (staff session only, not a system job)');
+
+select ok(
+  not has_function_privilege('service_role', 'public.claim_reward(uuid)', 'EXECUTE'),
+  'service_role cannot execute claim_reward (consumer session only - a ledger writer)');
+
+select ok(
+  not has_function_privilege('service_role', 'public.register_business(text, text, text, text)', 'EXECUTE'),
+  'service_role cannot execute public.register_business (owner session only)');
 
 select * from finish();
 
