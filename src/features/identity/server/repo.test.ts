@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   consumersMaybeSingle: vi.fn(),
   citiesMaybeSingle: vi.fn(),
   profilesEq: vi.fn(),
+  consumersSelect: vi.fn(),
   consumersEq: vi.fn(),
   citiesEq: vi.fn(),
 }));
@@ -25,7 +26,7 @@ vi.mock("@/lib/supabase/server", () => ({
   })),
 }));
 
-const { getMyConsumerProfile } = await import("./repo");
+const { getMyConsents, getMyConsumerProfile } = await import("./repo");
 
 const USER = { id: "user-1", email: "ana@example.com" };
 
@@ -43,11 +44,12 @@ beforeEach(() => {
 
   mocks.profilesEq.mockReturnValue({ maybeSingle: mocks.profilesMaybeSingle });
   mocks.consumersEq.mockReturnValue({ maybeSingle: mocks.consumersMaybeSingle });
+  mocks.consumersSelect.mockReturnValue({ eq: mocks.consumersEq });
   mocks.citiesEq.mockReturnValue({ maybeSingle: mocks.citiesMaybeSingle });
 
   mocks.from.mockImplementation((table: string) => {
     if (table === "profiles") return { select: () => ({ eq: mocks.profilesEq }) };
-    if (table === "consumers") return { select: () => ({ eq: mocks.consumersEq }) };
+    if (table === "consumers") return { select: mocks.consumersSelect };
     if (table === "ref_cities") return { select: () => ({ eq: mocks.citiesEq }) };
     throw new Error(`unexpected table: ${table}`);
   });
@@ -162,5 +164,141 @@ describe("getMyConsumerProfile", () => {
     mocks.getUser.mockResolvedValue({ data: { user: { id: "user-1" } } });
 
     expect((await getMyConsumerProfile())?.email).toBe("");
+  });
+});
+
+// ===========================================================================
+// getMyConsents - the read behind /profile/settings.
+//
+// EMPTY IS NOT FAILED. This has been a real defect twice on this codebase
+// (getMyBalances, the metrics loader), and here it would be worse than a blank
+// screen: rendering a failed read as four un-ticked switches tells a consumer
+// their consents are all off, and the next thing they do is flip one, which
+// writes a value nobody asked for over the value the database actually holds.
+// So there is no "all off" fallback in this function at all - a failed or
+// missing read returns { ok: false } and the page renders an error, never a
+// form.
+//
+// THE COLUMN-TO-FIELD MAPPING IS ASSERTED ONE COLUMN AT A TIME. Four booleans
+// cannot be told apart pairwise inside a single fixture, so each test below
+// sets exactly ONE column true. Two fields wired to one column fail at least
+// two of them.
+// ===========================================================================
+
+/** A consumers row with exactly one consent on. */
+function consentRow(on: string) {
+  return {
+    marketing_opt_in: on === "marketing_opt_in",
+    push_enabled: on === "push_enabled",
+    email_enabled: on === "email_enabled",
+    gps_fraud_opt_in: on === "gps_fraud_opt_in",
+  };
+}
+
+describe("getMyConsents", () => {
+  it("reads all four consent columns in one statement", async () => {
+    mocks.consumersMaybeSingle.mockResolvedValue({ data: consentRow("push_enabled"), error: null });
+
+    await getMyConsents();
+
+    const columns = mocks.consumersSelect.mock.calls[0]?.[0] as string;
+    expect(columns).toMatch(/marketing_opt_in/);
+    expect(columns).toMatch(/push_enabled/);
+    expect(columns).toMatch(/email_enabled/);
+    expect(columns).toMatch(/gps_fraud_opt_in/);
+  });
+
+  it("scopes the read to the caller's own row", async () => {
+    mocks.consumersMaybeSingle.mockResolvedValue({ data: consentRow("push_enabled"), error: null });
+
+    await getMyConsents();
+
+    expect(mocks.consumersEq).toHaveBeenCalledWith("id", "user-1");
+  });
+
+  it("CRITICAL: marketing_opt_in true reaches the DTO as marketing_opt_in and nothing else", async () => {
+    mocks.consumersMaybeSingle.mockResolvedValue({
+      data: consentRow("marketing_opt_in"),
+      error: null,
+    });
+
+    expect(await getMyConsents()).toEqual({
+      ok: true,
+      consents: {
+        marketing_opt_in: true,
+        push_enabled: false,
+        email_enabled: false,
+        gps_fraud_opt_in: false,
+      },
+    });
+  });
+
+  it("CRITICAL: push_enabled true reaches the DTO as push_enabled and nothing else", async () => {
+    mocks.consumersMaybeSingle.mockResolvedValue({ data: consentRow("push_enabled"), error: null });
+
+    expect(await getMyConsents()).toEqual({
+      ok: true,
+      consents: {
+        marketing_opt_in: false,
+        push_enabled: true,
+        email_enabled: false,
+        gps_fraud_opt_in: false,
+      },
+    });
+  });
+
+  it("CRITICAL: email_enabled true reaches the DTO as email_enabled and nothing else", async () => {
+    mocks.consumersMaybeSingle.mockResolvedValue({ data: consentRow("email_enabled"), error: null });
+
+    expect(await getMyConsents()).toEqual({
+      ok: true,
+      consents: {
+        marketing_opt_in: false,
+        push_enabled: false,
+        email_enabled: true,
+        gps_fraud_opt_in: false,
+      },
+    });
+  });
+
+  it("CRITICAL: gps_fraud_opt_in true reaches the DTO as gps_fraud_opt_in and nothing else", async () => {
+    mocks.consumersMaybeSingle.mockResolvedValue({
+      data: consentRow("gps_fraud_opt_in"),
+      error: null,
+    });
+
+    expect(await getMyConsents()).toEqual({
+      ok: true,
+      consents: {
+        marketing_opt_in: false,
+        push_enabled: false,
+        email_enabled: false,
+        gps_fraud_opt_in: true,
+      },
+    });
+  });
+
+  it("CRITICAL: a failed query is ok:false, NOT four consents that are all off", async () => {
+    mocks.consumersMaybeSingle.mockResolvedValue({
+      data: null,
+      error: { message: "canceling statement due to statement timeout" },
+    });
+
+    expect(await getMyConsents()).toEqual({ ok: false });
+  });
+
+  it("CRITICAL: a missing consumers row is ok:false too", async () => {
+    // Everybody gets a consumers row at signup (private.handle_new_user), so no
+    // row means something is wrong - not that this person consented to nothing.
+    mocks.consumersMaybeSingle.mockResolvedValue({ data: null, error: null });
+
+    expect(await getMyConsents()).toEqual({ ok: false });
+  });
+
+  it("returns ok:false and reads nothing when there is no session", async () => {
+    mocks.getUser.mockResolvedValue({ data: { user: null } });
+
+    expect(await getMyConsents()).toEqual({ ok: false });
+    expect(mocks.from).not.toHaveBeenCalled();
   });
 });

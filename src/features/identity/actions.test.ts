@@ -23,15 +23,26 @@ const mocks = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
   canonicalizeAvatarImage: vi.fn(),
   sniffImageFormat: vi.fn(),
+  registerDevice: vi.fn(),
+  deleteDevice: vi.fn(),
+  signOutFn: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
-    auth: { getUser: mocks.getUser },
+    auth: { getUser: mocks.getUser, signOut: mocks.signOutFn },
     from: mocks.from,
     rpc: mocks.rpc,
     storage: { from: mocks.storageFrom },
   })),
+}));
+
+// The device module's own SQL and identity rule are covered in
+// server/devices.test.ts. Here it is a seam, so the actions' product behaviour
+// on top of it - what a revoke does to the SESSION - is what gets asserted.
+vi.mock("./server/devices", () => ({
+  registerDevice: mocks.registerDevice,
+  deleteDevice: mocks.deleteDevice,
 }));
 
 vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidatePath }));
@@ -44,14 +55,21 @@ vi.mock("./server/avatar-image", () => ({
   sniffImageFormat: mocks.sniffImageFormat,
 }));
 
-const { PHOTO_REMOVE_FAILED, PHOTO_SAVE_FAILED, PROFILE_SAVE_FAILED } = await import(
-  "./messages"
-);
+const {
+  CONSENT_SAVE_FAILED,
+  DEVICE_REMOVE_FAILED,
+  PHOTO_REMOVE_FAILED,
+  PHOTO_SAVE_FAILED,
+  PROFILE_SAVE_FAILED,
+} = await import("./messages");
 
 const {
   completeConsumerOnboarding,
   registerBusiness,
+  registerCurrentDevice,
   removeConsumerAvatar,
+  revokeDevice,
+  saveConsent,
   saveConsumerAvatar,
   saveConsumerProfile,
 } = await import("./actions");
@@ -135,6 +153,10 @@ beforeEach(() => {
   mocks.sniffImageFormat.mockReturnValue("jpeg");
 
   mocks.rpc.mockResolvedValue({ data: "business-1", error: null });
+
+  mocks.registerDevice.mockResolvedValue(undefined);
+  mocks.deleteDevice.mockResolvedValue({ ok: true, wasCurrent: false });
+  mocks.signOutFn.mockResolvedValue({ error: null });
 
   mocks.from.mockImplementation((table: string) => {
     if (table === "ref_cities") return { select: mocks.citiesSelect };
@@ -728,5 +750,195 @@ describe("removeConsumerAvatar", () => {
 
     expect((await removeConsumerAvatar()).ok).toBe(false);
     expect(mocks.remove).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// saveConsent - one toggle, one column.
+//
+// THE ASSERTION THAT MATTERS IS THE RELATIONSHIP, not either side of it. A
+// test that flips a control and checks "the action was called" stays green when
+// all four toggles are wired to the same column. So every column name below is
+// written as a LITERAL and matched against the update payload the action
+// actually builds; the component test does the other half of the chain (label
+// -> column name) with the same four literals.
+//
+// Four columns, four assertions. Copying one correct assertion's code without
+// its three siblings is the exact shape that has shipped broken here before.
+// ===========================================================================
+describe("saveConsent", () => {
+  it("CRITICAL: marketing_opt_in writes marketing_opt_in and no other column", async () => {
+    mockAuthed();
+
+    const result = await saveConsent("marketing_opt_in", true);
+
+    expect(result).toEqual({ ok: true });
+    expect(mocks.consumersUpdate).toHaveBeenCalledWith({ marketing_opt_in: true });
+    expect(mocks.consumersEq).toHaveBeenCalledWith("id", "user-1");
+  });
+
+  it("CRITICAL: push_enabled writes push_enabled and no other column", async () => {
+    mockAuthed();
+
+    const result = await saveConsent("push_enabled", false);
+
+    expect(result).toEqual({ ok: true });
+    expect(mocks.consumersUpdate).toHaveBeenCalledWith({ push_enabled: false });
+  });
+
+  it("CRITICAL: email_enabled writes email_enabled and no other column", async () => {
+    mockAuthed();
+
+    const result = await saveConsent("email_enabled", false);
+
+    expect(result).toEqual({ ok: true });
+    expect(mocks.consumersUpdate).toHaveBeenCalledWith({ email_enabled: false });
+  });
+
+  it("CRITICAL: gps_fraud_opt_in writes gps_fraud_opt_in and no other column", async () => {
+    mockAuthed();
+
+    const result = await saveConsent("gps_fraud_opt_in", true);
+
+    expect(result).toEqual({ ok: true });
+    expect(mocks.consumersUpdate).toHaveBeenCalledWith({ gps_fraud_opt_in: true });
+  });
+
+  it("writes the value it was given, in both directions", async () => {
+    mockAuthed();
+
+    await saveConsent("marketing_opt_in", false);
+
+    expect(mocks.consumersUpdate).toHaveBeenCalledWith({ marketing_opt_in: false });
+  });
+
+  it("CRITICAL: refuses a column outside 0021's fence without writing anything", async () => {
+    // A server action is a public endpoint, and this one builds its payload
+    // from a caller-supplied key. `scan_blocked_until` is the column 0021
+    // exists to keep a consumer's hands off - doc 37's ladder step 2.
+    mockAuthed();
+
+    const result = await saveConsent("scan_blocked_until", false);
+
+    expect(result.ok).toBe(false);
+    expect(mocks.consumersUpdate).not.toHaveBeenCalled();
+  });
+
+  it("refuses is_suspended too, and every other name that is not one of the four", async () => {
+    mockAuthed();
+
+    for (const column of ["is_suspended", "city_id", "lifetime_points_earned", ""]) {
+      expect((await saveConsent(column, true)).ok).toBe(false);
+    }
+    expect(mocks.consumersUpdate).not.toHaveBeenCalled();
+  });
+
+  it("CRITICAL: a database refusal becomes our sentence, never Postgres's", async () => {
+    mockAuthed();
+    mocks.consumersEq.mockResolvedValue({
+      error: { message: 'permission denied for column "marketing_opt_in" of relation consumers' },
+    });
+
+    const result = await saveConsent("marketing_opt_in", true);
+
+    expect(result).toEqual({ ok: false, message: CONSENT_SAVE_FAILED });
+    // The detail is not lost - it goes where somebody can act on it.
+    expect(consoleError.mock.calls.flat().join(" ")).toContain("permission denied for column");
+  });
+
+  it("writes nothing when unauthenticated", async () => {
+    mockUnauthenticated();
+
+    expect((await saveConsent("push_enabled", false)).ok).toBe(false);
+    expect(mocks.consumersUpdate).not.toHaveBeenCalled();
+  });
+
+  it("revalidates the settings screen so a later render is not stale", async () => {
+    mockAuthed();
+
+    await saveConsent("email_enabled", false);
+
+    expect(mocks.revalidatePath).toHaveBeenCalledWith("/profile/settings");
+  });
+});
+
+// ===========================================================================
+// The device actions. The identity rule and the SQL they issue are covered in
+// server/devices.test.ts; what is pinned here is the product behaviour the
+// actions own on top of it.
+// ===========================================================================
+describe("registerCurrentDevice", () => {
+  it("registers the device of whoever is signing in", async () => {
+    await registerCurrentDevice();
+
+    expect(mocks.registerDevice).toHaveBeenCalledTimes(1);
+  });
+
+  it("CRITICAL: never throws, because it runs on the sign-in path", async () => {
+    // A device row that could not be written is not a reason to fail a login,
+    // and there is nothing the person signing in could do about it anyway.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.registerDevice.mockRejectedValue(new Error("ECONNRESET"));
+
+    await expect(registerCurrentDevice()).resolves.toBeUndefined();
+    expect(consoleError).toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+});
+
+describe("revokeDevice", () => {
+  it("removes another device and reports that no session ended", async () => {
+    mocks.deleteDevice.mockResolvedValue({ ok: true, wasCurrent: false });
+
+    expect(await revokeDevice("device-2")).toEqual({ ok: true, signedOut: false });
+    expect(mocks.deleteDevice).toHaveBeenCalledWith("device-2");
+  });
+
+  it("CRITICAL: removing ANOTHER device does not sign the caller out", async () => {
+    // Deleting a user_devices row does not invalidate that browser's session -
+    // the refresh token lives in GoTrue, not this table. Signing the caller out
+    // of their OWN session for it would be the wrong session entirely.
+    mocks.deleteDevice.mockResolvedValue({ ok: true, wasCurrent: false });
+
+    await revokeDevice("device-2");
+
+    expect(mocks.signOutFn).not.toHaveBeenCalled();
+  });
+
+  it("CRITICAL: removing THIS device really ends this session", async () => {
+    // Revoking the device you are holding is a foreseeable tap, and it is the
+    // one case where the app CAN make "revoked" mean something to the session
+    // as well as to the row. It does, rather than leaving a browser signed in
+    // against a device row it no longer has.
+    mocks.deleteDevice.mockResolvedValue({ ok: true, wasCurrent: true });
+
+    expect(await revokeDevice("device-1")).toEqual({ ok: true, signedOut: true });
+    expect(mocks.signOutFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("CRITICAL: a failed delete says so and signs nobody out", async () => {
+    mocks.deleteDevice.mockResolvedValue({ ok: false });
+
+    expect(await revokeDevice("device-2")).toEqual({
+      ok: false,
+      message: DEVICE_REMOVE_FAILED,
+    });
+    expect(mocks.signOutFn).not.toHaveBeenCalled();
+  });
+
+  it("revalidates the device list so the removed row does not linger", async () => {
+    mocks.deleteDevice.mockResolvedValue({ ok: true, wasCurrent: false });
+
+    await revokeDevice("device-2");
+
+    expect(mocks.revalidatePath).toHaveBeenCalledWith("/profile/devices");
+  });
+
+  it("does not revalidate a list it failed to change", async () => {
+    mocks.deleteDevice.mockResolvedValue({ ok: false });
+
+    await revokeDevice("device-2");
+
+    expect(mocks.revalidatePath).not.toHaveBeenCalled();
   });
 });

@@ -15,7 +15,10 @@ import {
   objectPathFromPublicUrl,
   oversizePhotoMessage,
 } from "./avatar";
+import { isConsentColumn, type ConsentColumn } from "./consents";
 import {
+  CONSENT_SAVE_FAILED,
+  DEVICE_REMOVE_FAILED,
   GENERIC_FAILURE,
   PHOTO_REMOVE_FAILED,
   PHOTO_SAVE_FAILED,
@@ -23,6 +26,7 @@ import {
 } from "./messages";
 import { profileEditSchema, type ProfileEditInput } from "./profile-schema";
 import { canonicalizeAvatarImage, sniffImageFormat } from "./server/avatar-image";
+import { deleteDevice, registerDevice } from "./server/devices";
 
 export type ActionResult = { ok: true } | { ok: false; message: string };
 
@@ -407,6 +411,134 @@ export async function removeConsumerAvatar(): Promise<AvatarActionResult> {
 
   revalidateProfileSurfaces();
   return { ok: true, avatarUrl: null };
+}
+
+/**
+ * Persists ONE consent toggle on `consumers`.
+ *
+ * ONE COLUMN PER CALL, not a bundle. The four consents are four separate
+ * decisions - NPC Circular 2023-04 requires marketing consent in particular to
+ * be freely given, specific and separate from any other consent - and a single
+ * "save preferences" write would let one of them ride along with another. It
+ * also makes the failure honest: when a write fails, exactly one control on the
+ * screen has to revert, and the screen knows which one.
+ *
+ * NO NEW GRANT WAS NEEDED. 0021_consumer_selfupdate_column_fence.sql already
+ * grants `authenticated` UPDATE on all four of these columns, and its own header
+ * says why: "the profile settings screen edits them". This is that screen.
+ *
+ * `column` is typed but ALSO checked at runtime. A server action is a public
+ * endpoint and this one builds its payload from the caller's key, so a
+ * TypeScript union - which does not exist at runtime - is not a fence. 0021's
+ * grant is the real one; `isConsentColumn` is the one in front of it, and it
+ * keeps `scan_blocked_until` and `is_suspended` unnameable from here.
+ */
+export async function saveConsent(column: string, value: boolean): Promise<ActionResult> {
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) return NOT_SIGNED_IN;
+
+  if (!isConsentColumn(column)) {
+    return {
+      ok: false,
+      message: infrastructureFailure(
+        "consent column outside the fence",
+        new Error(`refused consent column ${JSON.stringify(column)}`),
+        CONSENT_SAVE_FAILED,
+      ),
+    };
+  }
+
+  // Built as a narrow Partial rather than an inline computed key, so the value
+  // stays assignable to the generated consumers Update type instead of widening
+  // to an index signature.
+  const patch: Partial<Record<ConsentColumn, boolean>> = { [column]: value };
+
+  const { error } = await supabase.from("consumers").update(patch).eq("id", user.id);
+
+  if (error) {
+    return {
+      ok: false,
+      message: infrastructureFailure("consent update failed", error, CONSENT_SAVE_FAILED),
+    };
+  }
+
+  revalidatePath("/profile/settings");
+  return { ok: true };
+}
+
+/**
+ * Records the browser this request came from as one of the caller's devices.
+ *
+ * A server action rather than a plain function because the password sign-in
+ * path is a client component, and a client component cannot read request
+ * headers or reach the database. The OAuth/PKCE path calls `registerDevice`
+ * directly - it is already on the server.
+ *
+ * IT NEVER THROWS AND RETURNS NOTHING. It runs on the sign-in path: a device
+ * row that could not be written is not a reason to fail somebody's login, and
+ * there is nothing they could do about it if they were told. `registerDevice`
+ * already swallows its own database failures; this catch is for the ones it
+ * cannot swallow, like the action boundary itself failing.
+ */
+export async function registerCurrentDevice(): Promise<void> {
+  try {
+    await registerDevice();
+  } catch (error) {
+    console.error("[identity] device registration threw", error);
+  }
+}
+
+/**
+ * `signedOut` is TRUE only when the removed device was the one making this
+ * request, and it means what it says: this session has actually ended.
+ */
+export type RevokeDeviceResult = { ok: true; signedOut: boolean } | { ok: false; message: string };
+
+/**
+ * Removes one of the caller's devices.
+ *
+ * WHAT THIS DOES NOT DO, AND WHY THE COPY MUST NOT CLAIM IT DOES.
+ *
+ * Deleting a `user_devices` row does NOT invalidate that browser's Supabase
+ * session. The refresh token lives in GoTrue's own tables, not in this one, so
+ * a browser whose device row is gone keeps refreshing and stays signed in. A UI
+ * that said "signed out everywhere" here would be stating a control the product
+ * does not have - the exact Critical finding T3.2 took when `/suspended` told
+ * people they could not redeem while redemption was ungated. The device list's
+ * copy says only what is true: the device stops being listed.
+ *
+ * THE ONE SESSION THIS CAN REALLY END IS THIS ONE. Revoking the device you are
+ * holding is a foreseeable tap, so rather than deleting a row and leaving the
+ * browser signed in against a device that no longer exists, this signs the
+ * caller out for real - the same `auth.signOut()` the Log out button uses. The
+ * caller is told which happened so the screen can send them to /login instead of
+ * re-rendering a list they are no longer entitled to.
+ */
+export async function revokeDevice(deviceId: string): Promise<RevokeDeviceResult> {
+  const result = await deleteDevice(deviceId);
+
+  if (!result.ok) {
+    // deleteDevice has already logged the detail. This is the sentence.
+    return { ok: false, message: DEVICE_REMOVE_FAILED };
+  }
+
+  revalidatePath("/profile/devices");
+
+  if (result.wasCurrent) {
+    const supabase = await createClient();
+    // Errors deliberately not surfaced, same reasoning as signOut() below:
+    // signOut drops the local session before it ever calls the Auth server, so
+    // a network failure still leaves the caller signed out on this device.
+    await supabase.auth.signOut();
+    return { ok: true, signedOut: true };
+  }
+
+  return { ok: true, signedOut: false };
 }
 
 /** "image/jpeg" -> "JPEG". Copy, not logic: the alert reads to a person. */

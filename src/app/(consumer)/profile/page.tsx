@@ -7,14 +7,29 @@ import { getMyConsumerProfile } from "@/features/identity/server/repo";
 import { NotificationBadge } from "@/features/notifications/components/notification-badge";
 import { getMyUnreadNotificationCount } from "@/features/notifications/server/repo";
 
-// The "Notifications" row was a dead affordance until this slice: it rendered
-// with no href and went nowhere. It is the quieter of the inbox's two entry
-// points (the other is the home header bell) and it is the one for people who
-// go looking rather than glancing, so it now links to the inbox and carries the
+// The "Notifications" row was a dead affordance until an earlier slice: it
+// rendered with no href and went nowhere. It is the quieter of the inbox's two
+// entry points (the other is the home header bell) and it is the one for people
+// who go looking rather than glancing, so it links to the inbox and carries the
 // same unread count.
+//
+// "Devices" was the LAST one, and it is fixed here. It rendered as
+// `{ icon: "devices", label: "Devices", href: undefined }` - a chevron pointing
+// nowhere - because `public.user_devices` had no reader anywhere in src/.
+//
+// "Preferences" is new and is not optional furniture: 0021 granted
+// `authenticated` UPDATE on the four `consumers` consent columns with the note
+// "the profile settings screen edits them", and without a row here that screen
+// is unreachable, which leaves the four consents exactly as invisible as they
+// were before it existed. Placed above the two legal pages because it is the
+// one somebody comes here to change; those two are references.
+//
+// EVERY ROW HAS AN href, and the renderer below no longer has a branch for one
+// that does not. A row with nowhere to go is not a row.
 const SETTINGS_ROWS = [
   { icon: "notifications", label: "Notifications", href: "/notifications" },
-  { icon: "devices", label: "Devices", href: undefined },
+  { icon: "tune", label: "Preferences", href: "/profile/settings" },
+  { icon: "devices", label: "Devices", href: "/profile/devices" },
   { icon: "privacy_tip", label: "Privacy policy", href: "/privacy" },
   { icon: "description", label: "Terms", href: "/terms" },
 ] as const;
@@ -88,36 +103,24 @@ export default async function ProfilePage() {
       </div>
 
       <section className="mt-8 divide-y divide-outline-variant overflow-hidden rounded-md3-md border border-outline-variant">
-        {SETTINGS_ROWS.map((row) =>
-          row.href ? (
-            <Link
-              key={row.label}
-              href={row.href}
-              className={`${ROW_CLASS} outline-none focus-visible:ring-2 focus-visible:ring-primary`}
-            >
-              <span aria-hidden className="material-symbols-rounded text-on-surface-variant">
-                {row.icon}
-              </span>
-              <span className="flex-1 text-body-l text-on-surface">{row.label}</span>
-              {row.href === "/notifications" ? (
-                <NotificationBadge count={unreadNotifications} className="mr-1" />
-              ) : null}
-              <span aria-hidden className="material-symbols-rounded text-on-surface-variant">
-                chevron_right
-              </span>
-            </Link>
-          ) : (
-            <div key={row.label} className={ROW_CLASS}>
-              <span aria-hidden className="material-symbols-rounded text-on-surface-variant">
-                {row.icon}
-              </span>
-              <span className="flex-1 text-body-l text-on-surface">{row.label}</span>
-              <span aria-hidden className="material-symbols-rounded text-on-surface-variant">
-                chevron_right
-              </span>
-            </div>
-          ),
-        )}
+        {SETTINGS_ROWS.map((row) => (
+          <Link
+            key={row.label}
+            href={row.href}
+            className={`${ROW_CLASS} outline-none focus-visible:ring-2 focus-visible:ring-primary`}
+          >
+            <span aria-hidden className="material-symbols-rounded text-on-surface-variant">
+              {row.icon}
+            </span>
+            <span className="flex-1 text-body-l text-on-surface">{row.label}</span>
+            {row.href === "/notifications" ? (
+              <NotificationBadge count={unreadNotifications} className="mr-1" />
+            ) : null}
+            <span aria-hidden className="material-symbols-rounded text-on-surface-variant">
+              chevron_right
+            </span>
+          </Link>
+        ))}
         {/* A form posting to a server action, not a link to /login. A link only
             moved the user to another screen while their session cookies stayed
             valid, so "Log out" did not log anyone out. See signOut() for why

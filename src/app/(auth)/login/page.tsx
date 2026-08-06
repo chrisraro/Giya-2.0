@@ -8,6 +8,7 @@ import { AuthCard } from "@/components/auth/auth-card";
 import { SocialButtons } from "@/components/auth/social-buttons";
 import { PasswordField } from "@/components/auth/password-field";
 import { Captcha, CAPTCHA_ENABLED } from "@/components/auth/captcha";
+import { registerCurrentDevice } from "@/features/identity/actions";
 import { TextField } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
@@ -112,6 +113,28 @@ function LoginPageInner() {
           : message,
       );
       return;
+    }
+
+    // A session now exists, so this browser is a device. Registering here and
+    // not somewhere more central is a consequence of where sessions are
+    // actually created: this path runs entirely in the browser, and only the
+    // server can see the request's user agent or write to `user_devices`, so a
+    // server action is the seam. /auth/callback does the same for the PKCE and
+    // OAuth path, on the server, where it already is.
+    //
+    // AWAITED, not fired and forgotten. A pending request is cancelled by the
+    // navigation below on exactly the slow connections where it would still be
+    // pending.
+    //
+    // The catch is not decoration. The action swallows its own database
+    // failures, but the ACTION BOUNDARY can still reject - a dropped
+    // connection, a deploy mid-request - and an unhandled rejection here would
+    // skip the navigation and leave somebody who has successfully signed in
+    // sitting on the login page with nothing written on it.
+    try {
+      await registerCurrentDevice();
+    } catch (thrown) {
+      console.error("[identity] device registration threw during sign-in", thrown);
     }
 
     router.push(next);
