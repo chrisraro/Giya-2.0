@@ -56,7 +56,7 @@ write brief → dispatch implementer (TDD, isolated) → adversarial review
 
 ---
 
-## 4. What is DONE (16 tasks, merged and pushed)
+## 4. What is DONE (18 tasks, merged and pushed)
 
 ### Wave 1 — money correctness (7/7 complete)
 
@@ -84,13 +84,44 @@ write brief → dispatch implementer (TDD, isolated) → adversarial review
 | T2.4 | Dead-lettered jobs were invisible and unrecoverable through any interface |
 | T2.7 | No AI kill switch, no budget caps; `budgetMicros` existed and no caller passed it |
 
+### Wave 3 — auth + suspension (2/4 merged)
+
+| Task | What it closed |
+|---|---|
+| T3.2 | Suspension was written by the admin ladder and read by **nothing** — a suspended user kept scanning, claiming and redeeming |
+| T3.3 | Owners could not add teammates at all — no roster, no invite, no accept |
+
 ---
 
-## 5. IN FLIGHT — nothing
+## 5. IN FLIGHT — one worktree
 
-T2.4 was mid-fix when this document was first written; it has since been
-reviewed, approved and merged. **There is no unfinished work in a worktree.**
-Start at §8 with T2.7.
+**T3.1** `/forgot-password` + `/reset-password`, worktree
+`.claude/worktrees/agent-a83ed56a39ac1fab0`, branch
+`worktree-agent-a83ed56a39ac1fab0`, HEAD `cbd94ad` at the time of writing.
+Reviewer **approved pending one item (I8)**, whose fix was dispatched and
+had not returned. It carries no migration, so `0063` was free for T3.3.
+
+**I8, so you can judge the fix yourself.** The route mints an HttpOnly marker
+cookie when `/auth/confirm` verifies a `type=recovery` link, and
+`/reset-password` renders its form only if `recovery-status` says the marker
+is present. The cookie is **TTL-based (10 minutes), not single-use**, and
+nothing clears it — so the product's own happy path walks a user back into
+the window: finish a reset → tap the "Sign in" affordance → sign in with the
+new password (an ordinary session) → navigate back to `/reset-password` →
+the marker still answers `verified: true` → the form renders → `updateUser`
+succeeds. The dispatched fix moves `updateUser` behind a server route that
+checks **and clears** the marker, which promotes it from a UI gate to a real
+authorization control.
+
+**What the marker is and is not.** It replaced an `amr === "recovery"` check.
+Neither gate was ever the authorization boundary — `updateUser` is authorized
+by the Supabase session. The marker only distinguishes a recovery-origin
+session, and `amr` could not do that at *any* value, because `"recovery"` is
+not an `AMRMethod` at all (it is an `EmailOtpType`/`GenerateLinkType`). The
+cookie is strictly stronger: HttpOnly blocks JS writes, and
+`secure` + `sameSite: lax` + host-only blocks cross-site planting.
+
+**T3.1 does not work until two Dashboard changes ship with it** (§9).
 
 Four Minor follow-ups were recorded against T2.4 rather than fixed, none
 blocking: `revertReplay` filters on `id` alone and could clobber a row a
@@ -99,6 +130,37 @@ whose own write fails leaves the row queued and logged as `UNAUDITED CHANGE`;
 the replay-count read caps at 1,000 rows without notice; and the revert
 overwrites `last_error`, so the DLQ row shows the replay failure rather than
 why the job originally died (the original is preserved in the audit `before`).
+
+Five Minor follow-ups are recorded against T3.3, none blocking, ~20 minutes
+between them. Do **N1** and **N2** first — both live inside a SECURITY
+DEFINER function:
+
+- **N1** — `0063:39-47`'s header says normalization is `lower(btrim(...))`
+  "on BOTH sides"; `0063:75` btrims the *input* only. Either btrim both or
+  narrow the sentence. Second time on this branch a comment overstated its
+  code.
+- **N2** — `0063:76` is `limit 1` with no `order by`. Two `auth.users` rows
+  differing only by case resolve plan-dependently, and the consequence is an
+  invite bound to the wrong human. `order by u.created_at`, or prefer an
+  exact match before the case-insensitive one.
+- **N3** — `service.ts:195` `data[0]` would `TypeError` on a null `data`,
+  escaping as an unhandled rejection instead of this module's honest
+  `{ok:false}`. `data?.[0]` is free.
+- **R6** — `service.ts:539` `token: args.row.invite_token ?? ""` would email a
+  real person a link to `/invite/`. Unreachable today; the fallback should
+  throw rather than ship a broken URL.
+- **R7** — `reinviteExisting` (`service.ts:400-434`) gates only on the *new*
+  role, never `existing.role`, so a manager can reactivate a disabled manager
+  or marketing row as a `staff` invite. A strict downgrade of an already
+  non-live row, so no escalation — but `revokeInvite:566` applies exactly
+  that symmetric check, and the asymmetry needs a gate or a line saying why
+  not.
+
+**`public.find_auth_user_by_email` (0063) should stay the only reader of
+`auth.users`.** It is service-role-only, `security definer`,
+`set search_path = ''`, and returns `(id uuid, email text)` — so the
+narrow-column property is structural, not a `.select()` string a caller can
+widen.
 
 ## 6. STANDING RULES — read before writing any task
 
@@ -139,17 +201,11 @@ A row that does no work and writes nothing still matches the scan forever. With 
 
 ---
 
-## 8. REMAINING WORK — 27 tasks
+## 8. REMAINING WORK — 25 tasks
 
-### Wave 3 — auth + suspension (1/4 done)
-
-| Task | What it closed |
-|---|---|
-| T3.2 | Suspension was written by the admin ladder and read by **nothing** — a suspended user kept scanning, claiming and redeeming |
+### Wave 3 — auth + suspension (2/4 merged, T3.1 in flight — see §5)
 
 **Remaining in Wave 3:**
-- **T3.1** `/forgot-password` + `/reset-password` — the login page's link is currently `href="#"`
-- **T3.3** Staff invites — **owners cannot add teammates at all**; needs `/business/staff`, `/invite/[token]`, the `staff_invite` notification kind
 - **T3.4** Profile edit + preferences + devices — profile is read-only with a dead "Devices" row; the four consent toggles exist in the schema with no UI. **NPC Circular 2023-04 requires separate, un-ticked marketing consent** — bundling it is non-compliant.
 
 ### Wave 4 — consumer surfaces (6)
@@ -197,6 +253,20 @@ Manual points adjustments *(the user decided this in a grilling session — doc 
 - **A Meta app** for `META_APP_ID`/`META_APP_SECRET` + App Review
 - **Vercel env vars**: `NEXT_PUBLIC_MAPTILER_KEY`, `QSTASH_*`, `QSTASH_CALLBACK_ORIGIN`, `RESEND_API_KEY`, `SUPABASE_EDGE_OCR_URL` + `OCR_FUNCTION_SECRET`, `INTEGRATION_TOKEN_AES_KEY`, and optionally `METRICS_TOKEN` / `OPS_ALERT_EMAIL`
 - **No QStash schedule** invokes `/api/jobs/ops.job_health_check` or `/api/internal/metrics`. Both routes exist and are tested; the cadence is recorded in `docs/50-ops/52-monitoring-observability.md` and must be configured externally before anything alerts anyone.
+- **Two Supabase Dashboard changes that must ship in the same deployment as T3.1.** Password recovery does not work without them, and the code cannot make them for you:
+  1. **Authentication → Email Templates → Reset Password** — change the link to
+     `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=recovery`
+  2. **Authentication → URL Configuration → Redirect URLs** — allowlist `<site>/auth/confirm`
+
+  **If step 1 is missed, the failure is not a 404**, which is what you would
+  reasonably guess. `redirectTo: ${origin}/auth/confirm` means the default
+  template's `{{ .ConfirmationURL }}` routes the user through GoTrue's own
+  `/auth/v1/verify`, which 302s to the route with a PKCE `?code=` rather than
+  a `token_hash`. So `tokenHash` is null, the guard at `confirm/route.ts:52`
+  fails, and it falls through to `/login?error=confirm` — the user sees
+  **"That link expired or was already used"**, permanently, capped at three
+  retries per fifteen minutes. That is indistinguishable from the bug T3.1
+  exists to fix. `/auth/callback` is never involved.
 - **A written DTI FTEB query** on whether a perpetual loyalty programme needs a sales-promotion permit. `docs/00-product/03-loyalty-benchmarks.md` explains why the "loyalty is exempt" claim is unsupported. This matters before the campaign builder ships — it is a permit-generating machine.
 
 ---
