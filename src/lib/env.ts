@@ -237,6 +237,29 @@ const serverEnvSchema = z.object({
   // Once a domain is verified this becomes something like
   // `Giya <no-reply@giya.ph>` and nothing else changes.
   EMAIL_FROM: z.string().min(3).optional(),
+
+  // The bearer token that gates GET /api/internal/metrics
+  // (docs/50-ops/52-monitoring-observability.md, "the metrics probe").
+  // Optional, and it has to stay that way even though this is a security
+  // control and not a degrade-gracefully integration credential like the
+  // pairs above: the route itself (src/app/api/internal/metrics/route.ts)
+  // treats an absent token as "this deployment has not turned the probe on"
+  // and answers 404, never as an open endpoint - so there is no unsafe state
+  // for "optional" to produce here, only "not enabled yet".
+  //
+  // Declared here anyway, for the same reason INTEGRATION_TOKEN_AES_KEY is:
+  // it keeps this schema the single inventory of server variables. The route
+  // does NOT read it through getServerEnv() though - it reads
+  // `process.env.METRICS_TOKEN` directly, exactly like
+  // src/lib/supabase/service.ts reads SUPABASE_SERVICE_ROLE_KEY. That file's
+  // header documents why at length: getServerEnv() validates this whole
+  // object as a unit and throws naming every missing key, so a deployment
+  // missing an unrelated required variable (UPSTASH_REDIS_REST_URL,
+  // REDEMPTION_TOKEN_SECRET) would take the metrics probe down too - and
+  // doc 52 has a QStash schedule invoking this probe every minute, so that
+  // failure mode would page on a schedule. Reading process.env directly means
+  // an absent or broken METRICS_TOKEN can only ever affect this one route.
+  METRICS_TOKEN: z.string().min(16).optional(),
 });
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;
@@ -279,6 +302,7 @@ export function getServerEnv(): ServerEnv {
     META_WEBHOOK_VERIFY_TOKEN: emptyToUndefined(process.env.META_WEBHOOK_VERIFY_TOKEN),
     INTEGRATION_TOKEN_AES_KEY: emptyToUndefined(process.env.INTEGRATION_TOKEN_AES_KEY),
     EMAIL_FROM: emptyToUndefined(process.env.EMAIL_FROM),
+    METRICS_TOKEN: emptyToUndefined(process.env.METRICS_TOKEN),
   });
 
   if (!parsed.success) {

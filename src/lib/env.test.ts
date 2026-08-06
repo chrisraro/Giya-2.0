@@ -206,6 +206,50 @@ describe("getServerEnv", () => {
     expect(getServerEnv().SUPABASE_SERVICE_ROLE_KEY).toBeUndefined();
   });
 
+  it("parses with METRICS_TOKEN unset (optional; the route itself answers 404)", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    stubRequiredServerEnv();
+    vi.stubEnv("METRICS_TOKEN", undefined);
+
+    const { getServerEnv } = await import("./env");
+
+    expect(getServerEnv().METRICS_TOKEN).toBeUndefined();
+  });
+
+  it("reads a blank METRICS_TOKEN as absent rather than as an invalid value", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    stubRequiredServerEnv();
+    vi.stubEnv("METRICS_TOKEN", "   ");
+
+    const { getServerEnv } = await import("./env");
+
+    expect(getServerEnv().METRICS_TOKEN).toBeUndefined();
+  });
+
+  it("parses METRICS_TOKEN when set", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    stubRequiredServerEnv();
+    vi.stubEnv("METRICS_TOKEN", "a".repeat(24));
+
+    const { getServerEnv } = await import("./env");
+
+    expect(getServerEnv().METRICS_TOKEN).toBe("a".repeat(24));
+  });
+
+  it("rejects a METRICS_TOKEN shorter than 16 characters (a typo must not silently weaken it)", async () => {
+    vi.resetModules();
+    stubClientEnv();
+    stubRequiredServerEnv();
+    vi.stubEnv("METRICS_TOKEN", "short");
+
+    const { getServerEnv } = await import("./env");
+
+    expect(() => getServerEnv()).toThrow(/METRICS_TOKEN/);
+  });
+
   it("memoizes: a second call returns the same object without re-parsing", async () => {
     vi.resetModules();
     stubClientEnv();
