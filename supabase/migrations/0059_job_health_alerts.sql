@@ -1,4 +1,30 @@
 -- ============================================================================
+-- FILE NUMBER vs LEDGER NAME - read this before trusting either.
+--
+-- This file was authored as `0058_job_health_alerts.sql` and APPLIED LIVE
+-- under that name: `supabase_migrations.schema_migrations` carries
+-- `20260806110554 | 0058_job_health_alerts`. It was renamed to 0059 on merge
+-- because task 2.2's deployment correction was authored concurrently in a
+-- separate checkout and also took 0058 (`20260806111225 |
+-- 0058_balance_check_deployment_correction`), and a file set with two 0058s
+-- has no defined replay order.
+--
+-- Both are applied live, with distinct version timestamps, in the order
+-- job-health-alerts then balance-check-correction. Supabase keys on the
+-- timestamp, not the filename, so the live ledger is correct and unambiguous;
+-- only the FILENAME changed, and the body is byte-identical to what ran.
+--
+-- The two are independent - this one creates `job_alert_state` and touches no
+-- function the other recreates - so a fresh replay in filename order
+-- (correction, then this) reaches the same schema as the live order.
+--
+-- Recorded here rather than silently renamed, per the same rule that governs
+-- `0011b` and the 0042/0057 incidents: when the file set and the database
+-- disagree about a name, the disagreement gets written down where the next
+-- person will find it.
+-- ============================================================================
+
+-- ============================================================================
 -- 0058_job_health_alerts.sql
 -- job_alert_state: the dedupe memory behind task 2.5's "alert a human when a
 -- scheduled job fails" check.
