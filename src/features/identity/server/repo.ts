@@ -19,6 +19,13 @@ export interface ConsumerProfileDTO {
   email: string;
   /** `consumers.city_id` resolved through `ref_cities`. Null when unset. */
   cityName: string | null;
+  /**
+   * `profiles.avatar_url`: the PUBLIC URL of an object in the `avatars` bucket
+   * (0064). Null when the consumer has never set one, which is the common case
+   * and is a real empty state rather than a missing value - /profile renders its
+   * initials circle for it and always has.
+   */
+  avatarUrl: string | null;
 }
 
 /**
@@ -41,7 +48,7 @@ export async function getMyConsumerProfile(): Promise<ConsumerProfileDTO | null>
   if (!user) return null;
 
   const [{ data: profile }, { data: consumer }] = await Promise.all([
-    supabase.from("profiles").select("display_name").eq("id", user.id).maybeSingle(),
+    supabase.from("profiles").select("display_name, avatar_url").eq("id", user.id).maybeSingle(),
     supabase.from("consumers").select("city_id").eq("id", user.id).maybeSingle(),
   ]);
 
@@ -60,5 +67,8 @@ export async function getMyConsumerProfile(): Promise<ConsumerProfileDTO | null>
     displayName: profile?.display_name ?? "",
     email: user.email ?? "",
     cityName,
+    // `|| null` and not `?? null`: the column is nullable text, and a row that
+    // somehow holds "" is "no avatar", not an <img> pointed at the current page.
+    avatarUrl: profile?.avatar_url || null,
   };
 }

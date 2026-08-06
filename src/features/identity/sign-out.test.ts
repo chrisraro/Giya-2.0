@@ -23,6 +23,13 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
+// actions.ts now also holds the avatar pipeline, which reaches sharp through a
+// `import "server-only"` module. That package throws on import outside a server
+// component, and importing actions.ts is how this file gets at signOut, so the
+// guard is stubbed here exactly as every other test that touches a server module
+// does. Nothing about sign-out changed.
+vi.mock("server-only", () => ({}));
+
 vi.mock("next/headers", () => ({
   cookies: async () => ({ getAll: mocks.cookieGetAll, set: mocks.cookieSet }),
 }));

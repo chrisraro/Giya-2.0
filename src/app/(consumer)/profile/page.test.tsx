@@ -36,12 +36,22 @@ const ProfilePage = (await import("./page")).default;
 
 const FIXTURE_STRINGS = ["Mia", "Mia Santos", "MS", "Kape Diaria", "Cebu City"];
 
-function signedInAs(overrides: Partial<{ displayName: string; email: string; cityName: string | null }> = {}) {
+const AVATAR_URL = "https://proj.supabase.co/storage/v1/object/public/avatars/user-1/a.jpg";
+
+function signedInAs(
+  overrides: Partial<{
+    displayName: string;
+    email: string;
+    cityName: string | null;
+    avatarUrl: string | null;
+  }> = {},
+) {
   mocks.getMyConsumerProfile.mockResolvedValue({
     userId: "user-1",
     displayName: "Ana Cruz",
     email: "ana@example.com",
     cityName: "Davao City",
+    avatarUrl: null,
     ...overrides,
   });
 }
@@ -154,6 +164,56 @@ describe("/profile on real data", () => {
       "/privacy",
     );
     expect(screen.getByRole("link", { name: /Terms/ })).toHaveAttribute("href", "/terms");
+  });
+});
+
+// profiles.avatar_url existed from 0002 with zero writers and no bucket, so the
+// header has always rendered initials. T3.4a gives it both.
+describe("/profile avatar", () => {
+  it("CRITICAL: renders the photo when there is one", async () => {
+    signedInAs({ avatarUrl: AVATAR_URL });
+    const { container } = render(await ProfilePage());
+
+    const img = container.querySelector("img");
+    expect(img).not.toBeNull();
+    expect(img).toHaveAttribute("src", AVATAR_URL);
+  });
+
+  it("CRITICAL: falls back to the initials circle when there is not", async () => {
+    // The fallback is the correct empty state, not a placeholder to delete.
+    signedInAs({ avatarUrl: null });
+    const { container } = render(await ProfilePage());
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText("AC")).toBeInTheDocument();
+  });
+
+  it("shows the photo INSTEAD of the initials, not on top of them", async () => {
+    signedInAs({ avatarUrl: AVATAR_URL });
+    await renderProfile();
+
+    expect(screen.queryByText("AC")).not.toBeInTheDocument();
+  });
+
+  it("gives the photo an empty alt, because the name is right beside it", async () => {
+    // Announcing "Ana Cruz" twice is noise; the image carries no information the
+    // adjacent text does not.
+    signedInAs({ avatarUrl: AVATAR_URL });
+    const { container } = render(await ProfilePage());
+
+    expect(container.querySelector("img")).toHaveAttribute("alt", "");
+  });
+});
+
+describe("/profile edit entry point", () => {
+  it("CRITICAL: offers a route to /profile/edit", async () => {
+    // Without this the edit screen exists and nobody can reach it.
+    await renderProfile();
+
+    expect(screen.getByRole("link", { name: "Edit profile" })).toHaveAttribute(
+      "href",
+      "/profile/edit",
+    );
   });
 });
 

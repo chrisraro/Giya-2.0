@@ -34,7 +34,10 @@ beforeEach(() => {
 
   mocks.getUser.mockResolvedValue({ data: { user: USER } });
 
-  mocks.profilesMaybeSingle.mockResolvedValue({ data: { display_name: "Ana Cruz" }, error: null });
+  mocks.profilesMaybeSingle.mockResolvedValue({
+    data: { display_name: "Ana Cruz", avatar_url: null },
+    error: null,
+  });
   mocks.consumersMaybeSingle.mockResolvedValue({ data: { city_id: "city-1" }, error: null });
   mocks.citiesMaybeSingle.mockResolvedValue({ data: { name: "Davao City" }, error: null });
 
@@ -59,7 +62,53 @@ describe("getMyConsumerProfile", () => {
       displayName: "Ana Cruz",
       email: "ana@example.com",
       cityName: "Davao City",
+      avatarUrl: null,
     });
+  });
+
+  it("carries the avatar URL when there is one", async () => {
+    const url = "https://proj.supabase.co/storage/v1/object/public/avatars/user-1/a.jpg";
+    mocks.profilesMaybeSingle.mockResolvedValue({
+      data: { display_name: "Ana Cruz", avatar_url: url },
+      error: null,
+    });
+
+    expect((await getMyConsumerProfile())?.avatarUrl).toBe(url);
+  });
+
+  it("CRITICAL: reads avatar_url in the SAME statement as display_name", async () => {
+    // A second round trip for one nullable column on a force-dynamic page is a
+    // second sequential wait on a Philippine mobile connection, and the column
+    // is on the same row.
+    const select = vi.fn().mockReturnValue({ eq: mocks.profilesEq });
+    mocks.from.mockImplementation((table: string) => {
+      if (table === "profiles") return { select };
+      if (table === "consumers") return { select: () => ({ eq: mocks.consumersEq }) };
+      if (table === "ref_cities") return { select: () => ({ eq: mocks.citiesEq }) };
+      throw new Error(`unexpected table: ${table}`);
+    });
+
+    await getMyConsumerProfile();
+
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(select.mock.calls[0]?.[0]).toMatch(/display_name/);
+    expect(select.mock.calls[0]?.[0]).toMatch(/avatar_url/);
+  });
+
+  it("treats an empty avatar_url as no avatar, not as a URL", async () => {
+    // `?? null` would let "" through and point an <img> at the current page.
+    mocks.profilesMaybeSingle.mockResolvedValue({
+      data: { display_name: "Ana Cruz", avatar_url: "" },
+      error: null,
+    });
+
+    expect((await getMyConsumerProfile())?.avatarUrl).toBeNull();
+  });
+
+  it("returns a null avatar when the profile row is missing entirely", async () => {
+    mocks.profilesMaybeSingle.mockResolvedValue({ data: null, error: null });
+
+    expect((await getMyConsumerProfile())?.avatarUrl).toBeNull();
   });
 
   it("CRITICAL: returns null with no session, which is what the pages gate on", async () => {
