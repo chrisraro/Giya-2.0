@@ -86,6 +86,16 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("HEARTBEAT_INTERVAL_MS", () => {
+  // Doc 39: "Heartbeat (long jobs only) ... refreshed every 20s." This is the
+  // task's central number, and until this assertion existed nothing pinned it
+  // - every other test overrides `intervalMs` or only checks relative timing,
+  // so any value at all would have passed the rest of this suite.
+  it("is 20 seconds, doc 39's own refresh interval", () => {
+    expect(HEARTBEAT_INTERVAL_MS).toBe(20_000);
+  });
+});
+
 describe("startHeartbeat", () => {
   it("refreshes heartbeat_at on the interval, matching the claim's ownership predicate", async () => {
     const { client, calls } = supabaseDouble();

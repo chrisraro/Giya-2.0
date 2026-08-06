@@ -225,6 +225,71 @@ describe("claimJob", () => {
     ).toBe("held");
   });
 
+  // t2-6 follow-up: a LIVE heartbeat (one that has actually advanced past the
+  // claim-time value claimJob wrote into both columns) must be judged against
+  // its own short window, not the queue's `2 * maxDuration` budget. Judging a
+  // live heartbeat against `maxDuration` would let ocr.process (120s budget,
+  // and a worker that heartbeats every 20s until Vercel kills it at 120s)
+  // push its own reclaim out to 360s - and every QStash redelivery in that
+  // gap would land on "held" and be permanently consumed for nothing, since a
+  // dead worker's row never gets less dead by waiting.
+  it("reclaims a job whose LIVE heartbeat has gone stale, using the heartbeat window rather than 2x maxDuration", async () => {
+    const { client } = supabaseDouble({
+      row: job({
+        queue: "ocr.process",
+        status: "running",
+        attempts: 1,
+        // Claimed long ago - well inside ocr.process's 240s (2x120s) budget,
+        // which is exactly the point: the OLD rule would still call this
+        // "held" for another three minutes.
+        started_at: new Date(NOW.getTime() - 200_000).toISOString(),
+        // ...but the heartbeat itself has gone quiet for 61s, past the 60s
+        // heartbeat window (3x the 20s refresh interval).
+        heartbeat_at: new Date(NOW.getTime() - 61_000).toISOString(),
+      }),
+    });
+    expect(
+      (await claimJob({ supabase: client, jobId: "job-1", queue: "ocr.process", now })).status,
+    ).toBe("claimed");
+  });
+
+  it("leaves a LIVE heartbeat alone while it is within the heartbeat window", async () => {
+    const { client } = supabaseDouble({
+      row: job({
+        queue: "ocr.process",
+        status: "running",
+        attempts: 1,
+        started_at: new Date(NOW.getTime() - 200_000).toISOString(),
+        heartbeat_at: new Date(NOW.getTime() - 59_000).toISOString(),
+      }),
+    });
+    expect(
+      (await claimJob({ supabase: client, jobId: "job-1", queue: "ocr.process", now })).status,
+    ).toBe("held");
+  });
+
+  // The other arm: a worker that died before its first refresh ever landed
+  // (heartbeat_at still equal to started_at, exactly what claimJob's CAS
+  // writes at claim time) has no LIVE heartbeat to judge - it falls back to
+  // the same `2 * maxDuration` budget queues with no heartbeat wiring at all
+  // (notify.email) already rely on above.
+  it("falls back to 2x maxDuration when no live heartbeat has landed yet", async () => {
+    const { client } = supabaseDouble({
+      row: job({
+        queue: "ocr.process",
+        status: "running",
+        attempts: 1,
+        // Past the 60s heartbeat window, but well inside 240s (2x120s) - and
+        // heartbeat_at === started_at, so there is no live heartbeat yet.
+        started_at: new Date(NOW.getTime() - 200_000).toISOString(),
+        heartbeat_at: new Date(NOW.getTime() - 200_000).toISOString(),
+      }),
+    });
+    expect(
+      (await claimJob({ supabase: client, jobId: "job-1", queue: "ocr.process", now })).status,
+    ).toBe("held");
+  });
+
   it("treats a running job with no progress marker at all as stale", async () => {
     const { client } = supabaseDouble({
       row: job({ status: "running", attempts: 1, started_at: null, heartbeat_at: null }),

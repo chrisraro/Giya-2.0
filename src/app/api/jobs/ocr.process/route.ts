@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { processReceipt } from "@/features/receipts/server/process";
 import { claimJob, finishJob } from "@/lib/queue/claim";
-import { startHeartbeat } from "@/lib/queue/heartbeat";
+import { startHeartbeat, type HeartbeatHandle } from "@/lib/queue/heartbeat";
 import { queuePath } from "@/lib/queue/queues";
 import { verifyQStashRequest } from "@/lib/queue/verify";
 import { createServiceRoleClient } from "@/lib/supabase/service";
@@ -198,18 +198,37 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       break;
   }
 
-  // ---- 4. work + 5. outcome ----------------------------------------------
-  //
   // `ocr.process`'s maxDuration (120s) is doc 39's own trigger for a heartbeat
   // ("required for any worker with maxDuration > 60"): a healthy 90-second OCR
   // call is otherwise indistinguishable from a worker that died at second 3
-  // until claim.ts's full 2x-maxDuration reclaim window has passed. Started
-  // only now, after the claim, so its ownership predicate has the `attempts`
-  // value THIS invocation actually won; stopped from `finally` so it never
-  // outlives the handler - a heartbeat written after the job settles would
-  // re-establish liveness for a job nobody is running, which doc 39 and the
-  // brief for this task both call worse than no heartbeat at all.
-  const heartbeat = startHeartbeat({ supabase, jobId, attempts: claim.job.attempts });
+  // until claim.ts's reclaim window has passed.
+  //
+  // `startHeartbeat` cannot practically throw - it only reads its own input
+  // and calls `setInterval` - but requirement 3 ("a refresh failure must
+  // never fail the job") is categorical, so even this line is defended, with
+  // its OWN try/catch rather than folded into step 4's below. Folding it in
+  // would be the wrong failure domain: a heartbeat wiring bug caught by that
+  // catch would call `finishJob({ kind: "failed" })` and report the JOB as
+  // having failed, when the pipeline never got a chance to run at all. A
+  // no-op handle lets the attempt proceed heartbeat-less instead - degraded,
+  // not aborted, exactly the "observation, not a gate" rule `heartbeat.ts`
+  // itself documents.
+  let heartbeat: HeartbeatHandle;
+  try {
+    heartbeat = startHeartbeat({ supabase, jobId, attempts: claim.job.attempts });
+  } catch (error) {
+    console.error(`${LOG_PREFIX} could not start the heartbeat for job ${jobId}`, error);
+    heartbeat = { stop: () => {} };
+  }
+
+  // ---- 4. work + 5. outcome ----------------------------------------------
+  //
+  // Started above, before this try, so its ownership predicate already
+  // carries the `attempts` value THIS invocation actually won; stopped from
+  // `finally` below so it never outlives the handler - a heartbeat written
+  // after the job settles would re-establish liveness for a job nobody is
+  // running, which doc 39 and the brief for this task both call worse than no
+  // heartbeat at all.
   try {
     const result = await runOcrProcess(payload.data, { supabase, processReceipt });
 
@@ -256,7 +275,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   } finally {
     // Every exit above - each `return` in the switch, and the catch above -
     // runs this first. `stop()` is idempotent and safe even if the heartbeat
-    // already stopped itself after losing its lease.
+    // already stopped itself after losing its lease, and safe on the no-op
+    // fallback above too.
     heartbeat.stop();
   }
 }

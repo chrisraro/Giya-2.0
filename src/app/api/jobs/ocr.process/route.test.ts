@@ -364,21 +364,44 @@ describe("the heartbeat", () => {
     expect(startOrder).toBeLessThan(runOrder as number);
   });
 
-  it("stops after the pipeline succeeds", async () => {
+  // Each of the next three tests asserts ORDER, not just call count.
+  // `expect(heartbeatStop).toHaveBeenCalledTimes(1)` alone passes whether
+  // `stop()` runs in the route's `finally` (correct) or on the line right
+  // after `startHeartbeat` (which would disable heartbeating entirely and
+  // still leave every one of these assertions green) - the two are only
+  // told apart by proving the pipeline call and the outcome write both
+  // happened BEFORE `stop()`.
+  it("stops after the pipeline succeeds, only after the pipeline actually ran and the outcome was recorded", async () => {
     await post(VALID_BODY, sign(VALID_BODY));
+
     expect(heartbeatStop).toHaveBeenCalledTimes(1);
+    const runOrder = runOcrProcess.mock.invocationCallOrder[0] as number;
+    const finishOrder = finishJob.mock.invocationCallOrder[0] as number;
+    const stopOrder = heartbeatStop.mock.invocationCallOrder[0] as number;
+    expect(runOrder).toBeLessThan(stopOrder);
+    expect(finishOrder).toBeLessThan(stopOrder);
   });
 
-  it("stops after a retryable outcome", async () => {
+  it("stops after a retryable outcome, only after the outcome was recorded", async () => {
     runOcrProcess.mockResolvedValue({ kind: "retryable", status: "processing" });
     await post(VALID_BODY, sign(VALID_BODY));
+
     expect(heartbeatStop).toHaveBeenCalledTimes(1);
+    const finishOrder = finishJob.mock.invocationCallOrder[0] as number;
+    const stopOrder = heartbeatStop.mock.invocationCallOrder[0] as number;
+    expect(finishOrder).toBeLessThan(stopOrder);
   });
 
-  it("stops even when the handler throws", async () => {
+  it("stops even when the handler throws, only after the failure was recorded", async () => {
     runOcrProcess.mockRejectedValue(new Error("boom"));
     await post(VALID_BODY, sign(VALID_BODY));
+
     expect(heartbeatStop).toHaveBeenCalledTimes(1);
+    const runOrder = runOcrProcess.mock.invocationCallOrder[0] as number;
+    const finishOrder = finishJob.mock.invocationCallOrder[0] as number;
+    const stopOrder = heartbeatStop.mock.invocationCallOrder[0] as number;
+    expect(runOrder).toBeLessThan(stopOrder);
+    expect(finishOrder).toBeLessThan(stopOrder);
   });
 
   it.each(["done", "held", "exhausted", "missing"] as const)(
@@ -392,6 +415,26 @@ describe("the heartbeat", () => {
       expect(heartbeatStop).not.toHaveBeenCalled();
     },
   );
+
+  // Requirement 3 ("a refresh failure must never fail the job") is
+  // categorical, and it covers even `startHeartbeat` itself throwing
+  // synchronously - not just a refresh failing later. The pipeline must still
+  // run and the job must still be reported on its own merits, heartbeat-less.
+  it("still runs the pipeline and reports its real outcome when starting the heartbeat itself throws", async () => {
+    startHeartbeat.mockImplementationOnce(() => {
+      throw new Error("setInterval exploded");
+    });
+
+    const response = await post(VALID_BODY, sign(VALID_BODY));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, status: "approved" });
+    expect(runOcrProcess).toHaveBeenCalledTimes(1);
+    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, { kind: "succeeded" });
+    // The fallback handle's own stop() is a fresh no-op, not the shared
+    // `heartbeatStop` mock - so this only asserts nothing blew up on the way
+    // to a real, correctly-reported outcome.
+  });
 });
 
 describe("duplicate delivery", () => {

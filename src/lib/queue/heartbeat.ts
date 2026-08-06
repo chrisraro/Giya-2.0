@@ -17,7 +17,8 @@ import type { Database } from "@/lib/supabase/types";
 // one that is 90 healthy seconds into a legitimate OCR call.
 //
 // -----------------------------------------------------------------------------
-// WHY THE REFRESH USES THE SAME OWNERSHIP EXPRESSION AS THE CLAIM
+// WHY THE REFRESH REUSES THE CLAIM'S OWNERSHIP TUPLE, AND IS DELIBERATELY
+// TIGHTER THAN THE CLAIM'S OWN PREDICATE
 // -----------------------------------------------------------------------------
 // `claimJob`'s compare-and-swap writes `attempts = observed + 1` guarded by
 // `attempts = observed`, and the value it hands back as `JobRow.attempts` IS
@@ -30,13 +31,17 @@ import type { Database } from "@/lib/supabase/types";
 // take over. Matching `attempts` too means a lost lease makes the UPDATE match
 // zero rows, which this module treats as "stop, quietly" rather than an error.
 //
-// `status = 'running'` is redundant with the attempts match in the common case
-// (only a claim or a reclaim moves `attempts`, and both leave `running`) but it
-// is cheap insurance against the one sequence where it is not: `finishJob`
-// writes a terminal status without touching `attempts` at all, so between a
-// handler settling and this module's `stop()` actually clearing the interval
-// there is a window where a refresh already scheduled could otherwise still
-// match. Requiring `running` closes it.
+// This is NOT the same predicate `claimJob`'s CAS uses, though - it is a
+// strictly narrower one, on purpose. The CAS accepts `status IN ('queued',
+// 'failed', 'running')` because a reclaim has to be able to pick a row up FROM
+// `running`; this refresh requires `status = 'running'` alone, because it must
+// NOT be able to. That extra guard is not redundant with the `attempts` match:
+// `finishJob` writes a terminal status without touching `attempts` at all, so
+// in the window between a handler settling and this module's `stop()`
+// actually clearing the interval, a refresh already scheduled would still
+// match on `(id, attempts)` alone. Requiring `running` closes exactly that
+// window - the one case doc 39's own warning ("a heartbeat written after
+// completion is worse than none") is about.
 //
 // -----------------------------------------------------------------------------
 // WHY THIS NEVER FAILS THE JOB
@@ -137,12 +142,16 @@ async function refresh(
     }
 
     if (data === null) {
-      // Zero rows matched: the (id, attempts) lease this invocation held is
-      // gone, which means a reclaim already happened and legitimately owns
-      // the row now. Not a failure - stop quietly rather than keep trying to
-      // write a heartbeat for a job we no longer own.
+      // Zero rows matched, which this predicate cannot tell apart from two
+      // different, equally legitimate causes: either another invocation's
+      // reclaim already won the (id, attempts) lease this one held, OR
+      // `finishJob` already moved the row off `running` and this refresh
+      // simply lost the race with the handler settling. Neither is a
+      // failure, and both call for the same response - stop quietly rather
+      // than keep trying to write a heartbeat for a job this invocation no
+      // longer (or no longer provably) owns.
       console.info(
-        `${LOG_PREFIX} job ${jobId} is no longer owned by this invocation (attempts=${attempts}); stopping`,
+        `${LOG_PREFIX} job ${jobId} no longer matches this invocation's claim (attempts=${attempts}, status='running'); stopping`,
       );
       stop();
     }
