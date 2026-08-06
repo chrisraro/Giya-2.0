@@ -301,17 +301,24 @@ describe("extractDate", () => {
     expect(hit).not.toBeNull();
     expect(hit?.date.toISOString()).toBe("2026-07-24T05:42:00.000Z");
     expect(hit?.ambiguous).toBe(false);
+    // A real HH:mm token was on the receipt, so the closed-hours check
+    // (../closed-hours.ts) may trust this instant's time-of-day.
+    expect(hit?.timeExtracted).toBe(true);
   });
 
-  it("assumes 12:00 Manila when no time token adjoins", () => {
+  it("assumes 12:00 Manila when no time token adjoins, and says so", () => {
     // 2026-07-24 12:00 Manila = 2026-07-24T04:00:00Z
     const hit = extractDate({ rawText: "SUKI MART\n07/24/2026\nTOTAL 100.00" });
     expect(hit?.date.toISOString()).toBe("2026-07-24T04:00:00.000Z");
+    // The noon default is a placeholder, not a fact off the paper: nothing
+    // downstream may read it as "this receipt says 12:00".
+    expect(hit?.timeExtracted).toBe(false);
   });
 
   it("picks up a time token on the line immediately after the date", () => {
     const hit = extractDate({ rawText: "07/24/2026\n09:05\nTOTAL 100.00" });
     expect(hit?.date.toISOString()).toBe("2026-07-24T01:05:00.000Z");
+    expect(hit?.timeExtracted).toBe(true);
   });
 
   it("understands 12-hour clock tokens with a meridiem", () => {
@@ -934,6 +941,13 @@ describe("parseReceipt", () => {
     expect(parsed.withinAmountSanity).toBeNull();
   });
 
+  it("carries timeExtracted through composition: true with an adjoining clock, false without", () => {
+    expect(parseReceipt(input({ config: POS_CONFIG })).timeExtracted).toBe(true);
+    expect(parseReceipt({ rawText: "SUKI MART\n07/24/2026\nTOTAL 100.00" }).timeExtracted).toBe(
+      false,
+    );
+  });
+
   it("notes an ambiguous date so the caller can raise a review flag", () => {
     const parsed = parseReceipt({ rawText: AMBIGUOUS_RECEIPT });
     expect(parsed.receiptDate?.toISOString()).toBe("2026-05-06T04:00:00.000Z");
@@ -980,6 +994,8 @@ describe("parseReceipt", () => {
     expect(parsed.receiptDate).toBeNull();
     expect(parsed.receiptNumber).toBeNull();
     expect(parsed.dateAmbiguous).toBe(false);
+    // No date was read at all, so there is no time to have extracted either.
+    expect(parsed.timeExtracted).toBe(false);
   });
 
   it("returns an all-null candidate for garbled input and does not throw", () => {
@@ -989,6 +1005,7 @@ describe("parseReceipt", () => {
       receiptNumber: null,
       receiptDate: null,
       dateAmbiguous: false,
+      timeExtracted: false,
       subtotalCentavos: null,
       taxCentavos: null,
       totalCentavos: null,

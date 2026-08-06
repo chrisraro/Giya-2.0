@@ -18,6 +18,7 @@ import {
 import { EMBEDDING_DIMENSIONS, cosineSimilarity, embedText, normalizeLayoutText } from "../embed";
 import { buildExtractionPrompt, validateExtraction } from "../extract";
 import type { ExtractionMessage, ExtractionResult } from "../extract";
+import { checkClosedHours } from "../closed-hours";
 import { buildSignal, fraudVerdict } from "../fraud";
 import type { FraudSignal } from "../fraud";
 import { checkMerchantName, matchBusiness, normalizeForMatch, trigramSimilarity } from "../matching";
@@ -1268,6 +1269,14 @@ export function validateParsedReceipt(input: {
    */
   templateMaxTotalCentavos: number | null;
   businessVerifiedAt: Date | null;
+  /**
+   * `businesses.opening_hours`, exactly as read from Postgres (`loadBusiness`),
+   * or `[]` when no business matched. Threaded through to `checkClosedHours`
+   * (doc 37 S5's third case, `../closed-hours.ts`) rather than read here: the
+   * comparison against `parsed.timeExtracted` is pure and belongs in that
+   * zero-IO module, alongside `fraud.ts` / `velocity.ts`.
+   */
+  businessOpeningHours: unknown;
 }): ValidationResult {
   const {
     parsed,
@@ -1276,6 +1285,7 @@ export function validateParsedReceipt(input: {
     maxTotalCentavos,
     templateMaxTotalCentavos,
     businessVerifiedAt,
+    businessOpeningHours,
   } = input;
   const signals: FraudSignal[] = [];
 
@@ -1301,6 +1311,21 @@ export function validateParsedReceipt(input: {
         }),
       );
     }
+
+    // Doc 37 S5's third case: the printed time falls when the business's own
+    // stated hours say it was closed. Runs BEFORE the freshness/too-old early
+    // returns below (not nested inside them) so it still contributes its
+    // history row on a receipt that ends up rejected as too_old, exactly the
+    // way `timestamp_too_old` itself is "a history row only" on that path.
+    // `checkClosedHours` is null-safe about everything it needs: a missing
+    // extracted time or unconfigured hours simply means the check did not
+    // run, never that it passed.
+    const closedHoursSignal = checkClosedHours({
+      receiptDate,
+      timeExtracted: parsed.timeExtracted,
+      openingHours: businessOpeningHours,
+    });
+    if (closedHoursSignal !== null) signals.push(closedHoursSignal);
 
     // Freshness (row 2) and postdates-activation (row 4) both reject as
     // too_old, and doc 37 S5 wants a history row when they do.
@@ -1927,6 +1952,7 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
     // through to the platform ceiling rather than disabling it.
     templateMaxTotalCentavos: template?.config.amount_sanity?.max_total_centavos ?? null,
     businessVerifiedAt,
+    businessOpeningHours: business?.opening_hours ?? [],
   });
 
   // ---- Stage 8.5: fraud (doc 37) -----------------------------------------
@@ -2820,6 +2846,10 @@ interface BusinessRow {
   id: string;
   name: string;
   verified_at: string | null;
+  /** Doc 37 S5's closed-hours input (`../closed-hours.ts`). `jsonb not null
+   * default '[]'`, no DB-level shape constraint (0002:218-219), so this is
+   * read as `unknown` and left for `checkClosedHours` to interpret. */
+  opening_hours: unknown;
 }
 
 async function loadBusiness(
@@ -2829,7 +2859,7 @@ async function loadBusiness(
   if (businessId === null) return null;
   const { data, error } = await supabase
     .from("businesses")
-    .select("id, name, verified_at")
+    .select("id, name, verified_at, opening_hours")
     .eq("id", businessId)
     .maybeSingle<BusinessRow>();
   if (error !== null) {

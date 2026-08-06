@@ -345,6 +345,33 @@ function formatDateValue(value: string | null): string {
   return parsed.toISOString().slice(0, 10);
 }
 
+/** Index 0 is day 1 (Monday), the same convention `../businesses/settings/hours.ts`
+ * uses for the same jsonb column - kept as its own tiny copy here rather than an
+ * import so this display module does not pull in the settings feature's editor
+ * code for one label array. */
+const WEEKDAY_LABELS: readonly string[] = [
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+];
+
+/** `"14:05"` -> `"2:05 PM"`, for the closed-hours signal's evidence. Falls
+ * back to the raw HH:mm on anything that does not parse, rather than hiding
+ * it. */
+function formatClockLabel(hhmm: string): string {
+  const [hourText, minuteText] = hhmm.split(":");
+  const hour24 = Number(hourText);
+  const minute = Number(minuteText);
+  if (!Number.isFinite(hour24) || !Number.isFinite(minute)) return hhmm;
+  const period = hour24 < 12 ? "AM" : "PM";
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+  return `${hour12}:${String(minute).padStart(2, "0")} ${period}`;
+}
+
 /**
  * One fraud signal as a reviewer should read it. The switch is on the
  * `fraud_signals.signal` value rather than on the catalog case, because the
@@ -430,6 +457,8 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
       const receiptDate = formatDateValue(readString(evidence, "receipt_date"));
       const maxAgeDays = readNumber(evidence, "max_age_days");
       const verifiedAt = readString(evidence, "business_verified_at");
+      const receiptTime = readString(evidence, "receipt_time");
+      const weekday = readNumber(evidence, "weekday");
 
       let summary: string;
       if (kind === "future_dated") {
@@ -441,6 +470,15 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
             : `The printed date is ${receiptDate}, more than ${plural(maxAgeDays, "day")} old.`;
       } else if (kind === "predates_activation") {
         summary = `The printed date is ${receiptDate}, before this business went live on Giya.`;
+      } else if (kind === "closed_hours") {
+        // doc 37 S5's third case. Non-accusatory on purpose, per the D3
+        // principle merchant-check.test.tsx pins: this states a fact about
+        // the printed time against the business's own stated hours, never a
+        // claim about the customer.
+        summary =
+          receiptTime === null
+            ? "The printed time is outside this business's stated hours."
+            : `Receipt time ${formatClockLabel(receiptTime)} is outside this business's stated hours.`;
       } else {
         summary = `The printed date is ${receiptDate}.`;
       }
@@ -448,6 +486,9 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
       const rows: EvidenceRow[] = [];
       if (verifiedAt !== null) {
         rows.push({ label: "Business live since", value: formatDateValue(verifiedAt) });
+      }
+      if (kind === "closed_hours" && weekday !== null) {
+        rows.push({ label: "Day", value: WEEKDAY_LABELS[weekday - 1] ?? String(weekday) });
       }
       return {
         title,
@@ -459,6 +500,8 @@ export function describeSignal(signal: FraudSignalView): SignalPresentation {
             "receipt_date",
             "max_age_days",
             "business_verified_at",
+            "receipt_time",
+            "weekday",
           ]),
         ],
         meter: null,

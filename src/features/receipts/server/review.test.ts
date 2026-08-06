@@ -1102,12 +1102,35 @@ describe("reviewReceipt cooldown ladder", () => {
       // The pipeline's own function, not a copy.
       expect(vi.mocked(applyCooldownIfEarned)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(applyCooldownIfEarned).mock.calls[0]?.[1]).toBe(CONSUMER_ID);
+      // requestId now threads through to the cooldown's own audit row.
+      expect(vi.mocked(applyCooldownIfEarned).mock.calls[0]?.[3]).toBe(REQUEST_ID);
 
       const block = harness.supabase.opsFor("consumers", "update")[0];
       expect(block?.payload).toEqual({
         scan_blocked_until: new Date(
           NOW.getTime() + DEFAULT_RECEIPT_SETTINGS.cooldownHours * 3_600_000,
         ).toISOString(),
+      });
+
+      // TWO audit rows: review.ts's own decision row (the rejection), and
+      // cooldown.ts's system-actor row for the automatic block. Doc 37's
+      // consequences ladder step 2, now written on the automatic path exactly
+      // as it already was on the manual one (admin/consequences.ts).
+      const rows = harness.auditRows();
+      expect(rows).toHaveLength(2);
+      expect(rows.map((row) => row.action)).toEqual(
+        expect.arrayContaining(["receipt.review_rejected", "fraud.cooldown_applied"]),
+      );
+      const cooldownRow = rows.find((row) => row.action === "fraud.cooldown_applied");
+      expect(cooldownRow).toMatchObject({
+        actor_id: null,
+        actor_kind: "system",
+        actor_role: null,
+        business_id: null,
+        entity_type: "consumer",
+        entity_id: CONSUMER_ID,
+        reason: null,
+        request_id: REQUEST_ID,
       });
     },
   );

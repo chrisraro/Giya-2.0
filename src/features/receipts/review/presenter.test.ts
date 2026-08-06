@@ -260,6 +260,33 @@ describe("describeSignal renders evidence rather than dumping it", () => {
     expect(predates.rows).toContainEqual({ label: "Business live since", value: "2026-06-01" });
   });
 
+  it("renders the closed-hours case with the brief's own worked example, non-accusatory", () => {
+    const view = describeSignal(
+      signal({
+        signal: "timestamp_anomaly",
+        evidence: { kind: "closed_hours", receipt_time: "02:14", weekday: 7 },
+      }),
+    );
+
+    expect(view.summary).toBe(
+      "Receipt time 2:14 AM is outside this business's stated hours.",
+    );
+    expect(view.rows).toContainEqual({ label: "Day", value: "Sunday" });
+    // Raw jsonb keys never survive into a row.
+    expect(view.rows.map((row) => row.label)).not.toContain("Receipt time");
+    expect(view.rows.map((row) => row.label)).not.toContain("Weekday");
+
+    const accusatory = /fraud|fake|stole|stolen|cheat|lying|lied|scam|dishonest/i;
+    expect(`${view.title} ${view.summary}`).not.toMatch(accusatory);
+  });
+
+  it("degrades gracefully when the closed-hours evidence carries no receipt_time", () => {
+    const view = describeSignal(
+      signal({ signal: "timestamp_anomaly", evidence: { kind: "closed_hours" } }),
+    );
+    expect(view.summary).toBe("The printed time is outside this business's stated hours.");
+  });
+
   it("formats amount evidence as pesos, not centavos", () => {
     const view = describeSignal(
       signal({
