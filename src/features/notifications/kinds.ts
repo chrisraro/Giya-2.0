@@ -37,6 +37,12 @@ export const NOTIFICATION_KINDS = [
   "receipt_in_review",
   "reward_claimed",
   "reward_expiring",
+  // Doc 30 section 5.3's staff-facing row, raised for the first time by task
+  // 1.2 (0040): a campaign auto-paused itself because its `max_total_points`
+  // budget (doc 34 section 5) is fully spent. See the header note below on
+  // why this one kind is addressed to a business owner rather than a
+  // consumer.
+  "campaign_budget_exhausted",
 ] as const;
 
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
@@ -155,6 +161,16 @@ export const NOTIFICATION_KIND_REGISTRY: Record<NotificationKind, NotificationKi
   },
   reward_claimed: { icon: "redeem", tone: "reward", transactional: true, channels: ["in_app"] },
   reward_expiring: { icon: "schedule", tone: "waiting", transactional: true, channels: ["in_app"] },
+  // "muted", never "reward": nothing here is a celebration, and Mango is
+  // rewards language only (see this file's tone doc above). Emails too - see
+  // the header note by this kind's audience for why it earns the second
+  // channel most kinds here deliberately do not get.
+  campaign_budget_exhausted: {
+    icon: "warning",
+    tone: "muted",
+    transactional: true,
+    channels: ["in_app", "email"],
+  },
 };
 
 /** Whether a kind is delivered by email as well as to the inbox. */
@@ -164,25 +180,34 @@ export function kindEmails(kind: string): boolean {
     : false;
 }
 
-// EVERY KIND ABOVE IS ADDRESSED TO A CONSUMER, and that is why this slice ships
-// no business-side notification surface.
+// EVERY KIND BUT ONE IS ADDRESSED TO A CONSUMER, and that is why this slice
+// otherwise ships no business-side notification surface.
 //
-// The one thing a merchant needs to be told today is that a receipt is waiting
-// for review, and the business portal already tells them, twice and from live
-// data: the sidebar badge (src/components/business/sidebar.tsx, fed by the
-// portal LAYOUT so it is on every portal screen) and the dashboard's
-// ReviewQueueTile, both derived from `countPendingReview` over the real queue,
-// both capped at 99+, both linking to /business/receipts.
+// The one thing a merchant needed to be told, before task 1.2, was that a
+// receipt is waiting for review - and the business portal already tells them
+// that, twice and from live data: the sidebar badge
+// (src/components/business/sidebar.tsx, fed by the portal LAYOUT so it is on
+// every portal screen) and the dashboard's ReviewQueueTile, both derived from
+// `countPendingReview` over the real queue, both capped at 99+, both linking
+// to /business/receipts.
 //
-// A merchant inbox would be a second, worse copy of that signal: derived from
-// rows rather than from the queue, so it would drift the moment a colleague
-// cleared an item, and it would need a `receipt_needs_review` kind addressed to
-// every owner and manager, i.e. a fan-out with no reader that the existing
-// badge does not already have. Doc 30 section 5.3 does register staff-facing
-// kinds (staff_invite, verification_decision, campaign_budget_exhausted), and
-// each of them lands with the slice that raises it - none of them is a receipt
-// waiting for review, because that one is a QUEUE, and a queue is better shown
-// as a count on the door than as a message in a box.
+// A merchant inbox for THAT signal would be a second, worse copy of it:
+// derived from rows rather than from the queue, so it would drift the moment
+// a colleague cleared an item, and it would need a `receipt_needs_review` kind
+// addressed to every owner and manager, i.e. a fan-out with no reader that the
+// existing badge does not already have - a receipt waiting for review is a
+// QUEUE, and a queue is better shown as a count on the door than as a message
+// in a box.
+//
+// `campaign_budget_exhausted` (task 1.2, 0040) is different in kind, not just
+// audience: doc 34 section 5's exhaustion is a ONE-TIME EVENT (a campaign
+// crossing from "has budget" to "fully spent, now paused"), not a standing
+// count anything on the portal already renders continuously - by the time an
+// owner next opens the dashboard, the campaign that ran out and auto-paused
+// itself is easy to miss among everything else that changed. It is doc 30
+// section 5.3's first staff-facing kind to actually ship; `staff_invite` and
+// `verification_decision` remain reserved names for the slices that will
+// raise them.
 
 /** Fallback for a kind the database holds and this build does not know (a row
  * written by a newer deploy, read by an older one). Never leaves a row blank. */

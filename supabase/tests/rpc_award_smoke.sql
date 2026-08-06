@@ -895,22 +895,22 @@ select is(
 
 -- ---------------------------------------------------------------- grants
 -- 49-51. System function: only the service-role pipeline may mint points.
--- Signature now carries the 0037 boolean parameter; the OLD 5-arg overload
--- was dropped by 0037, so this is the only `award_receipt_points` in the
--- database.
+-- Signature now carries the 0040 p_campaign_budget_checks parameter (task
+-- 1.2); the OLD 6-arg overload was dropped by 0040, so this is the only
+-- `award_receipt_points` in the database.
 select ok(
   not has_function_privilege('anon',
-    'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz, boolean)', 'EXECUTE'),
+    'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz, boolean, jsonb)', 'EXECUTE'),
   'anon cannot execute award_receipt_points');
 
 select ok(
   not has_function_privilege('authenticated',
-    'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz, boolean)', 'EXECUTE'),
+    'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz, boolean, jsonb)', 'EXECUTE'),
   'authenticated cannot execute award_receipt_points');
 
 select ok(
   has_function_privilege('service_role',
-    'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz, boolean)', 'EXECUTE'),
+    'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz, boolean, jsonb)', 'EXECUTE'),
   'service_role can execute award_receipt_points');
 
 -- 52-55, I-A (re-review). The new security-definer surface (0038/0039) gets the

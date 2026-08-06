@@ -16,22 +16,25 @@ import type { NotificationKind } from "./kinds";
 //   3. the stored deep link cannot become an open redirect.
 
 /**
- * The exact value list in 0026_notifications.sql's `kind` check constraint,
- * transcribed. The migration is the enforcement and this array is the alarm: a
- * kind added to one and not the other means either a 23514 on a real event or a
- * dead constant, and both are silent until someone scans a receipt.
+ * The exact value list in the database's `notifications_kind_check`
+ * constraint, transcribed: the five 0026_notifications.sql originally shipped
+ * plus `campaign_budget_exhausted`, added by 0040 (task 1.2). The migration is
+ * the enforcement and this array is the alarm: a kind added to one and not the
+ * other means either a 23514 on a real event or a dead constant, and both are
+ * silent until someone scans a receipt or a campaign runs out of budget.
  */
-const MIGRATION_0026_KINDS = [
+const DATABASE_KINDS = [
   "points_awarded",
   "receipt_rejected",
   "receipt_in_review",
   "reward_claimed",
   "reward_expiring",
+  "campaign_budget_exhausted",
 ];
 
 describe("the kind list matches the database", () => {
-  it("CRITICAL: is exactly 0026_notifications.sql's check constraint", () => {
-    expect([...NOTIFICATION_KINDS].sort()).toEqual([...MIGRATION_0026_KINDS].sort());
+  it("CRITICAL: is exactly the database's notifications_kind_check constraint (0026 + 0040)", () => {
+    expect([...NOTIFICATION_KINDS].sort()).toEqual([...DATABASE_KINDS].sort());
   });
 
   it("has a registry entry for every kind, so no row can render blank", () => {
@@ -69,6 +72,7 @@ describe("Mango is rewards language (doc 16)", () => {
       "receipt_rejected",
       "receipt_in_review",
       "reward_expiring",
+      "campaign_budget_exhausted",
     ];
     for (const kind of notRewards) {
       expect(
@@ -115,9 +119,9 @@ describe("channels", () => {
     }
   });
 
-  it("emails exactly one kind: the rejection the consumer must act on", () => {
+  it("emails exactly two kinds: the rejection the consumer must act on, and the budget alert the owner must act on", () => {
     const emailing = NOTIFICATION_KINDS.filter((kind) => kindEmails(kind));
-    expect(emailing).toEqual(["receipt_rejected"]);
+    expect([...emailing].sort()).toEqual(["campaign_budget_exhausted", "receipt_rejected"]);
   });
 
   it("does not email the good news, which the consumer opens the app for anyway", () => {

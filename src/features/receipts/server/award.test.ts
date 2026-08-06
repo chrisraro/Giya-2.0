@@ -14,6 +14,17 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 // "server-only" throws on import outside Next.js's react-server condition.
 vi.mock("server-only", () => ({}));
 
+// Doc 34 section 5, task 1.2: `awardPoints`'s post-commit exhaustion check
+// (`pauseExhaustedCampaigns`) is a separate module with its own test suite
+// (campaigns/server/exhaustion.test.ts) - mocked here so this file can pin
+// exactly WHEN and with WHAT ARGUMENTS award.ts calls it, without needing the
+// fake Supabase client above to also simulate that module's own queries
+// (campaigns.maybeSingle, business_staff, audit_logs, notifications).
+const pauseExhaustedCampaignsMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/features/campaigns/server/exhaustion", () => ({
+  pauseExhaustedCampaigns: (...args: unknown[]) => pauseExhaustedCampaignsMock(...args),
+}));
+
 import type { Database } from "@/lib/supabase/types";
 
 import {
@@ -141,6 +152,14 @@ function createFakeSupabase(input: {
   // its parse_meta update (C3).
   receiptParseMeta?: Record<string, unknown> | null;
   receiptReadError?: FakeError;
+  // Doc 34 section 5, task 1.2: `resolveCampaignBudgets`'s two advisory
+  // reads. Keyed by campaign_id so a test with more than one capped
+  // campaign candidate can give each its own running total/count; a bare
+  // number applies to every campaign_id (the common single-campaign case).
+  campaignPointsAwarded?: number | Record<string, number>;
+  campaignPointsAwardedError?: FakeError;
+  campaignCustomerEarnCount?: number | Record<string, number>;
+  campaignCustomerEarnCountError?: FakeError;
 }): FakeSupabase {
   const ops: FakeOp[] = [];
   const rpcCalls: Array<{ name: string; args: unknown }> = [];
@@ -165,6 +184,32 @@ function createFakeSupabase(input: {
         return { data: null, error: input.receiptReadError };
       }
       return { data: { parse_meta: input.receiptParseMeta ?? null }, error: null };
+    }
+    if (op.table === "points_transactions" && op.op === "select") {
+      const campaignFilter = op.filters.find(
+        (f) => f.method === "eq" && f.args[0] === "campaign_id",
+      );
+      const campaignId = typeof campaignFilter?.args[1] === "string" ? campaignFilter.args[1] : undefined;
+      const hasConsumerFilter = op.filters.some(
+        (f) => f.method === "eq" && f.args[0] === "consumer_id",
+      );
+      const lookup = (value: number | Record<string, number> | undefined): number => {
+        if (value === undefined) return 0;
+        if (typeof value === "number") return value;
+        return campaignId !== undefined ? (value[campaignId] ?? 0) : 0;
+      };
+      if (hasConsumerFilter) {
+        if (input.campaignCustomerEarnCountError !== undefined) {
+          return { data: null, error: input.campaignCustomerEarnCountError };
+        }
+        const count = lookup(input.campaignCustomerEarnCount);
+        return { data: Array.from({ length: count }, (_, i) => ({ id: `earn-${i}` })), error: null };
+      }
+      if (input.campaignPointsAwardedError !== undefined) {
+        return { data: null, error: input.campaignPointsAwardedError };
+      }
+      const awarded = lookup(input.campaignPointsAwarded);
+      return { data: awarded > 0 ? [{ points: awarded }] : [], error: null };
     }
     return { data: [], error: null };
   };
@@ -249,6 +294,9 @@ function plan(overrides: Partial<AwardPlan> = {}): AwardPlan {
     expiresAt: null,
     verifyNoPriorFixedPerVisitEarn: false,
     dedupedFallback: null,
+    budgetChecks: [],
+    budgetRaceFallback: null,
+    maxTotalPointsCampaignIds: [],
     ...overrides,
   };
 }
@@ -257,6 +305,7 @@ beforeEach(() => {
   vi.spyOn(console, "info").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
+  pauseExhaustedCampaignsMock.mockClear();
 });
 
 afterEach(() => {
@@ -577,6 +626,7 @@ describe("campaign stacking and rule_snapshot", () => {
     timezone: "Asia/Manila",
     priority: 50,
     is_stackable: false,
+    budget: {},
   };
 
   const MULTIPLIER_RULE: PointsRuleRow = {
@@ -687,6 +737,199 @@ describe("campaign stacking and rule_snapshot", () => {
 });
 
 // ===========================================================================
+// priceReceipt: campaign budget guardrails (doc 34 section 5, task 1.2)
+// ===========================================================================
+
+describe("priceReceipt: campaign budget guardrails (task 1.2)", () => {
+  const CAPPED_CAMPAIGN: CampaignRow = {
+    id: "01980000-0000-7000-8000-0000000000cd",
+    type: "promotion",
+    status: "active",
+    starts_at: "2026-07-01T00:00:00.000Z",
+    ends_at: "2026-08-01T00:00:00.000Z",
+    timezone: "Asia/Manila",
+    priority: 50,
+    is_stackable: false,
+    budget: { max_total_points: 300 },
+  };
+
+  const BONUS_RULE: PointsRuleRow = {
+    ...BASE_RULE,
+    id: "01980000-0000-7000-8000-0000000000rb2",
+    campaign_id: CAPPED_CAMPAIGN.id,
+    kind: "bonus",
+    rate_centavos_per_point: null,
+    bonus_points: 150,
+  };
+
+  it("awards the full contribution when the campaign has room under max_total_points", async () => {
+    const supabase = createFakeSupabase({
+      pointsRules: [BASE_RULE, BONUS_RULE],
+      campaigns: [CAPPED_CAMPAIGN],
+      campaignPointsAwarded: 100, // 100 + 150 = 250 <= 300
+    });
+
+    const result = await priceReceipt({
+      deps: createDeps(supabase),
+      businessId: BUSINESS_ID,
+      receipt: RECEIPT,
+      isFirstVisit: false,
+    });
+
+    expect(result.points).toBe(190 + 150);
+    expect(result.campaignId).toBe(CAPPED_CAMPAIGN.id);
+    expect(result.budgetChecks).toEqual([{ campaignId: CAPPED_CAMPAIGN.id, points: 150 }]);
+    expect(result.maxTotalPointsCampaignIds).toEqual([CAPPED_CAMPAIGN.id]);
+    const snapshot = result.ruleSnapshot as Record<string, unknown>;
+    expect(snapshot.budget_dropped).toEqual([]);
+  });
+
+  it("drops the WHOLE contribution (never partially) when it would exceed max_total_points", async () => {
+    const supabase = createFakeSupabase({
+      pointsRules: [BASE_RULE, BONUS_RULE],
+      campaigns: [CAPPED_CAMPAIGN],
+      campaignPointsAwarded: 200, // 200 + 150 = 350 > 300
+    });
+
+    const result = await priceReceipt({
+      deps: createDeps(supabase),
+      businessId: BUSINESS_ID,
+      receipt: RECEIPT,
+      isFirstVisit: false,
+    });
+
+    // Base still pays; the bonus contribution is dropped entirely, not
+    // reduced to fit the remaining 100 points of room.
+    expect(result.points).toBe(190);
+    expect(result.campaignId).toBeNull();
+    expect(result.budgetChecks).toEqual([]);
+    expect(result.maxTotalPointsCampaignIds).toEqual([CAPPED_CAMPAIGN.id]);
+    const snapshot = result.ruleSnapshot as { budget_dropped: unknown };
+    expect(snapshot.budget_dropped).toEqual([
+      { campaign_id: CAPPED_CAMPAIGN.id, reason: "max_total_points" },
+    ]);
+  });
+
+  it("drops the contribution when the consumer already hit per_customer_limit", async () => {
+    const limited: CampaignRow = { ...CAPPED_CAMPAIGN, budget: { per_customer_limit: 1 } };
+    const supabase = createFakeSupabase({
+      pointsRules: [BASE_RULE, BONUS_RULE],
+      campaigns: [limited],
+      campaignCustomerEarnCount: 1, // already at the limit
+    });
+
+    const result = await priceReceipt({
+      deps: createDeps(supabase),
+      businessId: BUSINESS_ID,
+      receipt: RECEIPT,
+      isFirstVisit: false,
+    });
+
+    expect(result.points).toBe(190);
+    // per_customer_limit alone is not exhaustion (doc 34): the campaign is
+    // not max_total_points-capped, so it must not appear on this list.
+    expect(result.maxTotalPointsCampaignIds).toEqual([]);
+    const snapshot = result.ruleSnapshot as { budget_dropped: unknown };
+    expect(snapshot.budget_dropped).toEqual([
+      { campaign_id: limited.id, reason: "per_customer_limit" },
+    ]);
+  });
+
+  it("still awards the contribution when the consumer is under per_customer_limit", async () => {
+    const limited: CampaignRow = { ...CAPPED_CAMPAIGN, budget: { per_customer_limit: 2 } };
+    const supabase = createFakeSupabase({
+      pointsRules: [BASE_RULE, BONUS_RULE],
+      campaigns: [limited],
+      campaignCustomerEarnCount: 1,
+    });
+
+    const result = await priceReceipt({
+      deps: createDeps(supabase),
+      businessId: BUSINESS_ID,
+      receipt: RECEIPT,
+      isFirstVisit: false,
+    });
+
+    expect(result.points).toBe(190 + 150);
+    expect(result.budgetChecks).toEqual([]); // per_customer_limit alone is not RPC-rechecked
+  });
+
+  it("behaves exactly as before when the campaign carries no budget keys (no regression)", async () => {
+    const uncapped: CampaignRow = { ...CAPPED_CAMPAIGN, budget: {} };
+    const supabase = createFakeSupabase({
+      pointsRules: [BASE_RULE, BONUS_RULE],
+      campaigns: [uncapped],
+    });
+
+    const result = await priceReceipt({
+      deps: createDeps(supabase),
+      businessId: BUSINESS_ID,
+      receipt: RECEIPT,
+      isFirstVisit: false,
+    });
+
+    expect(result.points).toBe(190 + 150);
+    expect(result.budgetChecks).toEqual([]);
+    expect(result.maxTotalPointsCampaignIds).toEqual([]);
+    // No points_transactions read was ever needed: both caps are absent, so
+    // resolveCampaignBudgets never queries the running total or the count.
+    expect(supabase.opsFor("points_transactions", "select")).toHaveLength(0);
+  });
+
+  it("fails CLOSED (drops the contribution) when the running-total read errors", async () => {
+    const supabase = createFakeSupabase({
+      pointsRules: [BASE_RULE, BONUS_RULE],
+      campaigns: [CAPPED_CAMPAIGN],
+      campaignPointsAwardedError: { message: "boom" },
+    });
+
+    const result = await priceReceipt({
+      deps: createDeps(supabase),
+      businessId: BUSINESS_ID,
+      receipt: RECEIPT,
+      isFirstVisit: false,
+    });
+
+    expect(result.points).toBe(190);
+    const snapshot = result.ruleSnapshot as { budget_dropped: unknown };
+    expect(snapshot.budget_dropped).toEqual([
+      { campaign_id: CAPPED_CAMPAIGN.id, reason: "max_total_points" },
+    ]);
+  });
+
+  it("does not regress a business-default (campaign_id null) multiplier stack, no query needed", async () => {
+    // A rule with no campaign_id (a business-default multiplier, doc 34
+    // section 6) has nothing for resolveCampaignBudgets to consider at all -
+    // no campaign row lookup, no points_transactions read, identical output
+    // to pre-task-1.2 behaviour.
+    const bigReceipt: AwardReceipt = { ...RECEIPT, totalCentavos: 100_000 };
+    const rate: PointsRuleRow = { ...BASE_RULE, rate_centavos_per_point: 100 }; // 1000 points floor
+    const noCampaignMultiplier: PointsRuleRow = {
+      ...BASE_RULE,
+      id: "01980000-0000-7000-8000-0000000000rm",
+      campaign_id: null,
+      kind: "multiplier",
+      rate_centavos_per_point: null,
+      multiplier: 1.97,
+    };
+    const supabase = createFakeSupabase({ pointsRules: [rate, noCampaignMultiplier] });
+
+    const result = await priceReceipt({
+      deps: createDeps(supabase),
+      businessId: BUSINESS_ID,
+      receipt: bigReceipt,
+      isFirstVisit: false,
+    });
+
+    // 1000 base + floor(1000 * 0.97) = 1970, unaffected by task 1.2's
+    // budget-resolution pass.
+    expect(result.points).toBe(1970);
+    expect(result.budgetChecks).toEqual([]);
+    expect(supabase.opsFor("points_transactions", "select")).toHaveLength(0);
+  });
+});
+
+// ===========================================================================
 // awardPoints - the money write
 // ===========================================================================
 
@@ -781,6 +1024,234 @@ describe("awardPoints", () => {
     await awardPoints({ deps: createDeps(supabase), receiptId: RECEIPT_ID, plan: plan() });
 
     expect(supabase.rpcCalls.map((call) => call.name)).toEqual(["award_receipt_points"]);
+  });
+});
+
+// ===========================================================================
+// awardPoints: campaign budget checks + post-commit exhaustion pause
+// (doc 34 section 5, task 1.2)
+// ===========================================================================
+
+describe("awardPoints: campaign budget checks (task 1.2)", () => {
+  it("sends p_campaign_budget_checks when the plan carries surviving capped contributions", async () => {
+    const supabase = createFakeSupabase({});
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        budgetChecks: [{ campaignId: "01980000-0000-7000-8000-0000000000ca", points: 150 }],
+      }),
+    });
+
+    expect(supabase.rpcCalls[0]?.args).toMatchObject({
+      p_campaign_budget_checks: [
+        { campaign_id: "01980000-0000-7000-8000-0000000000ca", points: 150 },
+      ],
+    });
+  });
+
+  it("omits p_campaign_budget_checks entirely when there is nothing capped to re-verify", async () => {
+    const supabase = createFakeSupabase({});
+
+    await awardPoints({ deps: createDeps(supabase), receiptId: RECEIPT_ID, plan: plan() });
+
+    expect(supabase.rpcCalls[0]?.args).not.toHaveProperty("p_campaign_budget_checks");
+  });
+
+  it("calls pauseExhaustedCampaigns with maxTotalPointsCampaignIds after a successful award", async () => {
+    const supabase = createFakeSupabase({});
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({ maxTotalPointsCampaignIds: ["01980000-0000-7000-8000-0000000000ca"] }),
+    });
+
+    expect(pauseExhaustedCampaignsMock).toHaveBeenCalledTimes(1);
+    expect(pauseExhaustedCampaignsMock).toHaveBeenCalledWith(
+      { supabase: supabase.client },
+      ["01980000-0000-7000-8000-0000000000ca"],
+    );
+  });
+
+  it("does not call pauseExhaustedCampaigns when no campaign considered had a max_total_points cap", async () => {
+    const supabase = createFakeSupabase({});
+
+    await awardPoints({ deps: createDeps(supabase), receiptId: RECEIPT_ID, plan: plan() });
+
+    expect(pauseExhaustedCampaignsMock).not.toHaveBeenCalled();
+  });
+
+  it("still checks exhaustion on the zero-point path (a drop can itself be why the campaign is exhausted)", async () => {
+    const supabase = createFakeSupabase({});
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 0,
+        maxTotalPointsCampaignIds: ["01980000-0000-7000-8000-0000000000ca"],
+      }),
+    });
+
+    expect(pauseExhaustedCampaignsMock).toHaveBeenCalledWith(
+      { supabase: supabase.client },
+      ["01980000-0000-7000-8000-0000000000ca"],
+    );
+  });
+
+  it("still checks exhaustion when the award is refused for an unrelated reason", async () => {
+    const supabase = createFakeSupabase({
+      rpc: { data: null, error: { message: "CUSTOMER_BLACKLISTED" } },
+    });
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({ maxTotalPointsCampaignIds: ["01980000-0000-7000-8000-0000000000ca"] }),
+    });
+
+    expect(pauseExhaustedCampaignsMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ===========================================================================
+// awardPoints: CAMPAIGN_BUDGET_RACE recovery (task 1.2, mirrors the
+// FIXED_PER_VISIT_RACE recovery below)
+// ===========================================================================
+
+describe("awardPoints: CAMPAIGN_BUDGET_RACE recovery (task 1.2)", () => {
+  it("falls back to the zero-point path when the race fallback totals 0", async () => {
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [{ data: null, error: { message: "CAMPAIGN_BUDGET_RACE" } }],
+    });
+
+    const result = await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 340,
+        campaignId: "01980000-0000-7000-8000-0000000000ca",
+        budgetChecks: [{ campaignId: "01980000-0000-7000-8000-0000000000ca", points: 150 }],
+        budgetRaceFallback: { points: 0, ruleSnapshot: { engine: "points/v1", total_points: 0 }, campaignId: null },
+      }),
+    });
+
+    expect(supabase.rpcCalls.map((call) => call.name)).toEqual([
+      "award_receipt_points",
+      "record_receipt_visit",
+    ]);
+    expect(result).toEqual({ kind: "skipped_zero_points" });
+  });
+
+  it("retries award_receipt_points once with the race fallback when it is positive, omitting p_campaign_id and p_campaign_budget_checks", async () => {
+    const fallbackSnapshot = { engine: "points/v1", total_points: 190 };
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [
+        { data: null, error: { message: "CAMPAIGN_BUDGET_RACE" } },
+        { data: LEDGER_ROW_ID, error: null },
+      ],
+    });
+
+    const result = await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 340,
+        campaignId: "01980000-0000-7000-8000-0000000000ca",
+        expiresAt: "2027-01-01T00:00:00.000Z",
+        budgetChecks: [{ campaignId: "01980000-0000-7000-8000-0000000000ca", points: 150 }],
+        budgetRaceFallback: { points: 190, ruleSnapshot: fallbackSnapshot, campaignId: null },
+      }),
+    });
+
+    expect(supabase.rpcCalls).toHaveLength(2);
+    expect(supabase.rpcCalls[1]?.args).toEqual({
+      p_receipt_id: RECEIPT_ID,
+      p_points: 190,
+      p_rule_snapshot: fallbackSnapshot,
+      p_expires_at: "2027-01-01T00:00:00.000Z",
+    });
+    expect(result).toEqual({ kind: "awarded", points: 190, transactionId: LEDGER_ROW_ID });
+  });
+
+  it("carries the fallback's own campaignId when part of the stack survives the race", async () => {
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [
+        { data: null, error: { message: "CAMPAIGN_BUDGET_RACE" } },
+        { data: LEDGER_ROW_ID, error: null },
+      ],
+    });
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 340,
+        budgetChecks: [{ campaignId: "01980000-0000-7000-8000-0000000000ca", points: 150 }],
+        budgetRaceFallback: {
+          points: 200,
+          ruleSnapshot: { engine: "points/v1", total_points: 200 },
+          campaignId: "01980000-0000-7000-8000-0000000000cb",
+        },
+      }),
+    });
+
+    expect(supabase.rpcCalls[1]?.args).toMatchObject({
+      p_campaign_id: "01980000-0000-7000-8000-0000000000cb",
+    });
+  });
+
+  it("never re-strands the receipt: a failed retry falls to the zero-point path", async () => {
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [
+        { data: null, error: { message: "CAMPAIGN_BUDGET_RACE" } },
+        { data: null, error: { message: "CUSTOMER_BLACKLISTED" } },
+      ],
+    });
+
+    const result = await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 340,
+        budgetChecks: [{ campaignId: "01980000-0000-7000-8000-0000000000ca", points: 150 }],
+        budgetRaceFallback: { points: 190, ruleSnapshot: { engine: "points/v1" }, campaignId: null },
+      }),
+    });
+
+    expect(supabase.rpcCalls.map((call) => call.name)).toEqual([
+      "award_receipt_points",
+      "award_receipt_points",
+      "record_receipt_visit",
+    ]);
+    expect(result).toEqual({ kind: "skipped_zero_points" });
+    const update = supabase
+      .opsFor("receipts", "update")
+      .find(
+        (op) =>
+          typeof op.payload === "object" && op.payload !== null && "reject_note" in op.payload,
+      );
+    expect(update?.payload).toEqual({ reject_note: "award_retry_failed:CUSTOMER_BLACKLISTED" });
+  });
+
+  it("falls back to the zero-point path when budgetRaceFallback is null (defensive)", async () => {
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [{ data: null, error: { message: "CAMPAIGN_BUDGET_RACE" } }],
+    });
+
+    const result = await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 340,
+        budgetChecks: [{ campaignId: "01980000-0000-7000-8000-0000000000ca", points: 150 }],
+        budgetRaceFallback: null,
+      }),
+    });
+
+    expect(result).toEqual({ kind: "skipped_zero_points" });
   });
 });
 
@@ -1178,6 +1649,8 @@ describe("award RPC error handling (0018)", () => {
     "CUSTOMER_RECORD_MISSING",
     "CUSTOMER_BLACKLISTED",
     "FIXED_PER_VISIT_RACE",
+    // 0040 (task 1.2): the campaign budget guard's own non-terminal race code.
+    "CAMPAIGN_BUDGET_RACE",
   ] as const;
 
   it("maps every message 0018 raises, and nothing it does not", () => {
@@ -1208,12 +1681,16 @@ describe("award RPC error handling (0018)", () => {
     });
   });
 
-  // FIXED_PER_VISIT_RACE is deliberately excluded from this generic loop: it
-  // is the one code that is NOT a simple terminal refusal (see the dedicated
-  // "FIXED_PER_VISIT_RACE recovery (C2 fix)" describe block above), so a
-  // `plan()` with default flags does not exercise its real path here.
+  // FIXED_PER_VISIT_RACE and CAMPAIGN_BUDGET_RACE are deliberately excluded
+  // from this generic loop: both are non-terminal (see the dedicated
+  // "FIXED_PER_VISIT_RACE recovery (C2 fix)" and "CAMPAIGN_BUDGET_RACE
+  // recovery (task 1.2)" describe blocks above), so a `plan()` with default
+  // flags does not exercise either real path here.
   for (const message of MIGRATION_ERRORS.filter(
-    (code) => code !== "RECEIPT_ALREADY_AWARDED" && code !== "FIXED_PER_VISIT_RACE",
+    (code) =>
+      code !== "RECEIPT_ALREADY_AWARDED" &&
+      code !== "FIXED_PER_VISIT_RACE" &&
+      code !== "CAMPAIGN_BUDGET_RACE",
   )) {
     it(`annotates the receipt with award_failed:${message}`, async () => {
       const supabase = createFakeSupabase({ rpc: { data: null, error: { message } } });

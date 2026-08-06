@@ -1081,6 +1081,7 @@ describe("pricing (doc 35)", () => {
       timezone: "Asia/Manila",
       priority: 50,
       is_stackable: false,
+      budget: {},
     };
     const world = createWorld({
       campaigns: [campaign],
@@ -1122,6 +1123,7 @@ describe("pricing (doc 35)", () => {
       timezone: "Asia/Manila",
       priority: 50,
       is_stackable: true,
+      budget: {},
     };
     const world = createWorld({
       campaigns: [campaign],
@@ -2229,6 +2231,7 @@ describe("resolveStacking", () => {
     timezone: "Asia/Manila",
     priority: 10,
     is_stackable: false,
+    budget: {},
   };
   const stackableA: CampaignRow = { ...exclusive, id: "c-a", priority: 20, is_stackable: true };
   const stackableB: CampaignRow = { ...exclusive, id: "c-b", priority: 30, is_stackable: true };
