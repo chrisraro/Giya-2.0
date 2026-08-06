@@ -765,13 +765,17 @@ export const AWARD_ERROR_HANDLING: Record<string, AwardErrorSeverity> = {
   // is a bug in this file if it ever appears.
   AWARD_POINTS_INVALID: "error",
   AWARD_RECEIPT_ID_REQUIRED: "error",
-  // 0037/0038 (task 1.1): `priceReceipt`'s advisory precheck believed no
-  // paid fixed_per_visit earn existed yet for this visit day, but the RPC's
-  // own re-check under the business_customers lock found one that became
-  // visible after the precheck ran and before this call reached the lock -
-  // a genuine concurrent-request race, not a caller bug. `awardPoints`
-  // recovers from this automatically (see `awardAfterFixedPerVisitRace`);
-  // this severity only applies if that recovery itself somehow fails too.
+  // 0037/0038 (task 1.1): kept here for documentation/completeness only.
+  // Unlike every other entry in this map, this severity is never actually
+  // LOOKED UP: `awardPoints` intercepts `error.message === "FIXED_PER_VISIT_RACE"`
+  // before `refuseRpc` could ever be called with it, routing instead to
+  // `awardAfterFixedPerVisitRace`; and that recovery path never calls
+  // `refuseRpc` either - even a failed retry resolves through
+  // `awardZeroPoints` (the zero-point path), not through this map. The entry
+  // stays so the "every P0001 message this migration can raise is mapped"
+  // contract (and its own test) stays complete, and so the severity
+  // classification for this code is documented in one place even though it
+  // is currently unreachable via `refuseRpc`.
   FIXED_PER_VISIT_RACE: "warn",
 };
 
@@ -953,7 +957,10 @@ async function awardZeroPoints(input: {
  *
  *   - fallback total <= 0 (the common case: nothing but the fixed base was on
  *     offer) -> the zero-point path, exactly as if `priceReceipt` had priced
- *     it that way from the start.
+ *     it that way from the start. Logged at `warn` (not the zero-point
+ *     path's usual `info`), so a genuinely recovered race is grep-able and
+ *     distinguishable from an ordinary zero-price receipt that was never in
+ *     a race at all.
  *   - fallback total > 0 (an independent bonus still applies) -> retry
  *     `award_receipt_points` ONCE with the fallback's own points/snapshot.
  *     `p_verify_no_prior_fixed_visit_earn` is deliberately omitted: the prior
@@ -961,9 +968,11 @@ async function awardZeroPoints(input: {
  *     accounts for, so re-verifying would find that SAME earn and refuse
  *     again in a loop.
  *   - if that retry somehow still fails (any reason, including a second
- *     FIXED_PER_VISIT_RACE) - a terminal fallback to the zero-point path
- *     rather than ever returning to the stranded state this whole fix
- *     exists to close. The specific failure is logged, not silently lost.
+ *     FIXED_PER_VISIT_RACE) - a `reject_note: award_retry_failed:<code>`
+ *     breadcrumb is left on the receipt (best-effort) before a terminal
+ *     fallback to the zero-point path, rather than ever returning to the
+ *     stranded state this whole fix exists to close. The specific failure
+ *     is logged and annotated, not silently lost.
  */
 async function awardAfterFixedPerVisitRace(input: {
   deps: AwardDeps;
@@ -974,6 +983,13 @@ async function awardAfterFixedPerVisitRace(input: {
   const fallback = plan.dedupedFallback;
 
   if (fallback === null || fallback.points <= 0) {
+    // M-c (review): distinguish a REAL recovered race from an ordinary
+    // zero-price receipt in the logs - `awardZeroPoints` below only ever
+    // logs the generic "priced at 0 points" line, which would otherwise
+    // read identically to a receipt that was never in a race at all.
+    console.warn(
+      `[receipts/award] fixed_per_visit race recovered for receipt ${receiptId}: a prior paid earn was confirmed for this visit day, falling back to 0 points (visit still recorded)`,
+    );
     return awardZeroPoints({
       deps,
       receiptId,
@@ -995,6 +1011,23 @@ async function awardAfterFixedPerVisitRace(input: {
       `[receipts/award] retry after FIXED_PER_VISIT_RACE failed for receipt ${receiptId}; falling back to the zero-point path rather than stranding it`,
       error,
     );
+    // M-b (review): leave a row-level breadcrumb before the terminal
+    // fallback swallows this specific failure into a generic
+    // skipped_zero_points result, so support can still find WHY the retry
+    // did not land just by reading the receipt. Best-effort, like every
+    // other annotation in this module: logs and continues on its own
+    // failure rather than turning a successful visit-record into a
+    // reported error.
+    const { error: noteError } = await deps.supabase
+      .from("receipts")
+      .update({ reject_note: `award_retry_failed:${error.message}` })
+      .eq("id", receiptId);
+    if (noteError !== null) {
+      console.error(
+        `[receipts/award] could not annotate the failed retry of ${receiptId}`,
+        noteError,
+      );
+    }
     return awardZeroPoints({
       deps,
       receiptId,

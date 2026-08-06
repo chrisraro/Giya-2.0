@@ -32,7 +32,7 @@ begin;
 
 set local search_path = public, extensions;
 
-select plan(49);
+select plan(55);
 
 -- ---------------------------------------------------------------- fixtures
 -- Four fixed test users: the tenant owner, the main consumer, a blacklisted
@@ -364,6 +364,40 @@ with ins as (
   returning id
 )
 select set_config('test.rc5', (select id::text from ins), true);
+
+-- M-a fixtures (0039, re-review fix): a visit day (the 31st) whose first
+-- fixed_per_visit earn gets clawed back. A clawback never mutates or deletes
+-- the original earn row (0012: "corrections are compensating entries
+-- (reversal/adjust), never mutations") - it inserts a NEW row, type in
+-- ('clawback','reversal'), reverses_id = the earn's id, mirroring exactly
+-- what public.clawback_receipt_points (0031) itself writes. A second
+-- fixed_per_visit receipt on this SAME visit day must still pay, because the
+-- clawed-back earn never actually "paid" this visit day.
+with ins as (
+  insert into public.receipts
+    (business_id, user_id, status, image_path, image_hash, sha256,
+     receipt_date, total_centavos)
+  values (current_setting('test.biz')::uuid,
+          'c6666666-6666-4666-8666-666666666666', 'approved',
+          'c6666666-6666-4666-8666-666666666666/fpv-clawback-1.jpg', 'a0b1c2d3e4f50114',
+          'giya-award-smoke-sha-0000000000000000000000000000000000000014',
+          '2026-07-31T10:00:00Z'::timestamptz, 5000)
+  returning id
+)
+select set_config('test.rc_fpv_clawback_1', (select id::text from ins), true);
+
+with ins as (
+  insert into public.receipts
+    (business_id, user_id, status, image_path, image_hash, sha256,
+     receipt_date, total_centavos)
+  values (current_setting('test.biz')::uuid,
+          'c6666666-6666-4666-8666-666666666666', 'approved',
+          'c6666666-6666-4666-8666-666666666666/fpv-clawback-2.jpg', 'a0b1c2d3e4f50115',
+          'giya-award-smoke-sha-0000000000000000000000000000000000000015',
+          '2026-07-31T13:00:00Z'::timestamptz, 5000)
+  returning id
+)
+select set_config('test.rc_fpv_clawback_2', (select id::text from ins), true);
 
 -- ---------------------------------------------------------------- manila_day
 -- 1. the helper the visit rule is built on: 17:00Z is the NEXT Manila day
@@ -811,9 +845,56 @@ select is(
   '25',
   'omitting p_verify_no_prior_fixed_visit_earn preserves 0023 behaviour even on a same-day duplicate');
 
+-- 47-48 (M-a, 0039). A clawed-back earn must not count as "paid" for the
+-- visit-day dedupe: claw back the first receipt's earn, then a second
+-- fixed_per_visit receipt on the SAME visit day must still pay.
+select public.award_receipt_points(
+  current_setting('test.rc_fpv_clawback_1')::uuid, 10,
+  '{"engine":"points/v1","base":{"rule_type":"fixed_per_visit","fixed_per_visit_deduped":false},"total_points":10}'::jsonb,
+  p_verify_no_prior_fixed_visit_earn => true);
+
+-- the earn id, looked up rather than captured from the RPC's own return
+-- value, so this fixture reads the same way the rest of the file's
+-- non-capturing award calls do.
+select set_config('test.txn_fpv_clawback_1',
+  (select id::text from public.points_transactions
+    where receipt_id = current_setting('test.rc_fpv_clawback_1')::uuid and type = 'earn'),
+  true);
+
+-- the compensating row public.clawback_receipt_points itself would write
+-- (0031 step 7/8): a NEW row, type='clawback', reverses_id = the earn's id.
+-- balance_after is computed from the pair's current cached balance so this
+-- insert stays valid regardless of what c6666666 has already earned above.
+insert into public.points_transactions
+  (business_id, consumer_id, type, points, balance_after, reverses_id)
+select current_setting('test.biz')::uuid,
+       'c6666666-6666-4666-8666-666666666666',
+       'clawback', -10, bc.points_balance - 10,
+       current_setting('test.txn_fpv_clawback_1')::uuid
+  from public.business_customers bc
+ where bc.business_id = current_setting('test.biz')::uuid
+   and bc.consumer_id = 'c6666666-6666-4666-8666-666666666666';
+
+select is(
+  (select count(*)::int from public.points_transactions
+    where reverses_id = current_setting('test.txn_fpv_clawback_1')::uuid
+      and type = 'clawback'),
+  1,
+  'M-a setup: the clawback row against the first visit-day earn landed');
+
+select public.award_receipt_points(
+  current_setting('test.rc_fpv_clawback_2')::uuid, 10,
+  '{"engine":"points/v1","base":{"rule_type":"fixed_per_visit","fixed_per_visit_deduped":false},"total_points":10}'::jsonb,
+  p_verify_no_prior_fixed_visit_earn => true);
+
+select is(
+  (select count(*)::int from public.points_transactions
+    where receipt_id = current_setting('test.rc_fpv_clawback_2')::uuid and type = 'earn'),
+  1,
+  'M-a: a clawed-back first earn does not block a second fixed_per_visit receipt on the same visit day');
+
 -- ---------------------------------------------------------------- grants
--- 47-49 (M3 fix: corrected from a stale "46-48"/"37-38" left by earlier
--- passes). System function: only the service-role pipeline may mint points.
+-- 49-51. System function: only the service-role pipeline may mint points.
 -- Signature now carries the 0037 boolean parameter; the OLD 5-arg overload
 -- was dropped by 0037, so this is the only `award_receipt_points` in the
 -- database.
@@ -831,6 +912,32 @@ select ok(
   has_function_privilege('service_role',
     'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz, boolean)', 'EXECUTE'),
   'service_role can execute award_receipt_points');
+
+-- 52-55, I-A (re-review). The new security-definer surface (0038/0039) gets the
+-- same grant scrutiny as award_receipt_points: the public wrapper is
+-- service-role only, and the private helper it wraps is not directly
+-- reachable even by service_role (it is only ever called from inside a
+-- SECURITY DEFINER context - this wrapper, or award_receipt_points itself -
+-- matching private.apply_receipt_visit's identical posture since 0023).
+select ok(
+  not has_function_privilege('anon',
+    'public.fixed_per_visit_already_paid(uuid, uuid, date)', 'EXECUTE'),
+  'anon cannot execute public.fixed_per_visit_already_paid');
+
+select ok(
+  not has_function_privilege('authenticated',
+    'public.fixed_per_visit_already_paid(uuid, uuid, date)', 'EXECUTE'),
+  'authenticated cannot execute public.fixed_per_visit_already_paid');
+
+select ok(
+  has_function_privilege('service_role',
+    'public.fixed_per_visit_already_paid(uuid, uuid, date)', 'EXECUTE'),
+  'service_role can execute public.fixed_per_visit_already_paid');
+
+select ok(
+  not has_function_privilege('service_role',
+    'private.fixed_per_visit_already_paid(uuid, uuid, date)', 'EXECUTE'),
+  'service_role cannot execute the private fixed_per_visit_already_paid helper directly');
 
 select * from finish();
 

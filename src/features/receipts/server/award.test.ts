@@ -927,6 +927,40 @@ describe("awardPoints: FIXED_PER_VISIT_RACE recovery (C2 fix)", () => {
       "record_receipt_visit",
     ]);
     expect(result).toEqual({ kind: "skipped_zero_points" });
+
+    // M-b (review): a breadcrumb is left before the terminal fallback
+    // swallows the specific failure into a generic skipped_zero_points, so
+    // support can find WHY the retry did not land.
+    const update = supabase
+      .opsFor("receipts", "update")
+      .find(
+        (op) =>
+          typeof op.payload === "object" && op.payload !== null && "reject_note" in op.payload,
+      );
+    expect(update?.payload).toEqual({ reject_note: "award_retry_failed:CUSTOMER_BLACKLISTED" });
+  });
+
+  it("warns (not just info) when a genuine race is recovered via the zero-point fallback (M-c)", async () => {
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [{ data: null, error: { message: "FIXED_PER_VISIT_RACE" } }],
+    });
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 10,
+        verifyNoPriorFixedPerVisitEarn: true,
+        dedupedFallback: {
+          points: 0,
+          ruleSnapshot: { engine: "points/v1", base: { fixed_per_visit_deduped: true, points: 0 } },
+        },
+      }),
+    });
+
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining(`fixed_per_visit race recovered for receipt ${RECEIPT_ID}`),
+    );
   });
 
   it("falls back to the zero-point path when dedupedFallback is null (defensive: should not happen if verify was true)", async () => {
