@@ -175,6 +175,31 @@ export interface LlmUsage {
  */
 export type LlmMeter = (usage: LlmUsage) => void | Promise<void>;
 
+/**
+ * WHY the gateway declined to call the model at all - review finding #4.
+ * The fail-soft contract at the top of this file is not renegotiable: every
+ * caller still gets `null` for a kill-switch refusal, a budget refusal, a
+ * timeout, a malformed body, all of it, indistinguishably, and that is by
+ * design (golden rule 5: AI augments, never decides, so a caller must never
+ * branch on WHY the model had nothing to add). What #4 identifies is a
+ * narrower, real gap: `null` also makes it impossible for an OPERATOR to
+ * tell "the cap I set is biting" apart from "Groq is having a bad day" by
+ * reading anything this pipeline persists, which cuts against doc 38's own
+ * "a bad model day is a toggle, not a deploy" - a toggle you cannot observe
+ * taking effect is not a very useful toggle.
+ *
+ * `onGatewaySkip` is the answer that keeps both true: an OPT-IN hook, fired
+ * only for the two refusals THIS module's own gates produce (never for a
+ * provider-side failure, which stays genuinely one thing: "the model had
+ * nothing to add"), that a caller may use to record a MORE SPECIFIC reason
+ * somewhere it persists - `receipts/server/process.ts#runParseAssist` writes
+ * it into `parse_meta.assist.reason` instead of the generic
+ * `"no_model_response"` / `"injection_screen_unavailable"`. It never affects
+ * the return value and a caller that ignores it sees identical behavior to
+ * before this existed.
+ */
+export type GatewaySkipReason = "flag_off" | "budget_exceeded";
+
 /** Test seams, mirroring the shape of the OCR http client's config. */
 interface LlmSeams {
   /** Injected in tests; defaults to the global fetch. */
@@ -196,6 +221,14 @@ export interface LlmCallOptions extends LlmSeams {
   /** `ai_usage_events.kind` for this call. Defaults to `parse_assist`. */
   readonly kind?: AiUsageKind;
   readonly meter?: LlmMeter;
+  /** See `GatewaySkipReason`'s own doc (review finding #4). Fired, never
+   * awaited, for a kill-switch or budget refusal ONLY - never for a
+   * provider-side failure. Explicitly `| undefined` (not just `?`) because
+   * `tsconfig`'s `exactOptionalPropertyTypes` distinguishes "absent" from
+   * "present but undefined", and callers that forward an optional
+   * upstream parameter (e.g. `receipts/server/process.ts`) legitimately
+   * pass the latter. */
+  readonly onGatewaySkip?: ((reason: GatewaySkipReason) => void) | undefined;
   /**
    * Doc 38 section 10 budget cap, expressed as the tenant's REMAINING daily
    * allowance in micro-USD. When the worst-case estimated cost of this call
@@ -209,10 +242,13 @@ export interface LlmCallOptions extends LlmSeams {
   /**
    * The tenant this call is FOR, for the doc 38 section 1 kill switch (n/a -
    * that check is unconditional) and the doc 38 section 10 Redis budget
-   * cap (`src/lib/ai/budget.ts`). Optional, and `null`/omitted both mean "no
-   * tenant to scope a budget against" - see `checkAiBudget`'s own doc for why
-   * that is "allowed" rather than "refused": a receipt with no matched
-   * business (doc 36 Stage 5) has no per-business cap to have exceeded.
+   * cap (`src/lib/ai/budget.ts`). Optional, and `null`/omitted is NOT
+   * unbudgeted: `checkAiBudget` pools every call with no business id into a
+   * single shared daily bucket capped by the platform-scope `ai.budget` row
+   * (review finding I2 - null is reachable by a consumer simply omitting
+   * `business_id` on submit, not only by doc 36 Stage 5's "no tenant
+   * matched" outcome, so it must never read as "no cap"). See that
+   * module's own header for the fallback-bucket argument.
    */
   readonly businessId?: string | null;
 }
@@ -410,6 +446,24 @@ async function reportUsage(meter: LlmMeter | undefined, usage: LlmUsage): Promis
   }
 }
 
+/** Fire `onGatewaySkip`, synchronously and safely - see that field's own
+ * doc (review finding #4). Deliberately NOT awaited even if the callback
+ * returns a promise: unlike `meter`, nothing downstream depends on this
+ * having landed before `chat()` returns, and a caller that wants to persist
+ * something durable (as `runParseAssist` does) is responsible for its own
+ * ordering, the same way it already is for `meter`. */
+function reportGatewaySkip(
+  callback: ((reason: GatewaySkipReason) => void) | undefined,
+  reason: GatewaySkipReason,
+): void {
+  if (callback === undefined) return;
+  try {
+    callback(reason);
+  } catch (error) {
+    console.error(`${LOG_PREFIX} onGatewaySkip callback threw`, error);
+  }
+}
+
 interface ChatRequest extends LlmCallOptions {
   readonly messages: readonly ChatMessage[];
   readonly jsonMode: boolean;
@@ -440,6 +494,7 @@ async function chat(request: ChatRequest): Promise<ChatOutcome | null> {
     const killSwitchFlag = KILL_SWITCH_FLAG_BY_KIND[kind];
     if (killSwitchFlag !== undefined && !(await isFeatureEnabled(killSwitchFlag))) {
       console.warn(`${LOG_PREFIX} feature flag "${killSwitchFlag}" is off; skipping the LLM call`);
+      reportGatewaySkip(request.onGatewaySkip, "flag_off");
       return null;
     }
 
@@ -469,6 +524,7 @@ async function chat(request: ChatRequest): Promise<ChatOutcome | null> {
           `${LOG_PREFIX} AI budget exceeded for business ${businessId ?? "(none)"}: ` +
             `${budget.spentMicros} spent + ${estimate} estimated > ${budget.capMicros} cap; skipping the LLM call`,
         );
+        reportGatewaySkip(request.onGatewaySkip, "budget_exceeded");
         return null;
       }
     }

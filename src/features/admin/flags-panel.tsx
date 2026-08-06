@@ -113,7 +113,8 @@ export function FlagTogglePanel({ flagKey, isEnabled, canAct }: FlagTogglePanelP
           <p className="text-body-s text-on-surface-variant">
             Recorded in the audit log as flag.updated. This is a platform-wide
             switch: every receipt, chat and analytics call the switch covers
-            starts routing to its documented fallback immediately.
+            starts routing to its documented fallback within 30 seconds - the
+            gateway&apos;s cache TTL, not a deploy.
           </p>
           <div>
             <Button

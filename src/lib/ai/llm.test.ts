@@ -1458,13 +1458,18 @@ describe("the budget cap (doc 38 section 1 step 2, section 10)", () => {
     // tenant, and a receipt's business could never be budget-capped.
   });
 
-  it("treats an omitted businessId as null, scoping nothing", async () => {
+  it("passes an omitted businessId through as literal null (budget.ts, not this module, decides what null means)", async () => {
     const doFetch = fetchReturning(groqBody());
 
     await completeJson({ prompt: PROMPT, schema: PARSE_SCHEMA, fetchImpl: asFetch(doFetch) });
 
     const call = at(mocks.checkAiBudget.mock.calls, 0)[0] as unknown as { businessId: string | null };
     expect(call.businessId).toBeNull();
+    // Named mutant: coerce a missing businessId to a placeholder string
+    // (e.g. "") instead of `null` before calling checkAiBudget. Killed -
+    // budget.ts's own pooled-bucket resolution (`scopeKeyOf`) keys
+    // specifically on `null`, per its own test suite; a placeholder string
+    // here would silently create a second, un-pooled scope.
   });
 
   it("does not check the budget for a kind with no registered flag (ocr)", async () => {
@@ -1564,5 +1569,99 @@ describe("the budget cap (doc 38 section 1 step 2, section 10)", () => {
     // answer instead of "the gateway declined to call the model".
     expect(capped).toBeNull();
     expect(flaggedOff).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// onGatewaySkip (review finding #4): making the gateway's OWN refusals
+// distinguishable in-band from a provider-side failure, without changing
+// the fail-soft return value.
+// ---------------------------------------------------------------------------
+
+describe("onGatewaySkip (review finding #4)", () => {
+  it("fires with 'flag_off' when the kill switch refuses the call, and the model is still never contacted", async () => {
+    mocks.flagEnabled.value = false;
+    const doFetch = fetchReturning(groqBody());
+    const onGatewaySkip = vi.fn();
+
+    const result = await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      onGatewaySkip,
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(result).toBeNull();
+    expect(doFetch).not.toHaveBeenCalled();
+    expect(onGatewaySkip).toHaveBeenCalledWith("flag_off");
+    expect(onGatewaySkip).toHaveBeenCalledTimes(1);
+    // Named mutant: drop the `reportGatewaySkip(...)` call from the
+    // kill-switch branch (or fire it with the wrong reason, e.g.
+    // "budget_exceeded"). Killed by the exact-argument assertion - a caller
+    // that persists this value to tell "the switch is off" apart from
+    // "Groq is down" would otherwise record the wrong story or none at all.
+  });
+
+  it("fires with 'budget_exceeded' when the budget cap refuses the call", async () => {
+    mocks.budgetAllowed.value = false;
+    const doFetch = fetchReturning(groqBody());
+    const onGatewaySkip = vi.fn();
+
+    await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      onGatewaySkip,
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(onGatewaySkip).toHaveBeenCalledWith("budget_exceeded");
+    expect(onGatewaySkip).toHaveBeenCalledTimes(1);
+  });
+
+  it("never fires for a provider-side failure - the two refusal classes stay genuinely distinct", async () => {
+    const doFetch = fetchReturning({}, 500); // exhausts retries -> null, but NOT a gateway refusal
+    const onGatewaySkip = vi.fn();
+
+    const result = await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      maxAttempts: 1,
+      onGatewaySkip,
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(result).toBeNull();
+    expect(onGatewaySkip).not.toHaveBeenCalled();
+    // Named mutant: fire onGatewaySkip for EVERY null return, not only the
+    // gateway's own two gates (e.g. move the call into the shared fail-soft
+    // catch at the bottom of `chat()`). Killed - a caller would then be
+    // unable to tell a real provider outage apart from a deliberate flag
+    // flip, which is the exact confusion #4 exists to remove.
+  });
+
+  it("does not throw, and still returns null, when the callback itself throws", async () => {
+    mocks.flagEnabled.value = false;
+    const doFetch = fetchReturning(groqBody());
+    const onGatewaySkip = vi.fn(() => {
+      throw new Error("caller's persistence layer is down");
+    });
+
+    await expect(
+      completeJson({ prompt: PROMPT, schema: PARSE_SCHEMA, onGatewaySkip, fetchImpl: asFetch(doFetch) }),
+    ).resolves.toBeNull();
+    // Named mutant: remove the try/catch around the callback invocation.
+    // Killed - a throwing hook would otherwise reject the whole call,
+    // breaking the fail-soft contract for a caller that opted into an
+    // observability hook and nothing more.
+  });
+
+  it("does nothing when no onGatewaySkip is supplied (the default, ~every existing test in this file)", async () => {
+    mocks.flagEnabled.value = false;
+    const doFetch = fetchReturning(groqBody());
+
+    // No `onGatewaySkip` in the request at all - must not throw for lack of one.
+    await expect(
+      completeJson({ prompt: PROMPT, schema: PARSE_SCHEMA, fetchImpl: asFetch(doFetch) }),
+    ).resolves.toBeNull();
   });
 });

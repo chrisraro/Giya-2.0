@@ -68,6 +68,27 @@ import { createServiceRoleClient } from "@/lib/supabase/service";
 // service integration is out of this task's scope (feature-flags, kill
 // switch, budget CAPS), and a warning that never fires is strictly less
 // dangerous than a cap that never enforces.
+//
+// -----------------------------------------------------------------------------
+// THE "NO MATCHED BUSINESS" BUCKET (review finding I2)
+// -----------------------------------------------------------------------------
+// A receipt with no matched business is NOT exempt from the cap. The first
+// version of this module treated `businessId === null` as "nothing to scope
+// a budget against" and returned `allowed: true` unconditionally - but null
+// is not only doc 36 Stage 5's rare "no tenant matched" outcome, it is also
+// what `receipts/server/submit.ts` writes whenever a consumer simply OMITS
+// `business_id` on submit (that field is `z.string().uuid().optional()`).
+// That made the cap trivially bypassable by client input, not merely by a
+// pipeline fallback - exactly the hole this task exists to close.
+//
+// So every call with no business id is pooled into ONE shared bucket,
+// `NO_BUSINESS_BUCKET` below, capped by the PLATFORM-scope `ai.budget` row
+// (never a business override, because no real business id can ever equal
+// the sentinel). This is doc 38's own key shape, not a bespoke mechanism:
+// the doc's key is `{business_id}`-scoped, and a fixed sentinel is a legal
+// value for that slot. It costs no new code path - `checkAiBudget` and
+// `recordAiSpend` both resolve a "scope key" first and are otherwise
+// unchanged for a real business id.
 // ===========================================================================
 
 const LOG_PREFIX = "[ai/budget]";
@@ -154,7 +175,22 @@ export function resolveAiBudgetSetting(
   return DEFAULT_AI_BUDGET;
 }
 
-async function loadAiBudgetSetting(businessId: string): Promise<AiBudgetSetting> {
+/**
+ * The `ai.budget` setting, uncached. Three independent ways this returns
+ * `DEFAULT_AI_BUDGET` instead of the configured row, and review finding I1
+ * is that the first version of this module only had a TEST for the first
+ * of them:
+ *   1. no service-role key configured at all;
+ *   2. the query itself comes back with `error !== null` (a live Postgres
+ *      fault, not an absent credential);
+ *   3. the query THROWS (a network fault before any response, the outer
+ *      try/catch's job).
+ * All three must degrade to the documented default, never to "no cap" - see
+ * the module header. `loadAiBudgetSettingCached` below is what callers
+ * actually use; this is kept as its own function so each of the three
+ * branches is independently testable without fighting the cache.
+ */
+async function loadAiBudgetSetting(scopeKey: string): Promise<AiBudgetSetting> {
   try {
     const supabase = createServiceRoleClient();
     if (supabase === null) {
@@ -162,22 +198,71 @@ async function loadAiBudgetSetting(businessId: string): Promise<AiBudgetSetting>
       return DEFAULT_AI_BUDGET;
     }
 
-    const { data, error } = await supabase
+    // `business_id` is a uuid column. The sentinel scope key
+    // (`NO_BUSINESS_BUCKET`) is deliberately NOT a uuid, so it must never
+    // reach a `business_id.eq.<scopeKey>` filter - PostgREST would try to
+    // cast it and every unmatched-business call would error on 22P02
+    // (invalid uuid syntax) instead of cleanly resolving the platform row.
+    const query = supabase
       .from("settings")
       .select("scope, business_id, key, value")
-      .eq("key", AI_BUDGET_SETTING_KEY)
-      .or(`business_id.is.null,business_id.eq.${businessId}`);
+      .eq("key", AI_BUDGET_SETTING_KEY);
+    const { data, error } =
+      scopeKey === NO_BUSINESS_BUCKET
+        ? await query.is("business_id", null)
+        : await query.or(`business_id.is.null,business_id.eq.${scopeKey}`);
 
     if (error !== null) {
       console.error(`${LOG_PREFIX} settings read failed; using the default AI budget`, error);
       return DEFAULT_AI_BUDGET;
     }
 
-    return resolveAiBudgetSetting((data ?? []) as AiBudgetSettingsRow[], businessId);
+    return resolveAiBudgetSetting((data ?? []) as AiBudgetSettingsRow[], scopeKey);
   } catch (unexpected) {
     console.error(`${LOG_PREFIX} settings read threw; using the default AI budget`, unexpected);
     return DEFAULT_AI_BUDGET;
   }
+}
+
+// ---------------------------------------------------------------------------
+// The settings cache (30s, same TTL as src/lib/flags.ts's kill-switch cache)
+// ---------------------------------------------------------------------------
+//
+// Review finding #3: the SPEND COUNTER (`checkAiBudget`'s Redis read) must
+// stay live on every call - it is money-adjacent and caching it would let a
+// call slip through on a stale "not yet over cap" read. The SETTING is a
+// different kind of data: a slow-moving cap an operator tunes, structurally
+// identical to a `feature_flags` row, and `screenForInjection` alone can
+// call `checkAiBudget` up to six times for one receipt (one per overlap
+// window) plus once more for `extract` - up to seven settings reads for a
+// single scan with no cap change between them. Caching the SETTING (never
+// the spend) closes that asymmetry the same way `flags.ts` already does for
+// `is_enabled`, and for the identical reason: it is tolerant of a few
+// seconds' staleness and the alternative is a database round trip on every
+// gated call.
+const SETTING_CACHE_TTL_MS = 30_000;
+
+interface SettingCacheEntry {
+  readonly setting: AiBudgetSetting;
+  readonly expiresAt: number;
+}
+
+const settingCache = new Map<string, SettingCacheEntry>();
+
+async function loadAiBudgetSettingCached(scopeKey: string): Promise<AiBudgetSetting> {
+  const now = Date.now();
+  const cached = settingCache.get(scopeKey);
+  if (cached !== undefined && cached.expiresAt > now) return cached.setting;
+
+  const setting = await loadAiBudgetSetting(scopeKey);
+  settingCache.set(scopeKey, { setting, expiresAt: now + SETTING_CACHE_TTL_MS });
+  return setting;
+}
+
+/** Test-only: clears the setting cache between test cases. Production code
+ * has no reason to call this. */
+export function __resetAiBudgetSettingCacheForTests(): void {
+  settingCache.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -199,10 +284,22 @@ export function manilaBudgetDay(instant: Date): string {
   }).format(instant);
 }
 
+/**
+ * The scope key for a call with NO matched business - review finding I2.
+ * Deliberately NOT a valid uuid (`business_id`'s column type), so it can
+ * never collide with a real tenant and a settings query scoped to it must
+ * skip the uuid-comparing filter (see `loadAiBudgetSetting`). Every such
+ * call is pooled into this ONE shared daily counter, capped by the
+ * platform-scope `ai.budget` row - see the module header for why this is
+ * not exemption, it is a fallback bucket.
+ */
+const NO_BUSINESS_BUCKET = "unmatched";
+
 /** Doc 38 section 1's key shape, verbatim: `{env}:ai:budget:{business_id}:
- * {yyyymmdd}`. `redisKey` supplies the `{env}` prefix. */
-function budgetRedisKey(businessId: string, day: string): string {
-  return redisKey("ai", "budget", businessId, day);
+ * {yyyymmdd}`. `redisKey` supplies the `{env}` prefix. `scopeKey` is either
+ * a real business id or `NO_BUSINESS_BUCKET`. */
+function budgetRedisKey(scopeKey: string, day: string): string {
+  return redisKey("ai", "budget", scopeKey, day);
 }
 
 /** A little over a day: the key only ever needs to answer for the CURRENT
@@ -222,28 +319,26 @@ export interface AiBudgetCheck {
   readonly spentMicros: number;
 }
 
+/** `businessId` -> the key every Redis/settings read in this module scopes
+ * by: the real id, or `NO_BUSINESS_BUCKET` (review finding I2 - null must
+ * still be capped, pooled, never exempt). */
+function scopeKeyOf(businessId: string | null): string {
+  return businessId ?? NO_BUSINESS_BUCKET;
+}
+
 /**
  * Doc 38 section 1 step 2, pre-call: would this call's worst-case cost push
- * today's spend for `businessId` past the configured cap?
- *
- * `businessId === null` (a receipt with no matched business) is ALLOWED
- * unconditionally: doc 38's cap is a per-BUSINESS daily cost, and there is no
- * tenant to charge a spend against or to protect from one. This is the same
- * shape the existing (unused until now) `LlmCallOptions.budgetMicros`
- * contract already had - "Omitted means unbudgeted" - applied to the one
- * case this module cannot scope at all.
+ * today's spend for `businessId` (or the shared unmatched-business bucket,
+ * see `NO_BUSINESS_BUCKET`) past the configured cap?
  */
 export async function checkAiBudget(input: {
   readonly businessId: string | null;
   readonly estimatedCostMicros: number;
   readonly now: Date;
 }): Promise<AiBudgetCheck> {
-  if (input.businessId === null) {
-    return { allowed: true, capMicros: Number.POSITIVE_INFINITY, spentMicros: 0 };
-  }
-
-  const setting = await loadAiBudgetSetting(input.businessId);
-  const key = budgetRedisKey(input.businessId, manilaBudgetDay(input.now));
+  const scopeKey = scopeKeyOf(input.businessId);
+  const setting = await loadAiBudgetSettingCached(scopeKey);
+  const key = budgetRedisKey(scopeKey, manilaBudgetDay(input.now));
 
   let spentMicros: number;
   try {
@@ -269,7 +364,8 @@ export async function checkAiBudget(input: {
 
 /**
  * Doc 38 section 1 step 6 counterpart: record a call's ACTUAL metered cost
- * against today's counter for `businessId`, after the call completed.
+ * against today's counter for `businessId` (or the shared unmatched-business
+ * bucket), after the call completed.
  *
  * Never throws - a metering failure here must cost the counter's accuracy,
  * never the answer the caller already paid Groq for (same posture
@@ -280,9 +376,9 @@ export async function recordAiSpend(input: {
   readonly costMicros: number;
   readonly now: Date;
 }): Promise<void> {
-  if (input.businessId === null || input.costMicros <= 0) return;
+  if (input.costMicros <= 0) return;
 
-  const key = budgetRedisKey(input.businessId, manilaBudgetDay(input.now));
+  const key = budgetRedisKey(scopeKeyOf(input.businessId), manilaBudgetDay(input.now));
   try {
     await incrby(key, input.costMicros);
     await expireNx(key, BUDGET_KEY_TTL_SECONDS);

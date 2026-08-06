@@ -4,7 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 
 import { completeJson, screenForInjection } from "@/lib/ai/llm";
-import type { InjectionScreenResult, LlmMeter, LlmUsage } from "@/lib/ai/llm";
+import type { GatewaySkipReason, InjectionScreenResult, LlmMeter, LlmUsage } from "@/lib/ai/llm";
 import { expireNx, get as redisGet, incr, redisKey, setNx } from "@/lib/redis";
 import { createServiceRoleClient } from "@/lib/supabase/service";
 import type { Database, Json } from "@/lib/supabase/types";
@@ -340,23 +340,34 @@ export interface ReceiptAiDeps {
    * matched), threaded through so the production wiring
    * (`defaultReceiptAiDeps`) can scope the doc 38 section 10 Redis budget cap
    * to the right tenant. A fake in a test may ignore it.
+   *
+   * `onGatewaySkip`, when the gateway's OWN kill-switch or budget gate
+   * refused the call (never fired for a provider-side failure - see
+   * `GatewaySkipReason`'s own doc, review finding #4), lets
+   * `runParseAssist` persist a more specific `parse_meta.assist.reason`
+   * than the generic `"injection_screen_unavailable"` it would otherwise
+   * fall back to, so an admin reading a receipt's review payload can tell
+   * "the switch was off" apart from "Groq was down that day".
    */
   screenForInjection: (
     text: string,
     meter: LlmMeter,
     businessId: string | null,
+    onGatewaySkip?: (reason: GatewaySkipReason) => void,
   ) => Promise<InjectionScreenResult | null>;
   /**
    * One layout-guided extraction. The return value is the model's CANDIDATE,
    * shape-checked only; `validateExtraction` is what decides whether any of it
    * is true, and this pipeline never reads it directly.
    *
-   * `businessId`: see `screenForInjection`'s note above - identical reason.
+   * `businessId` and `onGatewaySkip`: see `screenForInjection`'s notes above
+   * - identical reasons.
    */
   extract: (
     messages: readonly ExtractionMessage[],
     meter: LlmMeter,
     businessId: string | null,
+    onGatewaySkip?: (reason: GatewaySkipReason) => void,
   ) => Promise<ExtractionCandidate | null>;
 }
 
@@ -498,9 +509,9 @@ export function findRivalMerchants(
 export function defaultReceiptAiDeps(): ReceiptAiDeps {
   return {
     embedText: (text) => embedText(text),
-    screenForInjection: (text, meter, businessId) =>
-      screenForInjection(text, { meter, businessId }),
-    extract: (messages, meter, businessId) =>
+    screenForInjection: (text, meter, businessId, onGatewaySkip) =>
+      screenForInjection(text, { meter, businessId, onGatewaySkip }),
+    extract: (messages, meter, businessId, onGatewaySkip) =>
       completeJson({
         // buildExtractionPrompt owns the system slot (the standing rules) and
         // the user slot (the fenced, attacker-controlled receipt text); this
@@ -511,6 +522,7 @@ export function defaultReceiptAiDeps(): ReceiptAiDeps {
         prompt: messages.find((message) => message.role === "user")?.content ?? "",
         schema: extractionCandidateSchema,
         kind: "parse_assist",
+        onGatewaySkip,
         meter,
         businessId,
       }),
@@ -1079,6 +1091,16 @@ function refusalTrace(result: ExtractionResult): Record<string, string> {
   return refusals;
 }
 
+/** Review finding #4: a more specific `parse_meta.assist.reason` than the
+ * generic fallback, for the two skip reasons `src/lib/ai/llm.ts` can report
+ * through `onGatewaySkip` - "the switch was off" and "the cap was hit" are
+ * both things an admin reading a receipt's review payload should be able to
+ * tell apart from an ordinary provider outage. */
+const GATEWAY_SKIP_TRACE_REASON: Record<GatewaySkipReason, string> = {
+  flag_off: "ai_kill_switch_off",
+  budget_exceeded: "ai_budget_exceeded",
+};
+
 async function runParseAssist(input: ParseAssistInput): Promise<ParseAssistResult> {
   const { deps, receipt, response, template, parsed } = input;
 
@@ -1088,6 +1110,16 @@ async function runParseAssist(input: ParseAssistInput): Promise<ParseAssistResul
     signals: [],
     trace: { ran: false, reason },
   });
+
+  // Set by `onGatewaySkip` below, ONLY when llm.ts's own kill-switch or
+  // budget gate refused the call - never for a provider-side failure. Read
+  // by both null-branches below (screen, then extract) in place of their
+  // generic fallback reason, so the distinction survives into what an
+  // admin actually reads on this receipt, not only into a server log line.
+  let gatewaySkipReason: GatewaySkipReason | null = null;
+  const onGatewaySkip = (reason: GatewaySkipReason): void => {
+    gatewaySkipReason = reason;
+  };
 
   if (deps.ai === undefined) return skip("ai_unavailable");
 
@@ -1111,7 +1143,12 @@ async function runParseAssist(input: ParseAssistInput): Promise<ParseAssistResul
 
   // Spec 4.2's trailing paragraph: the OCR text is attacker-controlled and is
   // screened before it reaches the extraction prompt.
-  const screen = await deps.ai.screenForInjection(response.rawText, meter, receipt.business_id);
+  const screen = await deps.ai.screenForInjection(
+    response.rawText,
+    meter,
+    receipt.business_id,
+    onGatewaySkip,
+  );
 
   if (screen === null) {
     // THE SCREEN DID NOT RUN, which llm.ts is explicit is not a pass. It is
@@ -1122,7 +1159,12 @@ async function runParseAssist(input: ParseAssistInput): Promise<ParseAssistResul
     // raised: with no LLM output in the parse there is nothing about this
     // receipt for a reviewer to be suspicious of, and raising one here would
     // put every receipt in the queue on the day a token expires.
-    return skip("injection_screen_unavailable");
+    //
+    // review finding #4: UNLESS the gateway's own kill switch or budget cap
+    // is why - that IS worth a distinct, in-band reason (still no signal:
+    // an operator's own deliberate action is not evidence about the
+    // consumer either).
+    return skip(gatewaySkipReason === null ? "injection_screen_unavailable" : GATEWAY_SKIP_TRACE_REASON[gatewaySkipReason]);
   }
 
   if (screen.flagged) {
@@ -1163,12 +1205,14 @@ async function runParseAssist(input: ParseAssistInput): Promise<ParseAssistResul
     parseConfig: template?.config,
   });
 
-  const candidate = await deps.ai.extract(messages, meter, receipt.business_id);
+  const candidate = await deps.ai.extract(messages, meter, receipt.business_id, onGatewaySkip);
   if (candidate === null) {
     // Timeout, 429, a body that failed the schema, a reasoning model, no key.
     // llm.ts collapses all of them to null on purpose, and the deterministic
-    // result passes through untouched.
-    return skip("no_model_response");
+    // result passes through untouched. Review finding #4: except a
+    // kill-switch/budget refusal, which gets its own reason - see the
+    // identical branch above.
+    return skip(gatewaySkipReason === null ? "no_model_response" : GATEWAY_SKIP_TRACE_REASON[gatewaySkipReason]);
   }
 
   const result = validateExtraction({

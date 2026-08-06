@@ -25,6 +25,7 @@ vi.mock("@/lib/redis", () => ({
 
 import {
   DEFAULT_AI_BUDGET,
+  __resetAiBudgetSettingCacheForTests,
   checkAiBudget,
   manilaBudgetDay,
   recordAiSpend,
@@ -34,6 +35,11 @@ import type { AiBudgetSettingsRow } from "./budget";
 
 const BUSINESS_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_BUSINESS_ID = "22222222-2222-4222-8222-222222222222";
+/** Mirrors budget.ts's own private `NO_BUSINESS_BUCKET` sentinel. Not
+ * imported (it is intentionally unexported - see the module's I2 note) so
+ * this constant is redeclared, the same way `redisKey`'s `test:` prefix is
+ * hardcoded rather than imported. */
+const NO_BUSINESS_BUCKET = "unmatched";
 
 function platformRow(value: unknown): AiBudgetSettingsRow {
   return { scope: "platform", business_id: null, key: "ai.budget", value };
@@ -49,6 +55,9 @@ beforeEach(() => {
   incrby.mockReset();
   expireNx.mockReset();
   createServiceRoleClient.mockReset();
+  // The settings cache is module-level state (review finding #3's fix) and
+  // would otherwise leak a cached setting from one test into the next.
+  __resetAiBudgetSettingCacheForTests();
 });
 
 afterEach(() => {
@@ -150,6 +159,8 @@ describe("resolveAiBudgetSetting", () => {
 // checkAiBudget
 // ---------------------------------------------------------------------------
 
+/** A settings client for a REAL business id: `loadAiBudgetSetting` issues
+ * `.or("business_id.is.null,business_id.eq.<id>")` for this path. */
 function settingsClient(row: unknown) {
   return {
     from: (table: string) => {
@@ -165,21 +176,112 @@ function settingsClient(row: unknown) {
   };
 }
 
+/** A settings client for the `NO_BUSINESS_BUCKET` sentinel:
+ * `loadAiBudgetSetting` must route this scope through `.is("business_id",
+ * null)`, never through `.eq("business_id", "unmatched")` - that column is
+ * `uuid`, and PostgREST would 22P02 on a non-uuid comparison value. */
+function platformOnlySettingsClient(row: unknown) {
+  return {
+    from: (table: string) => {
+      expect(table).toBe("settings");
+      return {
+        select: () => ({
+          eq: () => ({
+            is: (column: string, value: unknown) => {
+              expect(column).toBe("business_id");
+              expect(value).toBeNull();
+              return Promise.resolve({ data: row === undefined ? [] : [row], error: null });
+            },
+            // Present so a mutant that keeps using `.or(...)` for the
+            // sentinel path still gets a response shape it can await,
+            // rather than crashing before the "wrong branch" assertion
+            // below has a chance to fail honestly.
+            or: () => Promise.resolve({ data: row === undefined ? [] : [row], error: null }),
+          }),
+        }),
+      };
+    },
+  };
+}
+
+/** A settings client whose query resolves with a Postgres-shaped error
+ * object (`{data: null, error: {...}}`) - review finding I1's first
+ * uncovered branch: `error !== null` from a LIVE query, not from an absent
+ * service-role key. */
+function erroringSettingsClient(error: { message: string }) {
+  return {
+    from: (table: string) => {
+      expect(table).toBe("settings");
+      return {
+        select: () => ({
+          eq: () => ({
+            or: () => Promise.resolve({ data: null, error }),
+            is: () => Promise.resolve({ data: null, error }),
+          }),
+        }),
+      };
+    },
+  };
+}
+
+/** A settings client whose query THROWS synchronously (or rejects) before
+ * ever producing a `{data, error}` shape - review finding I1's second
+ * uncovered branch, the outer try/catch. */
+function throwingSettingsClient(error: Error) {
+  return {
+    from: () => {
+      throw error;
+    },
+  };
+}
+
 describe("checkAiBudget", () => {
-  it("allows unconditionally when businessId is null, and touches neither Redis nor settings", async () => {
+  it("pools a call with no matched business into the shared unmatched-business bucket, and CAPS it (review finding I2)", async () => {
+    createServiceRoleClient.mockReturnValue(
+      platformOnlySettingsClient({
+        scope: "platform",
+        business_id: null,
+        key: "ai.budget",
+        value: { business_daily_cost_micros: 1_000 },
+      }),
+    );
+    redisGet.mockResolvedValue("999");
+
     const result = await checkAiBudget({
       businessId: null,
-      estimatedCostMicros: 999_999_999,
+      estimatedCostMicros: 2,
       now: new Date("2026-08-06T00:00:00.000Z"),
     });
 
-    expect(result.allowed).toBe(true);
-    expect(redisGet).not.toHaveBeenCalled();
-    expect(createServiceRoleClient).not.toHaveBeenCalled();
-    // Named mutant: check the cap even when businessId is null (e.g. scope
-    // the redis key by a placeholder like "none"). Killed by the two
-    // not-toHaveBeenCalled assertions - an unscoped receipt must never
-    // trigger a settings or Redis round trip.
+    expect(redisGet).toHaveBeenCalledWith(`test:ai:budget:${NO_BUSINESS_BUCKET}:2026-08-06`);
+    expect(result).toEqual({ allowed: false, capMicros: 1_000, spentMicros: 999 });
+    // Named mutant: keep the OLD `if (input.businessId === null) return
+    // {allowed: true, capMicros: Infinity, ...}` short-circuit. Killed - a
+    // consumer who simply omits `business_id` on submit
+    // (receipts/server/submit.ts's field is optional) would spend against
+    // no cap at all, which is the exact hole this task exists to close.
+  });
+
+  it("shares ONE counter across every unmatched-business call, not one per call", async () => {
+    createServiceRoleClient.mockReturnValue(
+      platformOnlySettingsClient({
+        scope: "platform",
+        business_id: null,
+        key: "ai.budget",
+        value: { business_daily_cost_micros: 1_000 },
+      }),
+    );
+    redisGet.mockResolvedValue("0");
+
+    await checkAiBudget({ businessId: null, estimatedCostMicros: 1, now: new Date("2026-08-06T00:00:00.000Z") });
+    await checkAiBudget({ businessId: null, estimatedCostMicros: 1, now: new Date("2026-08-06T01:00:00.000Z") });
+
+    const keysRead = redisGet.mock.calls.map((call) => call[0]);
+    expect(new Set(keysRead).size).toBe(1);
+    // Named mutant: scope the unmatched bucket by something call-specific
+    // (e.g. a random id, or the estimate itself) instead of one fixed
+    // sentinel. Killed - two different unmatched-business calls on the same
+    // day would then read different keys, defeating the pooled cap entirely.
   });
 
   it("allows a call whose estimate keeps spend at or under the cap", async () => {
@@ -264,7 +366,7 @@ describe("checkAiBudget", () => {
     // section 10 explicitly documents the budget counter as fail-OPEN.
   });
 
-  it("uses the default cap when the settings read fails (never 'no cap')", async () => {
+  it("uses the default cap when there is no service-role client at all (never 'no cap')", async () => {
     createServiceRoleClient.mockReturnValue(null); // no service-role key configured
     redisGet.mockResolvedValue("0");
 
@@ -281,6 +383,115 @@ describe("checkAiBudget", () => {
     // default. Killed - an estimate one micro-USD over the DEFAULT cap must
     // still be refused, which only holds if the default is actually
     // enforced.
+  });
+
+  // Review finding I1: this branch (the settings QUERY resolving with a
+  // Postgres-shaped error) and the next one (the query THROWING) were both
+  // previously uncovered - only the `supabase === null` sub-branch above
+  // had a test, and a mutant that flipped either of THESE two branches to
+  // an effectively-infinite cap passed the full suite.
+  it("uses the default cap when the settings query itself returns an error (I1, branch 2 of 3)", async () => {
+    createServiceRoleClient.mockReturnValue(
+      erroringSettingsClient({ message: "connection reset" }),
+    );
+    redisGet.mockResolvedValue("0");
+
+    const result = await checkAiBudget({
+      businessId: BUSINESS_ID,
+      estimatedCostMicros: DEFAULT_AI_BUDGET.businessDailyCostMicros + 1,
+      now: new Date("2026-08-06T00:00:00.000Z"),
+    });
+
+    expect(result.capMicros).toBe(DEFAULT_AI_BUDGET.businessDailyCostMicros);
+    expect(result.allowed).toBe(false);
+    // Named mutant: return `resolveAiBudgetSetting(data, businessId)`
+    // unconditionally instead of checking `error !== null` first (would
+    // call `resolveAiBudgetSetting([], ...)` on a null `data` array-cast,
+    // landing on the default anyway by accident) OR, the mutant this test
+    // actually targets: swallow the branch and read a stale/undefined cap
+    // as Infinity. Killed by the exact-default-cap assertion combined with
+    // the over-cap-estimate being refused.
+  });
+
+  it("uses the default cap when the settings query throws (I1, branch 3 of 3)", async () => {
+    createServiceRoleClient.mockReturnValue(
+      throwingSettingsClient(new Error("ECONNRESET")),
+    );
+    redisGet.mockResolvedValue("0");
+
+    const result = await checkAiBudget({
+      businessId: BUSINESS_ID,
+      estimatedCostMicros: DEFAULT_AI_BUDGET.businessDailyCostMicros + 1,
+      now: new Date("2026-08-06T00:00:00.000Z"),
+    });
+
+    expect(result.capMicros).toBe(DEFAULT_AI_BUDGET.businessDailyCostMicros);
+    expect(result.allowed).toBe(false);
+    // Named mutant: remove the outer try/catch in loadAiBudgetSetting.
+    // Killed two ways at once - without the catch this test would reject
+    // instead of resolving (checkAiBudget would throw, breaking the
+    // gateway's fail-soft contract), and even if some OTHER catch caught it
+    // and returned an infinite cap, the over-cap estimate would wrongly be
+    // allowed.
+  });
+
+  it("caches the setting for 30s, so a burst of gated calls (screenForInjection's windows) costs one settings read", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-06T00:00:00.000Z"));
+
+    let settingsReads = 0;
+    createServiceRoleClient.mockReturnValue({
+      from: (table: string) => {
+        expect(table).toBe("settings");
+        return {
+          select: () => ({
+            eq: () => ({
+              or: () => {
+                settingsReads += 1;
+                return Promise.resolve({
+                  data: [
+                    { scope: "platform", business_id: null, key: "ai.budget", value: { business_daily_cost_micros: 1_000 } },
+                  ],
+                  error: null,
+                });
+              },
+            }),
+          }),
+        };
+      },
+    });
+    redisGet.mockResolvedValue("0");
+
+    await checkAiBudget({ businessId: BUSINESS_ID, estimatedCostMicros: 1, now: new Date() });
+    vi.setSystemTime(new Date("2026-08-06T00:00:29.000Z")); // +29s, inside the TTL
+    await checkAiBudget({ businessId: BUSINESS_ID, estimatedCostMicros: 1, now: new Date() });
+
+    expect(settingsReads).toBe(1);
+    // Named mutant: skip the setting cache entirely (call
+    // loadAiBudgetSetting directly on every checkAiBudget). Killed -
+    // `settingsReads` would be 2. This does NOT prove the cache expires
+    // (a permanent cache also reads 1 here); that half is the Redis spend
+    // read, which is asserted to run on EVERY call, unlike the setting.
+
+    vi.useRealTimers();
+  });
+
+  it("still reads the spend counter fresh on every call, even while the setting is cached", async () => {
+    createServiceRoleClient.mockReturnValue(
+      settingsClient({ scope: "platform", business_id: null, key: "ai.budget", value: { business_daily_cost_micros: 1_000 } }),
+    );
+    redisGet.mockResolvedValue("0");
+
+    await checkAiBudget({ businessId: BUSINESS_ID, estimatedCostMicros: 1, now: new Date("2026-08-06T00:00:00.000Z") });
+    await checkAiBudget({ businessId: BUSINESS_ID, estimatedCostMicros: 1, now: new Date("2026-08-06T00:00:01.000Z") });
+
+    expect(redisGet).toHaveBeenCalledTimes(2);
+    // Named mutant: cache the WHOLE AiBudgetCheck result (including
+    // spentMicros), not just the setting. Killed - `redisGet` would only
+    // be called once, and this is the exact bug the module header calls
+    // out as unacceptable: "the SPEND COUNTER... must stay live on every
+    // call... caching it would let a call slip through on a stale
+    // 'not yet over cap' read."
   });
 });
 
@@ -307,11 +518,22 @@ describe("recordAiSpend", () => {
     // (`expireNx`, mocked separately from a plain `expire`) was called.
   });
 
-  it("does nothing when businessId is null (no tenant to charge)", async () => {
-    await recordAiSpend({ businessId: null, costMicros: 500, now: new Date() });
+  it("records a null-business call against the shared unmatched-business bucket (review finding I2), not a no-op", async () => {
+    incrby.mockResolvedValue(500);
+    expireNx.mockResolvedValue(true);
 
-    expect(incrby).not.toHaveBeenCalled();
-    expect(expireNx).not.toHaveBeenCalled();
+    await recordAiSpend({
+      businessId: null,
+      costMicros: 500,
+      now: new Date("2026-08-06T04:00:00.000Z"), // 2026-08-06 12:00 Manila
+    });
+
+    expect(incrby).toHaveBeenCalledWith(`test:ai:budget:${NO_BUSINESS_BUCKET}:2026-08-06`, 500);
+    // Named mutant: keep the OLD `if (businessId === null) return` early
+    // exit. Killed - spend on an unmatched-business call would then never
+    // be recorded anywhere, so `checkAiBudget`'s pooled cap (see the test
+    // above) would never actually fill up no matter how many such calls
+    // were made.
   });
 
   it("does nothing when costMicros is zero or negative", async () => {

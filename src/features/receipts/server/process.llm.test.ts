@@ -28,7 +28,7 @@ vi.mock("@/lib/redis", () => ({
 }));
 
 import type { Database } from "@/lib/supabase/types";
-import type { LlmMeter, LlmUsage } from "@/lib/ai/llm";
+import type { GatewaySkipReason, LlmMeter, LlmUsage } from "@/lib/ai/llm";
 
 import { EMBEDDING_DIMENSIONS } from "../embed";
 import { parseReceipt } from "../parse";
@@ -428,24 +428,54 @@ function createAi(input: {
   flagged?: boolean;
   screenNull?: boolean;
   candidate?: ExtractionCandidate | null;
+  /** Review finding #4: when set, the screen call reports itself as a
+   * gateway refusal (kill-switch or budget) via the `onGatewaySkip`
+   * callback, exactly as `defaultReceiptAiDeps` -> `screenForInjection`
+   * would forward a real one from llm.ts. Still resolves null - a gateway
+   * skip is one of the null-producing paths, never a distinct return shape. */
+  screenGatewaySkip?: GatewaySkipReason;
+  /** Same, for the extract call. */
+  extractGatewaySkip?: GatewaySkipReason;
 } = {}): AiHarness {
   const embedText = vi.fn(() => Promise.resolve(input.vector ?? null));
 
-  const screen = vi.fn((_text: string, meter: LlmMeter) => {
-    if (input.screenNull === true) return Promise.resolve(null);
-    return Promise.resolve(meter({ ...USAGE, units: 320, costMicros: 10 })).then(() =>
-      input.flagged === true
-        ? { flagged: true, score: 0.97 }
-        : { flagged: false, score: 0.01 },
-    );
-  });
+  const screen = vi.fn(
+    (
+      _text: string,
+      meter: LlmMeter,
+      _businessId: string | null,
+      onGatewaySkip?: (reason: GatewaySkipReason) => void,
+    ) => {
+      if (input.screenGatewaySkip !== undefined) {
+        onGatewaySkip?.(input.screenGatewaySkip);
+        return Promise.resolve(null);
+      }
+      if (input.screenNull === true) return Promise.resolve(null);
+      return Promise.resolve(meter({ ...USAGE, units: 320, costMicros: 10 })).then(() =>
+        input.flagged === true
+          ? { flagged: true, score: 0.97 }
+          : { flagged: false, score: 0.01 },
+      );
+    },
+  );
 
-  const extract = vi.fn((_messages: unknown, meter: LlmMeter) => {
-    if (input.candidate === undefined || input.candidate === null) {
-      return Promise.resolve(null);
-    }
-    return Promise.resolve(meter(USAGE)).then(() => input.candidate ?? null);
-  });
+  const extract = vi.fn(
+    (
+      _messages: unknown,
+      meter: LlmMeter,
+      _businessId: string | null,
+      onGatewaySkip?: (reason: GatewaySkipReason) => void,
+    ) => {
+      if (input.extractGatewaySkip !== undefined) {
+        onGatewaySkip?.(input.extractGatewaySkip);
+        return Promise.resolve(null);
+      }
+      if (input.candidate === undefined || input.candidate === null) {
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(meter(USAGE)).then(() => input.candidate ?? null);
+    },
+  );
 
   return {
     embedText,
@@ -844,6 +874,93 @@ describe("tier 3 failure paths degrade to the deterministic result", () => {
     expect((parseMetaOf(harness).assist as Record<string, unknown>).reason).toBe(
       "injection_screen_unavailable",
     );
+  });
+
+  // Review finding #4: a receipt's own review payload must be able to say
+  // WHY the model had nothing to add, when the reason is the gateway's own
+  // deliberate refusal rather than an ordinary provider outage.
+  describe("in-band gateway-skip reasons (review finding #4)", () => {
+    it("records ai_kill_switch_off, not the generic reason, when the injection screen is skipped by the flag", async () => {
+      const ai = createAi({ screenGatewaySkip: "flag_off", candidate: { total: "190.00" } });
+      const harness = createHarness({
+        response: ocrResponse({ rawText: FADED_RECEIPT_TEXT }),
+        ai,
+      });
+
+      await processReceipt(RECEIPT_ID, harness.deps);
+
+      expect(ai.extract).not.toHaveBeenCalled();
+      expect((parseMetaOf(harness).assist as Record<string, unknown>).reason).toBe(
+        "ai_kill_switch_off",
+      );
+      // Named mutant: ignore the captured `gatewaySkipReason` and always
+      // write the generic `"injection_screen_unavailable"`. Killed - an
+      // admin reading this receipt could no longer tell a deliberate
+      // operator toggle apart from a Groq outage, which is exactly what
+      // review finding #4 says is unacceptable.
+    });
+
+    it("records ai_budget_exceeded, not the generic reason, when the injection screen is skipped by the budget cap", async () => {
+      const ai = createAi({ screenGatewaySkip: "budget_exceeded", candidate: { total: "190.00" } });
+      const harness = createHarness({
+        response: ocrResponse({ rawText: FADED_RECEIPT_TEXT }),
+        ai,
+      });
+
+      await processReceipt(RECEIPT_ID, harness.deps);
+
+      expect((parseMetaOf(harness).assist as Record<string, unknown>).reason).toBe(
+        "ai_budget_exceeded",
+      );
+      // Paired with the flag_off case above: together they kill a mutant
+      // that maps EVERY gateway skip to a single hardcoded reason string
+      // regardless of which one actually fired.
+    });
+
+    it("records ai_kill_switch_off when the EXTRACT call (not the screen) is the one skipped", async () => {
+      // The screen genuinely ran and cleared; only the second gateway
+      // check (extract's own kill-switch read) refused.
+      const ai = createAi({ extractGatewaySkip: "flag_off" });
+      const harness = createHarness({
+        response: ocrResponse({ rawText: FADED_RECEIPT_TEXT }),
+        ai,
+      });
+
+      await processReceipt(RECEIPT_ID, harness.deps);
+
+      expect(ai.screen).toHaveBeenCalledTimes(1);
+      expect(ai.extract).toHaveBeenCalledTimes(1);
+      expect((parseMetaOf(harness).assist as Record<string, unknown>).reason).toBe(
+        "ai_kill_switch_off",
+      );
+      // Named mutant: only check `gatewaySkipReason` after the SCREEN call,
+      // never after extract's own null (i.e. leave the extract branch on
+      // the old hardcoded "no_model_response"). Killed - this fixture's
+      // skip happens on the SECOND call, so the generic reason would
+      // wrongly survive if only the first branch were wired.
+    });
+
+    it("still records the generic reason when null is a genuine provider failure, not a gateway skip", async () => {
+      // No `screenGatewaySkip`/`extractGatewaySkip` set: `screenNull` is
+      // the ordinary "no classifier today" path this suite already covers,
+      // reasserted here to prove the new branch does not fire when
+      // `gatewaySkipReason` was never set.
+      const ai = createAi({ screenNull: true, candidate: { total: "190.00" } });
+      const harness = createHarness({
+        response: ocrResponse({ rawText: FADED_RECEIPT_TEXT }),
+        ai,
+      });
+
+      await processReceipt(RECEIPT_ID, harness.deps);
+
+      expect((parseMetaOf(harness).assist as Record<string, unknown>).reason).toBe(
+        "injection_screen_unavailable",
+      );
+      // Named mutant: default `gatewaySkipReason` to a non-null placeholder
+      // (e.g. "flag_off") instead of `null`. Killed - an ordinary,
+      // non-gateway null would then be misreported as a deliberate
+      // operator toggle that never happened.
+    });
   });
 });
 
