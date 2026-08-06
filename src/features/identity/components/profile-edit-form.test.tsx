@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AVATAR_MAX_UPLOAD_BYTES } from "../avatar";
+import { AVATAR_MAX_UPLOAD_BYTES, oversizePhotoMessage } from "../avatar";
+import { GENERIC_FAILURE } from "../messages";
 import { DISPLAY_NAME_MAX_LENGTH } from "../profile-schema";
 
 // The edit surface itself. /profile has been read-only since it was built, so
@@ -89,6 +90,13 @@ function pickPhoto(
   }
   fireEvent.change(fileInput(), { target: { files: [file] } });
 }
+
+/**
+ * The thrown-error paths log on purpose, so the console is silenced and
+ * inspected rather than left to spray framework text through the test output.
+ * One assertion reads the calls back: mapping the copy must not lose the detail.
+ */
+const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -369,7 +377,12 @@ describe("ProfileEditForm: the avatar", () => {
 
     pickPhoto({ size: AVATAR_MAX_UPLOAD_BYTES + 1 });
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/larger than 8 MB/i);
+    // The exact sentence, not a substring of it. `oversizePhotoMessage()` exists
+    // so this side and the action's backstop quote the same words and the same
+    // number; `actions.test.ts` has the twin of this assertion against the same
+    // helper. Between them, BOTH call sites are pinned to it - a regex match on
+    // "larger than 8 MB" would still pass if one side hardcoded its own copy.
+    expect((await screen.findByRole("alert")).textContent?.trim()).toBe(oversizePhotoMessage());
     expect(mocks.saveConsumerAvatar).not.toHaveBeenCalled();
   });
 
@@ -390,6 +403,49 @@ describe("ProfileEditForm: the avatar", () => {
 // That is brief requirement 3 ("an honest failure") failing outright.
 describe("ProfileEditForm: when the action THROWS rather than returning ok:false", () => {
   const thrown = new Error("Body exceeded 1 MB limit.");
+
+  it("CRITICAL: a thrown infrastructure error is not quoted at the consumer either", async () => {
+    // The I3 fix was half-applied: RETURNED database and storage errors were
+    // mapped to copy, while THROWN ones went through `toErrorMessage` and
+    // rendered the framework's own words - "Body exceeded 1 MB limit",
+    // "network". Same slice, same class of failure, two different policies. A
+    // throw is infrastructure by definition: nothing that reaches this catch is
+    // a choice the consumer made and can change.
+    mocks.saveConsumerProfile.mockRejectedValue(thrown);
+    renderForm();
+
+    save();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent?.trim()).toBe(GENERIC_FAILURE);
+    expect(alert.textContent).not.toMatch(/Body exceeded|1 MB limit/i);
+  });
+
+  it("CRITICAL: keeps the thrown detail in the browser console", async () => {
+    // Mapping the copy must not mean losing the diagnosis - the same rule the
+    // server-side `infrastructureFailure` follows.
+    mocks.saveConsumerAvatar.mockRejectedValue(new Error("Failed to fetch"));
+    renderForm({ avatarUrl: null });
+
+    pickPhoto();
+    await screen.findByRole("alert");
+
+    // Read the arguments, not a JSON dump of them: `JSON.stringify(new Error())`
+    // is "{}" - Error's own fields are not enumerable - so a stringified check
+    // would pass for a log that threw the detail away.
+    const logged = consoleError.mock.calls.flat();
+    expect(logged.some((value) => value instanceof Error && value.message === "Failed to fetch"))
+      .toBe(true);
+  });
+
+  it("says the same thing whichever handler threw", async () => {
+    mocks.removeConsumerAvatar.mockRejectedValue(new Error("ECONNRESET"));
+    renderForm({ avatarUrl: AVATAR_URL });
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove photo" }));
+
+    expect((await screen.findByRole("alert")).textContent?.trim()).toBe(GENERIC_FAILURE);
+  });
 
   it("CRITICAL: a thrown save says something and re-enables the button", async () => {
     mocks.saveConsumerProfile.mockRejectedValue(thrown);

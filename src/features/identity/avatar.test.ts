@@ -270,6 +270,26 @@ describe("the configured Server Action body limit admits the file the app accept
     expect(AVATAR_ACTION_BODY_LIMIT_BYTES).toBeGreaterThan(AVATAR_MAX_UPLOAD_BYTES);
   });
 
+  it("CRITICAL: avatar.ts stays import-free, because next.config.ts imports it", () => {
+    // next.config.ts is loaded by Next's own config loader before anything else
+    // exists - no bundler, no path aliases, no React, no `server-only` guard. A
+    // module it imports has to be loadable in that bare context, and today
+    // avatar.ts is: zero imports, standard library only.
+    //
+    // The failure this pins is not a bad test run, it is a BROKEN BUILD. Adding
+    // `import "server-only"` or a React import here would make `next build`
+    // fail while every unit test stayed green, because vitest resolves those
+    // happily. This assertion is the only thing that notices.
+    const source = readFileSync(
+      join(process.cwd(), "src", "features", "identity", "avatar.ts"),
+      "utf8",
+    );
+
+    expect(source.match(/^import\s/m)).toBeNull();
+    expect(source.match(/^export .* from /m)).toBeNull();
+    expect(source).not.toMatch(/\brequire\s*\(/);
+  });
+
   it("CRITICAL: is comfortably above the 4-6MB phone photo the comment promises", () => {
     // avatar.ts justifies AVATAR_MAX_UPLOAD_BYTES by saying a photo straight off
     // a phone camera is routinely 4-6MB. This asserts the promise is keepable.

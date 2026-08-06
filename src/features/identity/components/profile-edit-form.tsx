@@ -7,7 +7,6 @@ import { motion, useReducedMotion } from "motion/react";
 import { Button } from "@/components/ui/button";
 import { PendingButton } from "@/components/ui/pending-button";
 import { TextField } from "@/components/ui/text-field";
-import { toErrorMessage } from "@/lib/auth/error-message";
 
 import {
   removeConsumerAvatar,
@@ -46,6 +45,25 @@ import { CityPicker, useCityPicker } from "./city-picker";
 // deploy mid-request - and before that was handled the rejection went unhandled,
 // the busy flag was never cleared, and the screen sat there with every control
 // disabled and nothing written on it.
+
+/**
+ * Log the thrown value, return the consumer's sentence.
+ *
+ * The mirror of `infrastructureFailure` in actions.ts, and it exists because
+ * that fix was half-applied: RETURNED database and storage errors were mapped to
+ * copy while THROWN ones went through `toErrorMessage` and rendered the
+ * framework's own words - "Body exceeded 1 MB limit", "Failed to fetch",
+ * "ECONNRESET". Same slice, same class of failure, two different policies.
+ *
+ * A throw is infrastructure by definition. Nothing that reaches a catch here is
+ * a choice the consumer made and could change, so there is nothing for a
+ * specific message to tell them. The detail goes to the console, where a
+ * developer with the session open is the one who can act on it.
+ */
+function reportThrown(scope: string, thrown: unknown): string {
+  console.error(`[identity] ${scope}`, thrown);
+  return GENERIC_FAILURE;
+}
 
 export interface ProfileEditFormProps {
   readonly displayName: string;
@@ -127,7 +145,7 @@ export function ProfileEditForm({
       // A server action can THROW rather than return: a 413 past the body
       // limit, a dropped connection, a deploy mid-request. Before this catch
       // existed the rejection went unhandled and the screen said nothing.
-      setError(toErrorMessage(thrown));
+      setError(reportThrown("save profile threw", thrown));
     } finally {
       // In `finally`, not after the await. A throw used to skip the reset, which
       // left every control disabled with no message - a dead screen until
@@ -172,7 +190,7 @@ export function ProfileEditForm({
       setAvatarUrl(result.avatarUrl);
       router.refresh();
     } catch (thrown) {
-      setError(toErrorMessage(thrown));
+      setError(reportThrown("save avatar threw", thrown));
     } finally {
       setBusyWithPhoto(false);
     }
@@ -195,7 +213,7 @@ export function ProfileEditForm({
       setAvatarUrl(result.avatarUrl);
       router.refresh();
     } catch (thrown) {
-      setError(toErrorMessage(thrown));
+      setError(reportThrown("remove avatar threw", thrown));
     } finally {
       setBusyWithPhoto(false);
     }

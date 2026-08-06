@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+import { oversizePhotoMessage } from "./avatar";
+
 const mocks = vi.hoisted(() => ({
   getUser: vi.fn(),
   from: vi.fn(),
@@ -512,6 +514,13 @@ describe("saveConsumerAvatar", () => {
 
     expect(result.ok).toBe(false);
     expect(mocks.upload).not.toHaveBeenCalled();
+    // THE AGREEMENT, not each side. `oversizePhotoMessage()` exists so the
+    // form's check and this backstop quote the same sentence and the same
+    // number; asserting only `ok === false` here leaves the action free to
+    // invent its own copy while the helper sits there unused. The form's twin
+    // of this assertion is in profile-edit-form.test.tsx, against the same
+    // helper - between them, both call sites are pinned to it.
+    expect(result.ok ? "" : result.message).toBe(oversizePhotoMessage());
   });
 
   it("says so when no file was picked", async () => {
