@@ -95,6 +95,14 @@ describe("LoginPage", () => {
     render(<LoginPage />);
     expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
   });
+
+  it("links Forgot password to the recovery page instead of a dead '#' href", () => {
+    render(<LoginPage />);
+    expect(screen.getByRole("link", { name: "Forgot password" })).toHaveAttribute(
+      "href",
+      "/forgot-password",
+    );
+  });
 });
 
 describe("SignupPage", () => {
