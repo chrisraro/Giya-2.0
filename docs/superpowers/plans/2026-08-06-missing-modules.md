@@ -19,6 +19,15 @@
 
    The discriminator is empirical and visible in the record: every assertion an implementer red-verified against a specific mutant turned out to be sound, and every one that was not is on the list above. The practice is already in use — it is just applied selectively. Make it universal.
 
+   **When you clone a mechanism, clone its mutants too.** The most common way a
+   gap survives the rule is copying a correct neighbour's *code* without copying
+   its *test*. Observed twice in one task: a 30s settings cache transcribed from
+   `flags.ts`'s cache shipped without `flags.ts`'s TTL-expiry test, so a
+   permanent cache passed the whole suite — and the omission was rationalised in
+   a comment that did not hold (it argued a different cache's liveness test
+   covered this one). If you copy a pattern, open the original's test file and
+   copy the assertions that fence it.
+
    Name the mutant concretely: "delete `and pt.business_id = c.business_id` → these four assertions fail", not "tested the filter".
 
 1. **TDD.** Red first. Each task names its test files; implementer reports test output. Full suite green (baseline 3820) before DONE.
