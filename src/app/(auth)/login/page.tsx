@@ -89,55 +89,69 @@ function LoginPageInner() {
 
     setFormError("");
     setSubmitting(true);
-    const supabase = createClient();
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-      options: {
-        ...(captchaToken && { captchaToken }),
-      },
-    });
-    setSubmitting(false);
-    // Each hCaptcha token is single-use: reset the widget after every submit
-    // (success or failure) so a retry gets a fresh token.
-    captchaRef.current?.resetCaptcha();
-    setCaptchaToken("");
 
-    if (error) {
-      // Live E2E showed a non-Error rejection rendering as "{}"; route
-      // through toErrorMessage so this always ends up a real string.
-      const message = toErrorMessage(error);
-      setFormError(
-        message.toLowerCase().includes("invalid login credentials")
-          ? "Email or password is incorrect."
-          : message,
-      );
-      return;
-    }
-
-    // A session now exists, so this browser is a device. Registering here and
-    // not somewhere more central is a consequence of where sessions are
-    // actually created: this path runs entirely in the browser, and only the
-    // server can see the request's user agent or write to `user_devices`, so a
-    // server action is the seam. /auth/callback does the same for the PKCE and
-    // OAuth path, on the server, where it already is.
-    //
-    // AWAITED, not fired and forgotten. A pending request is cancelled by the
-    // navigation below on exactly the slow connections where it would still be
-    // pending.
-    //
-    // The catch is not decoration. The action swallows its own database
-    // failures, but the ACTION BOUNDARY can still reject - a dropped
-    // connection, a deploy mid-request - and an unhandled rejection here would
-    // skip the navigation and leave somebody who has successfully signed in
-    // sitting on the login page with nothing written on it.
+    // THE WHOLE TAIL IS INSIDE try/finally, and `setSubmitting(false)` is the
+    // finally. It used to run the instant signInWithPassword returned, which
+    // was harmless while the very next statement was the navigation - and is
+    // not now that a server-action round trip sits between them. For the whole
+    // duration of that round trip the button was re-enabled, still read "Sign
+    // in", and the page had not moved: a very tappable window on a Philippine
+    // mobile connection, and a second tap would run a second
+    // signInWithPassword AND a second registerCurrentDevice - the most likely
+    // real-world route to the duplicate `user_devices` row that
+    // server/devices.ts documents as a theoretical race.
     try {
-      await registerCurrentDevice();
-    } catch (thrown) {
-      console.error("[identity] device registration threw during sign-in", thrown);
-    }
+      const supabase = createClient();
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+        options: {
+          ...(captchaToken && { captchaToken }),
+        },
+      });
+      // Each hCaptcha token is single-use: reset the widget after every submit
+      // (success or failure) so a retry gets a fresh token.
+      captchaRef.current?.resetCaptcha();
+      setCaptchaToken("");
 
-    router.push(next);
+      if (error) {
+        // Live E2E showed a non-Error rejection rendering as "{}"; route
+        // through toErrorMessage so this always ends up a real string.
+        const message = toErrorMessage(error);
+        setFormError(
+          message.toLowerCase().includes("invalid login credentials")
+            ? "Email or password is incorrect."
+            : message,
+        );
+        return;
+      }
+
+      // A session now exists, so this browser is a device. Registering here and
+      // not somewhere more central is a consequence of where sessions are
+      // actually created: this path runs entirely in the browser, and only the
+      // server can see the request's user agent or write to `user_devices`, so
+      // a server action is the seam. /auth/callback does the same for the PKCE
+      // and OAuth path, on the server, where it already is.
+      //
+      // AWAITED, not fired and forgotten. A pending request is cancelled by the
+      // navigation below on exactly the slow connections where it would still
+      // be pending.
+      //
+      // The catch is not decoration. The action swallows its own database
+      // failures, but the ACTION BOUNDARY can still reject - a dropped
+      // connection, a deploy mid-request - and an unhandled rejection here
+      // would skip the navigation and leave somebody who has successfully
+      // signed in sitting on the login page with nothing written on it.
+      try {
+        await registerCurrentDevice();
+      } catch (thrown) {
+        console.error("[identity] device registration threw during sign-in", thrown);
+      }
+
+      router.push(next);
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   async function handleSocial(provider: SocialProvider) {

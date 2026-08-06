@@ -38,18 +38,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // millisecond can therefore both miss the read and both insert. That is a
 // duplicate row, not corruption, and the next login updates whichever it finds.
 
+// EACH STATEMENT KIND GETS ITS OWN `eq`, and that is not tidiness.
+//
+// With one shared `eq` mock, `expect(mocks.eq).toHaveBeenCalledWith("user_id",
+// "user-1")` in the delete tests was satisfied by the LOOKUP three lines
+// earlier - so the DELETE could drop its own `user_id` predicate entirely and
+// the test named "scopes the delete to the caller's own row" stayed green. A
+// review found it. Separate mocks make the assertion name true.
 const mocks = vi.hoisted(() => ({
   getUser: vi.fn(),
   from: vi.fn(),
   headers: vi.fn(),
   select: vi.fn(),
-  eq: vi.fn(),
+  selectEq: vi.fn(),
   limit: vi.fn(),
   order: vi.fn(),
   maybeSingle: vi.fn(),
   insert: vi.fn(),
   update: vi.fn(),
+  updateEq: vi.fn(),
   del: vi.fn(),
+  deleteEq: vi.fn(),
   /** Resolves every chain that ends without an explicit terminal call. */
   terminal: { data: null as unknown, error: null as unknown },
 }));
@@ -74,21 +83,43 @@ const SAFARI_IPHONE =
 
 const NOW = new Date("2026-08-06T12:00:00.000Z");
 
-/** The chain object every PostgREST builder call returns. Thenable, so a chain
- *  that ends on `.eq()` or `.order()` resolves like a real query does. */
-function chain(): Record<string, unknown> {
-  const self: Record<string, unknown> = {
-    select: mocks.select,
-    eq: mocks.eq,
+/** Thenable, so a chain that ends on `.eq()` or `.order()` resolves like a real
+ *  PostgREST query does rather than needing an explicit terminal call. */
+function thenable(members: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...members,
+    then: (resolve: (value: unknown) => unknown) => resolve(mocks.terminal),
+  };
+}
+
+/** What `.select()` and everything downstream of it returns. */
+function selectChain(): Record<string, unknown> {
+  return thenable({
+    eq: mocks.selectEq,
     limit: mocks.limit,
     order: mocks.order,
     maybeSingle: mocks.maybeSingle,
+  });
+}
+
+/** What `.update()` and everything downstream of it returns. */
+function updateChain(): Record<string, unknown> {
+  return thenable({ eq: mocks.updateEq });
+}
+
+/** What `.delete()` and everything downstream of it returns. */
+function deleteChain(): Record<string, unknown> {
+  return thenable({ eq: mocks.deleteEq });
+}
+
+/** The table handle `supabase.from("user_devices")` returns. */
+function tableChain(): Record<string, unknown> {
+  return thenable({
+    select: mocks.select,
     insert: mocks.insert,
     update: mocks.update,
     delete: mocks.del,
-    then: (resolve: (value: unknown) => unknown) => resolve(mocks.terminal),
-  };
-  return self;
+  });
 }
 
 function requestFrom(userAgent: string | null) {
@@ -106,17 +137,19 @@ beforeEach(() => {
   mocks.getUser.mockResolvedValue({ data: { user: { id: "user-1" } } });
   requestFrom(CHROME_WINDOWS);
 
-  mocks.select.mockImplementation(() => chain());
-  mocks.eq.mockImplementation(() => chain());
-  mocks.limit.mockImplementation(() => chain());
-  mocks.order.mockImplementation(() => chain());
-  mocks.update.mockImplementation(() => chain());
-  mocks.del.mockImplementation(() => chain());
+  mocks.select.mockImplementation(() => selectChain());
+  mocks.selectEq.mockImplementation(() => selectChain());
+  mocks.limit.mockImplementation(() => selectChain());
+  mocks.order.mockImplementation(() => selectChain());
+  mocks.update.mockImplementation(() => updateChain());
+  mocks.updateEq.mockImplementation(() => updateChain());
+  mocks.del.mockImplementation(() => deleteChain());
+  mocks.deleteEq.mockImplementation(() => deleteChain());
   mocks.insert.mockResolvedValue({ error: null });
   mocks.maybeSingle.mockResolvedValue({ data: null, error: null });
 
   mocks.from.mockImplementation((table: string) => {
-    if (table === "user_devices") return chain();
+    if (table === "user_devices") return tableChain();
     throw new Error(`unexpected table: ${table}`);
   });
 });
@@ -154,15 +187,16 @@ describe("registerDevice", () => {
 
     expect(mocks.insert).not.toHaveBeenCalled();
     expect(mocks.update).toHaveBeenCalledWith({ last_seen_at: NOW.toISOString() });
-    expect(mocks.eq).toHaveBeenCalledWith("id", "device-1");
+    // The UPDATE's own predicate, not the lookup's.
+    expect(mocks.updateEq).toHaveBeenCalledWith("id", "device-1");
   });
 
   it("CRITICAL: looks the device up by user, platform AND user agent", async () => {
     await registerDevice();
 
-    expect(mocks.eq).toHaveBeenCalledWith("user_id", "user-1");
-    expect(mocks.eq).toHaveBeenCalledWith("platform", "web");
-    expect(mocks.eq).toHaveBeenCalledWith("user_agent", CHROME_WINDOWS);
+    expect(mocks.selectEq).toHaveBeenCalledWith("user_id", "user-1");
+    expect(mocks.selectEq).toHaveBeenCalledWith("platform", "web");
+    expect(mocks.selectEq).toHaveBeenCalledWith("user_agent", CHROME_WINDOWS);
   });
 
   it("gives a different browser on the same account its own row", async () => {
@@ -204,7 +238,7 @@ describe("registerDevice", () => {
     await registerDevice();
 
     const stored = (mocks.insert.mock.calls[0]?.[0] as { user_agent: string }).user_agent;
-    const lookedUp = mocks.eq.mock.calls.find((call) => call[0] === "user_agent")?.[1];
+    const lookedUp = mocks.selectEq.mock.calls.find((call) => call[0] === "user_agent")?.[1];
     expect(stored.length).toBeLessThan(huge.length);
     expect(lookedUp).toBe(stored);
   });
@@ -290,7 +324,7 @@ describe("listMyDevices", () => {
   it("scopes the read to the caller's own rows", async () => {
     await listMyDevices();
 
-    expect(mocks.eq).toHaveBeenCalledWith("user_id", "user-1");
+    expect(mocks.selectEq).toHaveBeenCalledWith("user_id", "user-1");
   });
 
   it("CRITICAL: no devices is ok:true with an empty list", async () => {
@@ -330,7 +364,7 @@ describe("deleteDevice", () => {
     const result = await deleteDevice("device-2");
 
     expect(mocks.del).toHaveBeenCalled();
-    expect(mocks.eq).toHaveBeenCalledWith("id", "device-2");
+    expect(mocks.deleteEq).toHaveBeenCalledWith("id", "device-2");
     expect(result).toEqual({ ok: true, wasCurrent: false });
   });
 
@@ -347,7 +381,13 @@ describe("deleteDevice", () => {
     expect(mocks.update).not.toHaveBeenCalled();
   });
 
-  it("scopes the delete to the caller's own row", async () => {
+  it("CRITICAL: the DELETE statement itself carries the owner predicate", async () => {
+    // Asserted on the DELETE's own `eq`, not on a shared one. With a single
+    // mock this assertion was satisfied by the lookup three lines earlier in
+    // the source, so the delete could drop `user_id` and the test named for
+    // that predicate stayed green. RLS user_devices_owner_all is the real gate
+    // and there is no production hole here - but a test named for a predicate
+    // it cannot see is worse than no test.
     mocks.maybeSingle.mockResolvedValue({
       data: { user_agent: SAFARI_IPHONE, platform: "web" },
       error: null,
@@ -355,7 +395,20 @@ describe("deleteDevice", () => {
 
     await deleteDevice("device-2");
 
-    expect(mocks.eq).toHaveBeenCalledWith("user_id", "user-1");
+    expect(mocks.deleteEq).toHaveBeenCalledWith("user_id", "user-1");
+    expect(mocks.deleteEq).toHaveBeenCalledWith("id", "device-2");
+  });
+
+  it("scopes the read that precedes it to the caller's own row too", async () => {
+    mocks.maybeSingle.mockResolvedValue({
+      data: { user_agent: SAFARI_IPHONE, platform: "web" },
+      error: null,
+    });
+
+    await deleteDevice("device-2");
+
+    expect(mocks.selectEq).toHaveBeenCalledWith("user_id", "user-1");
+    expect(mocks.selectEq).toHaveBeenCalledWith("id", "device-2");
   });
 
   it("CRITICAL: reports that the removed device was the one being used", async () => {

@@ -108,6 +108,59 @@ describe("password sign-in registers the device", () => {
     consoleError.mockRestore();
   });
 
+  it("CRITICAL: the Sign in button stays disabled for the whole registration round trip", async () => {
+    // `setSubmitting(false)` used to run the moment signInWithPassword
+    // returned - which was harmless when the next statement was the
+    // navigation, and is not now that a server-action round trip sits between
+    // them. For its whole duration the button was re-enabled, read "Sign in",
+    // and the page had not moved: a very tappable window on a Philippine mobile
+    // connection, and the most likely real-world route to the duplicate
+    // user_devices row this slice disclosed as theoretical.
+    let release: () => void = () => {};
+    mocks.registerCurrentDevice.mockReturnValue(
+      new Promise<void>((resolve) => {
+        release = () => resolve();
+      }),
+    );
+
+    signIn();
+
+    await waitFor(() => expect(mocks.registerCurrentDevice).toHaveBeenCalled());
+    const button = document.querySelector('button[type="submit"]') as HTMLButtonElement;
+    expect(button).toBeDisabled();
+    expect(button.textContent).not.toBe("Sign in");
+    release();
+  });
+
+  it("CRITICAL: a second tap during registration cannot start a second sign-in", async () => {
+    // The consequence of the window above, asserted as behaviour rather than as
+    // a disabled attribute.
+    let release: () => void = () => {};
+    mocks.registerCurrentDevice.mockReturnValue(
+      new Promise<void>((resolve) => {
+        release = () => resolve();
+      }),
+    );
+
+    signIn();
+    await waitFor(() => expect(mocks.registerCurrentDevice).toHaveBeenCalled());
+
+    fireEvent.click(document.querySelector('button[type="submit"]') as HTMLButtonElement);
+
+    expect(mocks.signInWithPassword).toHaveBeenCalledTimes(1);
+    expect(mocks.registerCurrentDevice).toHaveBeenCalledTimes(1);
+    release();
+  });
+
+  it("re-enables the button after a refused sign-in, so it can be retried", async () => {
+    mocks.signInWithPassword.mockResolvedValue({ error: { message: "Invalid login credentials" } });
+
+    signIn();
+
+    await screen.findByRole("alert");
+    expect(document.querySelector('button[type="submit"]')).not.toBeDisabled();
+  });
+
   it("CRITICAL: registers BEFORE it navigates", async () => {
     // Fire-and-forget would be cancelled by the navigation on a slow
     // connection, which is exactly the connection where it would be slow.

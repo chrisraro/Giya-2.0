@@ -59,6 +59,11 @@ import { describeUserAgent } from "../user-agent";
 // index on (user_id, platform, user_agent) and an upsert - a migration, and a
 // deliberate one.
 //
+// One visible consequence of that race, stated here so it is not mistaken for a
+// separate bug: duplicate rows share a user agent, so `listMyDevices` would badge
+// BOTH of them "This device". The badge is computed from the identity, and
+// duplicates are by definition the same identity.
+//
 // `is_revoked` IS NEVER WRITTEN HERE. Revoking is a DELETE - see deleteDevice.
 // ===========================================================================
 

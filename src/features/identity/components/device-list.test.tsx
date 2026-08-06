@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { GENERIC_FAILURE } from "../messages";
+import { DEVICE_REMOVE_FAILED, GENERIC_FAILURE } from "../messages";
 
 // The revoke control, and the copy around it.
 //
@@ -38,6 +38,18 @@ function renderList(devices = DEVICES) {
   return render(<DeviceList devices={devices} />);
 }
 
+/**
+ * What a SIGHTED person reads on a control: its text with the visually hidden
+ * parts taken out. `textContent` alone would count the `sr-only` span and let a
+ * screen-reader-only warning pass as a visible one, which is the exact defect
+ * these tests exist to catch.
+ */
+function visibleLabelOf(control: HTMLElement): string {
+  const clone = control.cloneNode(true) as HTMLElement;
+  for (const hidden of clone.querySelectorAll(".sr-only")) hidden.remove();
+  return (clone.textContent ?? "").replace(/\s+/g, " ").trim();
+}
+
 /** The remove control on the row whose summary is given. */
 function removeButtonFor(summary: string): HTMLElement {
   const row = screen.getByText(summary).closest("li");
@@ -45,6 +57,36 @@ function removeButtonFor(summary: string): HTMLElement {
   const button = row.querySelector("button");
   if (button === null) throw new Error(`no remove control on the row for ${summary}`);
   return button;
+}
+
+// THE CLAIM, NOT THE SENTENCE.
+//
+// The first version of this guard listed the exact phrasings the component
+// happened to use, and a review broke it twice without turning a single test
+// red: rewriting the current row's name to "This signs you out everywhere, on
+// every device" matched none of them, and rewriting DEVICE_REMOVE_FAILED to
+// "That device was signed out everywhere." matched none of them either. A guard
+// that pins wording only fails for the mutation that keeps the wording.
+//
+// So this is a list of CLAIMS the product cannot keep, in whatever words. The
+// one true claim on this screen - "signs you out HERE", about the current
+// device - is not in it and must not be: deleting a row really does end THIS
+// session, because revokeDevice calls auth.signOut() for it.
+const OVERCLAIMS: readonly RegExp[] = [
+  /everywhere/i,
+  /every device/i,
+  /all (of )?(your )?(other )?devices/i,
+  /all (of )?(your )?(other )?sessions/i,
+  /(?<!does not )signs? (that|the) (browser|device) out/i,
+  /(?<!does not )logs? (that|the) (browser|device) out/i,
+  /signs? (you )?out of (all|every)/i,
+  /revokes? (all|every)/i,
+];
+
+function expectNoOverclaim(text: string): void {
+  for (const claim of OVERCLAIMS) {
+    expect(text).not.toMatch(claim);
+  }
 }
 
 beforeEach(() => {
@@ -89,23 +131,75 @@ describe("what a device row shows", () => {
   it("CRITICAL: warns on the current row that removing it ends this session", async () => {
     renderList();
 
-    expect(removeButtonFor("Chrome on Windows")).toHaveAccessibleName(/sign(s)? you out/i);
-    expect(removeButtonFor("Safari on iPhone")).not.toHaveAccessibleName(/sign(s)? you out/i);
+    expect(removeButtonFor("Chrome on Windows")).toHaveAccessibleName(/sign out/i);
+    expect(removeButtonFor("Safari on iPhone")).not.toHaveAccessibleName(/sign out/i);
+  });
+
+  it("CRITICAL: the warning is VISIBLE, not only in the accessible name", async () => {
+    // `aria-label` REPLACES the accessible name; it adds nothing to what a
+    // sighted person reads. A button whose visible text says "Remove" and whose
+    // hidden name says "this signs you out" warns exactly the users who were
+    // not going to be surprised, and nobody else. `visibleLabelOf` strips the
+    // sr-only span so this assertion cannot be satisfied by a hidden warning.
+    renderList();
+
+    expect(visibleLabelOf(removeButtonFor("Chrome on Windows"))).toMatch(/sign out/i);
+    expect(visibleLabelOf(removeButtonFor("Safari on iPhone"))).not.toMatch(/sign out/i);
+  });
+
+  it("keeps the visible label inside the accessible name (WCAG 2.5.3)", async () => {
+    // Voice-control users say what they see. If the accessible name does not
+    // contain the visible words, "click remove and sign out" does nothing - and
+    // an aria-label that REPLACES the label is the usual way that happens.
+    renderList();
+
+    for (const summary of ["Chrome on Windows", "Safari on iPhone"]) {
+      const button = removeButtonFor(summary);
+      const visible = visibleLabelOf(button);
+      expect(visible.length).toBeGreaterThan(0);
+      // Containment, not equality: the device name is appended for screen
+      // readers, so the accessible name is a superset of the visible one.
+      expect(button).toHaveAccessibleName(
+        new RegExp(visible.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      );
+    }
   });
 });
 
 describe("the honesty of the copy", () => {
-  it("CRITICAL: never claims removing a device signs that browser out", async () => {
-    // The refresh token is in GoTrue, not in user_devices. Claiming otherwise
-    // is stating a control the product does not have.
+  it("CRITICAL: makes no claim the product cannot keep, in any wording", async () => {
+    // The refresh token is in GoTrue, not in user_devices. Removing a row for
+    // ANOTHER device ends nothing.
     const { container } = renderList();
 
-    expect(container.textContent).not.toMatch(/signed out everywhere/i);
-    expect(container.textContent).not.toMatch(/log(s|ged)? out everywhere/i);
-    // The lookbehind matters: the screen is REQUIRED to say "does not sign that
-    // browser out" (asserted below). What must never appear is the same claim
-    // made positively.
-    expect(container.textContent).not.toMatch(/(?<!does not )signs? that (browser|device) out/i);
+    expectNoOverclaim(container.textContent ?? "");
+  });
+
+  it("CRITICAL: the same holds when there is no current device on the list", async () => {
+    // A different render path (no "This device" row at all) with the same rule.
+    const { container } = renderList([DEVICES[1] as (typeof DEVICES)[number]]);
+
+    expectNoOverclaim(container.textContent ?? "");
+  });
+
+  it("CRITICAL: the sentence a failed revoke really shows keeps no promise either", async () => {
+    // DEVICE_REMOVE_FAILED is the one string a consumer sees when a revoke
+    // fails, and until now nothing rendered it: this file supplied its own
+    // fixture strings, and actions.test.ts compared the constant to itself, so
+    // the constant could be rewritten to "That device was signed out
+    // everywhere." with 333 tests still green. This test renders the REAL
+    // constant and measures it against literals.
+    mocks.revokeDevice.mockResolvedValue({ ok: false, message: DEVICE_REMOVE_FAILED });
+    const { container } = renderList();
+
+    fireEvent.click(removeButtonFor("Safari on iPhone"));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(DEVICE_REMOVE_FAILED);
+    // A literal, so the expected value does not come from the same place as the
+    // actual one.
+    expect(alert.textContent).toMatch(/could not remove that device/i);
+    expectNoOverclaim(container.textContent ?? "");
   });
 
   it("CRITICAL: says plainly what removing another device does NOT do", async () => {
@@ -114,6 +208,18 @@ describe("the honesty of the copy", () => {
     const { container } = renderList();
 
     expect(container.textContent).toMatch(/does not sign that browser out/i);
+  });
+
+  it("CRITICAL: qualifies that disclaimer for the one row it is false about", async () => {
+    // "Removing does not sign that browser out" is true of every row EXCEPT the
+    // current one, where revokeDevice calls auth.signOut() and the consumer is
+    // signed out immediately. An unqualified disclaimer is T3.2's defect
+    // inverted: there the product claimed a control it did not have, here it
+    // would disclaim a consequence it does have, and the surprise lands on
+    // somebody who just read that nothing would happen.
+    const { container } = renderList();
+
+    expect(container.textContent).toMatch(/device you are using now signs you out here/i);
   });
 
   it("points somewhere real for the case that brought them here", async () => {
@@ -252,6 +358,28 @@ describe("a revoke that fails", () => {
 
     await waitFor(() => expect(screen.queryByText("Safari on iPhone")).not.toBeInTheDocument());
     consoleError.mockRestore();
+  });
+
+  it("CRITICAL: the in-flight lock is PER ROW, not a lock on the whole list", async () => {
+    // The comment on handleRemove claims exactly this ("a slow revoke on one
+    // device has no business freezing the rest of the list"), and a global
+    // `if (removing !== null) return` satisfies every other test in this file.
+    // Two devices are two independent rows; one slow round trip must not make
+    // the other unremovable.
+    let release: (value: { ok: true; signedOut: boolean }) => void = () => {};
+    mocks.revokeDevice.mockReturnValueOnce(
+      new Promise<{ ok: true; signedOut: boolean }>((resolve) => {
+        release = resolve;
+      }),
+    );
+    renderList();
+
+    fireEvent.click(removeButtonFor("Safari on iPhone"));
+    fireEvent.click(removeButtonFor("Chrome on Windows"));
+
+    await waitFor(() => expect(mocks.revokeDevice).toHaveBeenCalledTimes(2));
+    expect(mocks.revokeDevice.mock.calls.map((call) => call[0])).toEqual(["device-2", "device-1"]);
+    release({ ok: true, signedOut: false });
   });
 
   it("ignores a second tap on the same row while its revoke is in flight", async () => {

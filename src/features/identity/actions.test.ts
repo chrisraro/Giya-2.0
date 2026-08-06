@@ -919,11 +919,32 @@ describe("revokeDevice", () => {
   it("CRITICAL: a failed delete says so and signs nobody out", async () => {
     mocks.deleteDevice.mockResolvedValue({ ok: false });
 
-    expect(await revokeDevice("device-2")).toEqual({
-      ok: false,
-      message: DEVICE_REMOVE_FAILED,
-    });
+    const result = await revokeDevice("device-2");
+
+    expect(result.ok).toBe(false);
+    expect(result).toEqual({ ok: false, message: DEVICE_REMOVE_FAILED });
     expect(mocks.signOutFn).not.toHaveBeenCalled();
+  });
+
+  it("CRITICAL: that sentence says the removal FAILED, and claims nothing else", async () => {
+    // `toEqual({ message: DEVICE_REMOVE_FAILED })` above compares the constant
+    // to itself: it proves the action and the constant cannot drift, and
+    // nothing about whether the constant is right. A review rewrote it to
+    // "That device was signed out everywhere." - a sentence that is both false
+    // and the opposite of what happened - and 333 tests stayed green.
+    //
+    // These are literals. They disagree with the code when the code is wrong.
+    mocks.deleteDevice.mockResolvedValue({ ok: false });
+
+    const message = (await revokeDevice("device-2")) as { ok: false; message: string };
+
+    expect(message.message).toMatch(/could not remove that device/i);
+    expect(message.message).toMatch(/try again/i);
+    // It must not describe a success, and must not claim a reach the product
+    // does not have. See device-list.test.tsx for the same guard on the screen.
+    expect(message.message).not.toMatch(/everywhere/i);
+    expect(message.message).not.toMatch(/signed out/i);
+    expect(message.message).not.toMatch(/removed/i);
   });
 
   it("revalidates the device list so the removed row does not linger", async () => {

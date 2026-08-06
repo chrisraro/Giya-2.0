@@ -303,6 +303,33 @@ describe("a write that fails", () => {
     expect(mocks.saveConsent).toHaveBeenCalledTimes(2);
   });
 
+  it("CRITICAL: reverting one toggle does not undo a DIFFERENT one that succeeded", async () => {
+    // The revert has to put back the value that column held a moment ago, not
+    // the value the page was rendered with. Reverting to the initial props
+    // would mean: turn marketing on (saved), then turn push off (fails), and
+    // marketing silently springs back to off while the database holds `true` -
+    // the UI claiming a state the database does not have, which is the exact
+    // thing this component's header forbids. Nothing pinned it until now.
+    mocks.saveConsent.mockResolvedValueOnce({ ok: true });
+    renderSettings(ALL_OFF);
+
+    fireEvent.click(toggle(LABELS.marketing_opt_in));
+    await waitFor(() =>
+      expect(toggle(LABELS.marketing_opt_in)).toHaveAttribute("aria-checked", "true"),
+    );
+
+    mocks.saveConsent.mockResolvedValue({ ok: false, message: "Nope." });
+    fireEvent.click(toggle(LABELS.push_enabled));
+    await screen.findByRole("alert");
+
+    // The failed one is back where the database has it...
+    expect(toggle(LABELS.push_enabled)).toHaveAttribute("aria-checked", "false");
+    // ...and the successful one is untouched.
+    expect(toggle(LABELS.marketing_opt_in)).toHaveAttribute("aria-checked", "true");
+    expect(toggle(LABELS.email_enabled)).toHaveAttribute("aria-checked", "false");
+    expect(toggle(LABELS.gps_fraud_opt_in)).toHaveAttribute("aria-checked", "false");
+  });
+
   it("clears a previous failure once a later save succeeds", async () => {
     mocks.saveConsent.mockResolvedValueOnce({ ok: false, message: "Nope." });
     renderSettings(ALL_OFF);
@@ -330,6 +357,31 @@ describe("the optimistic flip", () => {
     fireEvent.click(toggle(LABELS.marketing_opt_in));
 
     expect(toggle(LABELS.marketing_opt_in)).toHaveAttribute("aria-checked", "true");
+    release({ ok: true });
+  });
+
+  it("CRITICAL: the in-flight lock is PER COLUMN, not a lock on the whole form", async () => {
+    // handleToggle's comment claims exactly this ("Per COLUMN, not a global
+    // busy flag: … a slow write on one has no business freezing the other
+    // three"), and a global `if (saving !== null) return` passes every other
+    // test in this file. The four consents are four independent decisions; one
+    // slow round trip must not swallow a tap on another.
+    let release: (value: { ok: true }) => void = () => {};
+    mocks.saveConsent.mockReturnValueOnce(
+      new Promise<{ ok: true }>((resolve) => {
+        release = resolve;
+      }),
+    );
+    renderSettings(ALL_OFF);
+
+    fireEvent.click(toggle(LABELS.marketing_opt_in));
+    fireEvent.click(toggle(LABELS.email_enabled));
+
+    await waitFor(() => expect(mocks.saveConsent).toHaveBeenCalledTimes(2));
+    expect(mocks.saveConsent.mock.calls.map((call) => call[0])).toEqual([
+      "marketing_opt_in",
+      "email_enabled",
+    ]);
     release({ ok: true });
   });
 

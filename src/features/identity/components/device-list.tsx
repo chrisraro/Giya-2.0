@@ -112,22 +112,26 @@ export function DeviceList({ devices: initial }: DeviceListProps) {
                 </span>
               ) : null}
             </div>
-            {/* The accessible name carries the device AND, on the current row,
-                the consequence. "Remove" repeated down a list is unusable with
-                a screen reader, and a control that signs you out should say so
-                before it is pressed. */}
+            {/* THE CONSEQUENCE IS IN THE VISIBLE TEXT, not in an aria-label.
+                `aria-label` REPLACES the accessible name; it adds nothing to
+                what a sighted person reads. A button reading "Remove" whose
+                hidden name says "this signs you out" warns precisely the users
+                who were not going to be surprised.
+
+                The device name is appended in a visually hidden span rather
+                than by overriding the name, so the accessible name CONTAINS the
+                visible label (WCAG 2.5.3 Label in Name - a voice-control user
+                saying "click remove and sign out" has to hit this button) while
+                a screen reader still gets "Remove and sign out, Chrome on
+                Windows" instead of "Remove" four times down a list. */}
             <Button
               type="button"
               variant="text"
               onClick={() => void handleRemove(device)}
               disabled={removing === device.id}
-              aria-label={
-                device.isCurrent
-                  ? `Remove ${device.summary}. This signs you out here.`
-                  : `Remove ${device.summary}`
-              }
             >
-              Remove
+              {device.isCurrent ? "Remove and sign out" : "Remove"}
+              <span className="sr-only">, {device.summary}</span>
             </Button>
           </motion.li>
         ))}
@@ -141,11 +145,20 @@ export function DeviceList({ devices: initial }: DeviceListProps) {
 
       {/* Says what removing does and, just as importantly, what it does not.
           Silence here would mislead somebody who came to this screen because
-          they think another person is using their account. */}
+          they think another person is using their account.
+
+          THE SECOND SENTENCE IS THE QUALIFICATION, and it is not optional. The
+          disclaimer before it is true of every row EXCEPT the one the consumer
+          is on, where revokeDevice really does call auth.signOut(). Left
+          unqualified it is T3.2's Critical inverted: there the product claimed
+          a control it did not have; here it would disclaim a consequence it
+          does have, and the surprise sign-out lands on somebody who has just
+          read that nothing would happen. */}
       <p className="text-body-s text-on-surface-variant">
         Removing a device takes it off this list. It does not sign that browser out on its own, so
-        it stays signed in until its session expires or somebody signs out on it. If you think
-        someone else is using your account,{" "}
+        it stays signed in until its session expires or somebody signs out on it. Removing the
+        device you are using now signs you out here. If you think someone else is using your
+        account,{" "}
         <Link href="/forgot-password" className="text-primary hover:underline">
           change your password
         </Link>
