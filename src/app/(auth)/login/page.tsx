@@ -198,7 +198,7 @@ function LoginPageInner() {
             }}
             {...(passwordError ? { errorText: passwordError } : {})}
           />
-          <Link href="#" className="self-end text-label-l text-primary hover:underline">
+          <Link href="/forgot-password" className="self-end text-label-l text-primary hover:underline">
             Forgot password
           </Link>
         </div>

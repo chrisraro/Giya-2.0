@@ -120,6 +120,14 @@ export interface HandlerResult<TData> {
   data: TData;
   status?: number;
   meta?: Record<string, unknown>;
+  // A plain Record, one value per key - not string[] or Headers. jsonResponse()
+  // below applies these with response.headers.set(key, value), not .append(),
+  // so a route that needs to emit TWO Set-Cookie headers in one response
+  // (e.g. clearing one cookie while setting another) can currently only
+  // express one of them here; the second would silently overwrite the
+  // first rather than erroring. True today (every current route needs at
+  // most one Set-Cookie - see src/app/api/v1/auth/reset-password/route.ts),
+  // but worth knowing before debugging it instead of reading it here.
   headers?: Record<string, string>;
 }
 
