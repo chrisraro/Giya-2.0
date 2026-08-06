@@ -132,70 +132,131 @@ export interface ResolvedInvitee {
 
 export type ResolveInviteeResult = ResolvedInvitee | { ok: false; message: string };
 
+/** The one column this module reads off `auth.users`. Deliberately narrow -
+ * see `findExistingAuthUser`'s header for why only `id`/`email` are ever
+ * selected. */
+interface AuthUserRow {
+  id: string;
+  email: string | null;
+}
+
+/**
+ * Looks an email up directly against `auth.users`, READ ONLY. Review fix
+ * (round 3, I3/C2): the coordinator confirmed live that `auth.users` is
+ * directly readable with the service-role client, which replaces what used
+ * to be this module's only way to find an existing account
+ * (`auth.admin.generateLink`, which - for an email with no account yet -
+ * also CREATES one). A plain read has none of that method's downsides for
+ * the existing-account case: no dependency on GoTrue's undocumented
+ * behaviour for an already-registered email, no possibility of silently
+ * minting a second identity for someone who already has one, and nothing
+ * created at all when the row is merely being looked up.
+ *
+ * `auth.users` IS a real Postgres table, just outside the `public` schema
+ * this project's generated `Database` type describes - `.schema(...)` is
+ * typed to accept only schema keys `Database` declares
+ * (`SupabaseClient.schema<DynamicSchema extends keyof Database>`), so this
+ * cast is required rather than a shortcut; widening the SHARED generated
+ * type for one caller reading one auth-schema table was rejected as the
+ * worse option. It is still exactly as privileged as every other read/write
+ * in this module: only ever a service-role client (RLS-bypassing by
+ * design), only ever called server-side, and scoped here to the two columns
+ * this caller actually needs - not `select("*")`, which would pull
+ * encrypted_password, confirmation tokens and every other authentication
+ * secret this function has no business touching.
+ */
+async function findExistingAuthUser(
+  supabase: SupabaseClient<Database>,
+  email: string,
+): Promise<AuthUserRow | null> {
+  const { data, error } = await (supabase as unknown as SupabaseClient)
+    .schema("auth")
+    .from("users")
+    .select("id, email")
+    .eq("email", email)
+    .maybeSingle<AuthUserRow>();
+
+  if (error !== null) {
+    // Not fatal to the invite: falls through to `generateLink` below, which
+    // for a genuinely-existing confirmed user fails cleanly on its own
+    // (an honest {ok:false}, never a silently-wrong id) rather than this
+    // function inventing a second, riskier failure mode of its own.
+    console.error("[businesses/staff] auth.users lookup failed", error);
+    return null;
+  }
+  return data;
+}
+
 /**
  * Resolves the auth user id an invite's `business_staff.user_id` should
- * point at, minting a brand-new (unconfirmed) account when the email has none
- * yet. `user_id` is NOT NULL with no default (0002) and there is no
- * "pending invite, no account" table anywhere in this schema, so this is the
- * ONLY point in the flow where that constraint could otherwise fail: without
- * it, inviting someone who has never signed up simply could not insert a row
- * at all, which is exactly the "no account" path doc 30 section 2.7 requires
- * ("No account -> registration form pre-filled with invited_email -> same
- * flip post-verification").
+ * point at. `user_id` is NOT NULL with no default (0002) and there is no
+ * "pending invite, no account" table anywhere in this schema, so this
+ * function is the ONLY point in the flow where that constraint could
+ * otherwise fail: without it, inviting someone who has never signed up
+ * simply could not insert a row at all, which is exactly the "no account"
+ * path doc 30 section 2.7 requires ("No account -> registration form
+ * pre-filled with invited_email -> same flip post-verification").
  *
- * DECISION (brief: "you should not need a migration" - this is how): uses
- * `auth.admin.generateLink({type: "invite", ...})` rather than
- * `admin.createUser` or `admin.inviteUserByEmail`. `generateLink` is
- * documented to "handle... the creation of the user for signup, invite and
- * magiclink" AND to send no email of its own (unlike `inviteUserByEmail`,
- * which fires Supabase's own templated mail) - this app owns 100% of the
- * invitee-facing copy and link (our own `/invite/[token]`, not Supabase's
- * confirm URL), so a second, competing "invite" email from Supabase's default
- * template would be actively confusing.
- *
- * WHAT THIS DOES NOT SOLVE, ON PURPOSE: resolving an email that ALREADY has a
- * Giya account to that SAME existing id relies entirely on `generateLink`'s
- * own server-side behaviour for an existing user, which this module cannot
- * observe without a live project (supabase-js's admin API has no
- * list-users-by-email filter to verify against independently - see this
- * function's test file for the injected-dependency seam this uncertainty is
- * pushed behind). Any failure - already registered and confirmed, rate
- * limited, malformed address - surfaces as a plain, honest `{ok: false}` with
- * the provider's own message, never a crash and never a silently-wrong id.
+ * TWO PATHS, IN ORDER (review fix, round 3):
+ *   1. READ `auth.users` for this email (`findExistingAuthUser`). Doc 30's
+ *      "Existing account" case is the COMMON one - the product recruits
+ *      merchants' staff as consumers first - and a plain read resolves it
+ *      with zero side effects and zero dependency on an admin API's
+ *      undocumented behaviour for an existing address.
+ *   2. Only when no row exists does "no account yet" become real, and only
+ *      THEN does this call `auth.admin.generateLink({type: "invite", ...})`
+ *      - which is documented to "handle... the creation of the user for
+ *      signup, invite and magiclink" AND to send no email of its own
+ *      (unlike `inviteUserByEmail`, which fires Supabase's own templated
+ *      mail) - this app owns 100% of the invitee-facing copy and link (our
+ *      own `/invite/[token]`, not Supabase's confirm URL), so a second,
+ *      competing "invite" email from Supabase's default template would be
+ *      actively confusing.
+ * Any `generateLink` failure - rate limited, malformed address, some other
+ * provider error - surfaces as a plain, honest `{ok: false}` with the
+ * provider's own message, never a crash and never a silently-wrong id.
  *
  * ===========================================================================
  * FLAGGED, UNRESOLVED (review C2): SELF-SERVE MINTING OF THIRD-PARTY ACCOUNTS
  * ===========================================================================
- * This function calls `auth.admin.createUser`-adjacent machinery
- * (`generateLink` creates the account when none exists) on an email address
- * supplied by the INVITING business, with no verification that address
- * belongs to who the inviter says it does. Business registration
- * (`register_business`, 0003) is self-serve with no approval gate. So: any
- * self-registered business, through this one text field, can cause Giya to
- * create a real `auth.users` row - and, via `handle_new_user`'s trigger
- * (0003), a `profiles` row AND a `consumers` row - for an arbitrary
- * third-party address that never asked for a Giya account, never signed up,
- * and never consented to being profiled as a consumer. There is no rate
- * limit on invites in this module, and REVOKING an invite (`revokeInvite`)
- * does NOT delete or otherwise clean up the auth account it minted - the
- * shadow account persists indefinitely even for a revoked, never-accepted
- * invite.
+ * NARROWED by the round-3 fix above, NOT resolved. Before this change, EVERY
+ * invite could mint an account, existing or not. Now `generateLink` (and the
+ * account creation it can trigger) is reached ONLY for an email with no
+ * prior `auth.users` row - genuinely new addresses. That case still stands:
+ * business registration (`register_business`, 0003) is self-serve with no
+ * approval gate, so any self-registered business, through this one text
+ * field, can still cause Giya to create a real `auth.users` row - and, via
+ * `handle_new_user`'s trigger (0003), a `profiles` row AND a `consumers`
+ * row - for an arbitrary third-party address that never asked for a Giya
+ * account, never signed up, and never consented to being profiled as a
+ * consumer. There is still no rate limit on invites in this module, and
+ * REVOKING an invite (`revokeInvite`) still does NOT delete or otherwise
+ * clean up an auth account this path minted - the shadow account persists
+ * indefinitely even for a revoked, never-accepted invite.
  *
- * This is a genuine doc 15 (PII / consent) question, not a coding bug this
- * function can fix unilaterally: is minting an unconfirmed account on
- * someone else's say-so an acceptable trade for letting a legitimate "no
- * account yet" invite work at all (the brief's required behavior #2), or
- * does it need a rate limit, an approval step, a cleanup-on-revoke path, or
- * an architectural change (resolve `user_id` at ACCEPT time against a
- * nullable column instead, which needs a migration this task was told to
- * avoid)? RECORDED HERE, per review instruction, rather than decided
- * unilaterally - this needs product/security sign-off before this path sees
- * real traffic, not a default this function quietly picked.
+ * This remains a genuine doc 15 (PII / consent) question, not a coding bug
+ * this function can fix unilaterally: is minting an unconfirmed account on
+ * someone else's say-so, for a genuinely new address, an acceptable trade
+ * for letting the "no account yet" invite requirement work at all (the
+ * brief's required behavior #2), or does it need a rate limit, an approval
+ * step, a cleanup-on-revoke path, or an architectural change (resolve
+ * `user_id` at ACCEPT time against a nullable column instead, which needs a
+ * migration this task was told to avoid)? RECORDED HERE, per review
+ * instruction, rather than decided unilaterally - this needs product/
+ * security sign-off before this path sees real traffic, not a default this
+ * function quietly picked.
  */
 async function defaultResolveInvitee(
   supabase: SupabaseClient<Database>,
   email: string,
 ): Promise<ResolveInviteeResult> {
+  const existing = await findExistingAuthUser(supabase, email);
+  if (existing !== null) {
+    // Resolved by READ. No account created, no action link needed - they
+    // can already sign in.
+    return { ok: true, userId: existing.id, actionLink: null };
+  }
+
   const { data, error } = await supabase.auth.admin.generateLink({ type: "invite", email });
   if (error !== null || data.user === null) {
     return { ok: false, message: error?.message ?? "Could not prepare this invite." };

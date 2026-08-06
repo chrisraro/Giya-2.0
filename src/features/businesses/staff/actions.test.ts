@@ -30,6 +30,8 @@ const mocks = vi.hoisted(() => {
     serviceFrom: vi.fn(),
     serviceClient: vi.fn(),
     generateLink: vi.fn(),
+    schemaFrom: vi.fn(),
+    schema: vi.fn(),
   };
 });
 
@@ -106,9 +108,19 @@ beforeEach(() => {
   };
   serviceTable("audit_logs").insert = vi.fn(() => ({ error: null }));
   mocks.serviceFrom.mockImplementation((name: string) => serviceBuilders[name]);
+
+  // `findExistingAuthUser` (round-3 review fix): defaults to "no existing
+  // row", matching every test below, all written expecting the
+  // generateLink/account-creation path.
+  const authUsers = mocks.makeBuilder();
+  authUsers.__result = { data: null, error: null };
+  mocks.schemaFrom.mockReturnValue(authUsers);
+  mocks.schema.mockReturnValue({ from: mocks.schemaFrom });
+
   mocks.serviceClient.mockReturnValue({
     from: mocks.serviceFrom,
     auth: { admin: { generateLink: mocks.generateLink } },
+    schema: mocks.schema,
   });
   mocks.generateLink.mockResolvedValue({
     data: { user: { id: "invitee-1" }, properties: { action_link: null } },

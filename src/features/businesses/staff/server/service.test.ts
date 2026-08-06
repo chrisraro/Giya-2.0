@@ -34,6 +34,8 @@ const mocks = vi.hoisted(() => {
     serviceFrom: vi.fn(),
     serviceClient: vi.fn(),
     generateLink: vi.fn(),
+    schemaFrom: vi.fn(),
+    schema: vi.fn(),
   };
 });
 
@@ -122,15 +124,34 @@ beforeEach(() => {
   serviceTable("businesses").__result = { data: { name: "Kape Diaria" }, error: null };
 
   mocks.serviceFrom.mockImplementation((name: string) => serviceTable(name));
+
+  // `findExistingAuthUser` (round-3 review fix): `.schema("auth").from(
+  // "users")...`. Defaults to "no existing row", so every pre-existing test
+  // below - all written before this read was added, all expecting the
+  // generateLink/account-creation path - keeps its original behaviour
+  // unless a test explicitly overrides `authUsersTable().__result`.
+  const authUsers = mocks.makeBuilder();
+  authUsers.__result = { data: null, error: null };
+  mocks.schemaFrom.mockReturnValue(authUsers);
+  mocks.schema.mockReturnValue({ from: mocks.schemaFrom });
+  serviceBuilders.__auth_users = authUsers;
+
   mocks.serviceClient.mockReturnValue({
     from: mocks.serviceFrom,
     auth: { admin: { generateLink: mocks.generateLink } },
+    schema: mocks.schema,
   });
   mocks.generateLink.mockResolvedValue({
     data: { user: { id: INVITEE_USER_ID }, properties: { action_link: null } },
     error: null,
   });
 });
+
+/** `auth.users` fake behind `findExistingAuthUser` - see the `beforeEach`
+ * comment above for why it defaults to "not found". */
+function authUsersTable(): Builder {
+  return serviceTable("__auth_users");
+}
 
 // ===========================================================================
 // invite: the target-role refusal (owner can invite anyone but owner;
@@ -198,6 +219,71 @@ describe("inviteStaff: role gating", () => {
 
     expect(result.ok).toBe(false);
     expect(serviceTable("business_staff").insert).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// Round 3 review fix: resolving the invitee is READ-FIRST.
+// findExistingAuthUser looks `auth.users` up by email BEFORE
+// `generateLink` (which can CREATE an account) ever runs. An existing
+// account must be resolved with zero side effects.
+// ===========================================================================
+
+describe("inviteStaff: resolving the invitee (read-first, round 3)", () => {
+  it("resolves an EXISTING account by reading auth.users, and does NOT call generateLink", async () => {
+    // Mutant this catches: skipping the read (or ignoring what it found) and
+    // always calling generateLink would still successfully invite this
+    // person, so `result.ok` alone cannot tell the two paths apart - only
+    // the assertion on `mocks.generateLink` proves NOTHING was created for
+    // an address that already has an account.
+    const EXISTING_ID = "already-has-an-account";
+    authUsersTable().__result = { data: { id: EXISTING_ID, email: "existing@example.com" }, error: null };
+    serviceTable("business_staff").__result = {
+      data: baseStaffRow({ user_id: EXISTING_ID, invited_email: "existing@example.com" }),
+      error: null,
+    };
+
+    const result = await service.inviteStaff(BUSINESS, OWNER_ACTOR, {
+      email: "existing@example.com",
+      role: "staff",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(mocks.generateLink).not.toHaveBeenCalled();
+    const patch = firstCallArg(serviceTable("business_staff"), "insert");
+    expect(patch.user_id).toBe(EXISTING_ID);
+  });
+
+  it("falls back to generateLink (account creation) only when auth.users has no row for this email", async () => {
+    // The mirror of the test above: confirms the fallback path still runs,
+    // not just that the new path short-circuits it.
+    authUsersTable().__result = { data: null, error: null };
+    serviceTable("business_staff").__result = { data: baseStaffRow(), error: null };
+
+    await service.inviteStaff(BUSINESS, OWNER_ACTOR, { email: "new@example.com", role: "staff" });
+
+    expect(mocks.generateLink).toHaveBeenCalledWith({ type: "invite", email: "new@example.com" });
+  });
+
+  it("queries auth.users by the exact invited email", async () => {
+    serviceTable("business_staff").__result = { data: baseStaffRow(), error: null };
+
+    await service.inviteStaff(BUSINESS, OWNER_ACTOR, { email: "someone@example.com", role: "staff" });
+
+    expect(authUsersTable().eq).toHaveBeenCalledWith("email", "someone@example.com");
+  });
+
+  it("a failed auth.users read degrades to the fallback path rather than failing the whole invite", async () => {
+    authUsersTable().__result = { data: null, error: { message: "connection reset" } };
+    serviceTable("business_staff").__result = { data: baseStaffRow(), error: null };
+
+    const result = await service.inviteStaff(BUSINESS, OWNER_ACTOR, {
+      email: "new@example.com",
+      role: "staff",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(mocks.generateLink).toHaveBeenCalled();
   });
 });
 
