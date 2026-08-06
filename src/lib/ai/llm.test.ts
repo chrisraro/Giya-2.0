@@ -1639,6 +1639,37 @@ describe("onGatewaySkip (review finding #4)", () => {
     // flip, which is the exact confusion #4 exists to remove.
   });
 
+  // Review finding #3: the test above only exercises ONE of the several
+  // early-return null paths (the retry-exhausted one). A mutant that adds
+  // `reportGatewaySkip(request.onGatewaySkip, "flag_off")` to the
+  // NO-API-KEY early return specifically (a different branch entirely,
+  // above where the kill switch and budget checks even run) would survive
+  // it. Reuses the exact `GROQ_API_KEY = undefined` fixture the
+  // `recordAiSpend` fence test above (`"never records spend for a call
+  // that never reached the provider"`) already established.
+  it("never fires for the no-api-key early return either - a second, independent null path", async () => {
+    mocks.serverEnv.GROQ_API_KEY = undefined;
+    const doFetch = fetchReturning(groqBody());
+    const onGatewaySkip = vi.fn();
+
+    const result = await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      onGatewaySkip,
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(result).toBeNull();
+    expect(doFetch).not.toHaveBeenCalled();
+    expect(onGatewaySkip).not.toHaveBeenCalled();
+    // Named mutant: fire onGatewaySkip (with either reason) from the
+    // `apiKey === null` branch. Killed - a missing credential is a
+    // deployment/config fact, not an operator's deliberate kill-switch or
+    // budget decision, and conflating the two would make this exact
+    // dormant-key state (documented elsewhere as "not an error, and not
+    // worth an error-level log on every receipt") misread as a toggle.
+  });
+
   it("does not throw, and still returns null, when the callback itself throws", async () => {
     mocks.flagEnabled.value = false;
     const doFetch = fetchReturning(groqBody());

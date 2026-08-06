@@ -539,6 +539,16 @@ async function chat(request: ChatRequest): Promise<ChatOutcome | null> {
       return null;
     }
 
+    // Consistency note for whoever eventually wires a caller to pass this:
+    // unlike the two gates above, a `budgetMicros` refusal does NOT call
+    // `reportGatewaySkip`. It is dormant today (no caller in this codebase
+    // passes it - `checkAiBudget` above is the doc 38 section 10 mechanism
+    // that actually runs), so this is not an observed gap, but a caller
+    // that starts passing it will get the SAME null every other refusal
+    // produces with no `onGatewaySkip` signal behind it, silently
+    // narrower than the budget-cap fence #4 built. If this parameter is
+    // ever wired up for real, give it a `reportGatewaySkip(...,
+    // "budget_exceeded")` call here to match.
     if (request.budgetMicros !== undefined) {
       const estimate = estimateCostMicros(model, request.promptChars, maxTokens);
       if (estimate > request.budgetMicros) {

@@ -176,32 +176,48 @@ function settingsClient(row: unknown) {
   };
 }
 
-/** A settings client for the `NO_BUSINESS_BUCKET` sentinel:
+/**
+ * A settings client for the `NO_BUSINESS_BUCKET` sentinel:
  * `loadAiBudgetSetting` must route this scope through `.is("business_id",
  * null)`, never through `.eq("business_id", "unmatched")` - that column is
- * `uuid`, and PostgREST would 22P02 on a non-uuid comparison value. */
+ * `uuid`, and PostgREST would 22P02 on a non-uuid comparison value.
+ *
+ * Review finding #2: the first version of this fake gave `.or(...)` a
+ * working fallback response "so a wrong-branch mutant still gets a
+ * response shape it can await, rather than crashing before the 'wrong
+ * branch' assertion below has a chance to fail honestly" - but no test
+ * actually asserted which branch fired, so that fallback was the escape
+ * hatch that let a mutant routing the sentinel through `.or(...)` survive
+ * silently. Fixed by recording which branch was actually called
+ * (`branchCalled`, read by the caller) rather than trusting the `expect()`
+ * calls buried inside the `.is()` handler alone - those only fire if `.is`
+ * is reached at all, and `.or` reaching a response with no assertion on it
+ * is exactly how the mutant escaped.
+ */
 function platformOnlySettingsClient(row: unknown) {
-  return {
+  const state = { branchCalled: null as "is" | "or" | null };
+  const client = {
     from: (table: string) => {
       expect(table).toBe("settings");
       return {
         select: () => ({
           eq: () => ({
             is: (column: string, value: unknown) => {
+              state.branchCalled = "is";
               expect(column).toBe("business_id");
               expect(value).toBeNull();
               return Promise.resolve({ data: row === undefined ? [] : [row], error: null });
             },
-            // Present so a mutant that keeps using `.or(...)` for the
-            // sentinel path still gets a response shape it can await,
-            // rather than crashing before the "wrong branch" assertion
-            // below has a chance to fail honestly.
-            or: () => Promise.resolve({ data: row === undefined ? [] : [row], error: null }),
+            or: () => {
+              state.branchCalled = "or";
+              return Promise.resolve({ data: row === undefined ? [] : [row], error: null });
+            },
           }),
         }),
       };
     },
   };
+  return { client, state };
 }
 
 /** A settings client whose query resolves with a Postgres-shaped error
@@ -237,14 +253,13 @@ function throwingSettingsClient(error: Error) {
 
 describe("checkAiBudget", () => {
   it("pools a call with no matched business into the shared unmatched-business bucket, and CAPS it (review finding I2)", async () => {
-    createServiceRoleClient.mockReturnValue(
-      platformOnlySettingsClient({
-        scope: "platform",
-        business_id: null,
-        key: "ai.budget",
-        value: { business_daily_cost_micros: 1_000 },
-      }),
-    );
+    const settings = platformOnlySettingsClient({
+      scope: "platform",
+      business_id: null,
+      key: "ai.budget",
+      value: { business_daily_cost_micros: 1_000 },
+    });
+    createServiceRoleClient.mockReturnValue(settings.client);
     redisGet.mockResolvedValue("999");
 
     const result = await checkAiBudget({
@@ -255,22 +270,25 @@ describe("checkAiBudget", () => {
 
     expect(redisGet).toHaveBeenCalledWith(`test:ai:budget:${NO_BUSINESS_BUCKET}:20260806`);
     expect(result).toEqual({ allowed: false, capMicros: 1_000, spentMicros: 999 });
-    // Named mutant: keep the OLD `if (input.businessId === null) return
-    // {allowed: true, capMicros: Infinity, ...}` short-circuit. Killed - a
-    // consumer who simply omits `business_id` on submit
-    // (receipts/server/submit.ts's field is optional) would spend against
-    // no cap at all, which is the exact hole this task exists to close.
+    // Review finding #2: assert the ROUTE, not only the outcome. A mutant
+    // that routes the sentinel through `.or("business_id.eq.unmatched",
+    // ...)` instead of `.is("business_id", null)` would, on a real
+    // Postgres, 22P02 -> settings error -> DEFAULT_AI_BUDGET (still a cap,
+    // just the wrong one and a noisy error log every call) - and with this
+    // fake's OLD unconditional `.or()` fallback, it would ALSO pass every
+    // outcome assertion above, because the fallback silently returned the
+    // same row. This assertion is what actually catches that mutant.
+    expect(settings.state.branchCalled).toBe("is");
   });
 
   it("shares ONE counter across every unmatched-business call, not one per call", async () => {
-    createServiceRoleClient.mockReturnValue(
-      platformOnlySettingsClient({
-        scope: "platform",
-        business_id: null,
-        key: "ai.budget",
-        value: { business_daily_cost_micros: 1_000 },
-      }),
-    );
+    const settings = platformOnlySettingsClient({
+      scope: "platform",
+      business_id: null,
+      key: "ai.budget",
+      value: { business_daily_cost_micros: 1_000 },
+    });
+    createServiceRoleClient.mockReturnValue(settings.client);
     redisGet.mockResolvedValue("0");
 
     await checkAiBudget({ businessId: null, estimatedCostMicros: 1, now: new Date("2026-08-06T00:00:00.000Z") });
@@ -469,9 +487,66 @@ describe("checkAiBudget", () => {
     expect(settingsReads).toBe(1);
     // Named mutant: skip the setting cache entirely (call
     // loadAiBudgetSetting directly on every checkAiBudget). Killed -
-    // `settingsReads` would be 2. This does NOT prove the cache expires
-    // (a permanent cache also reads 1 here); that half is the Redis spend
-    // read, which is asserted to run on EVERY call, unlike the setting.
+    // `settingsReads` would be 2. This does NOT prove the cache EXPIRES -
+    // a permanent cache also reads 1 here, since both calls land inside
+    // the 30s window. That half is proven by the next test, not by this
+    // one and not by the Redis-spend-read-every-call test below (review
+    // finding #1: that test proves the SPEND read runs every call, which
+    // says nothing about whether the SETTING read ever expires - they are
+    // independent caches, and the first version of this file's comment
+    // wrongly conflated them).
+
+    vi.useRealTimers();
+  });
+
+  it("re-reads the setting after the 30s TTL expires, and picks up a changed cap (review finding #1)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-06T00:00:00.000Z"));
+
+    let settingsReads = 0;
+    let capMicros = 1_000;
+    createServiceRoleClient.mockReturnValue({
+      from: (table: string) => {
+        expect(table).toBe("settings");
+        return {
+          select: () => ({
+            eq: () => ({
+              or: () => {
+                settingsReads += 1;
+                return Promise.resolve({
+                  data: [
+                    { scope: "platform", business_id: null, key: "ai.budget", value: { business_daily_cost_micros: capMicros } },
+                  ],
+                  error: null,
+                });
+              },
+            }),
+          }),
+        };
+      },
+    });
+    redisGet.mockResolvedValue("0");
+
+    const first = await checkAiBudget({ businessId: BUSINESS_ID, estimatedCostMicros: 1, now: new Date() });
+    expect(first.capMicros).toBe(1_000);
+
+    // The operator lowers the cap mid-window, exactly the "lower ai.budget
+    // during an incident" scenario review finding #1 names.
+    capMicros = 100;
+    vi.setSystemTime(new Date("2026-08-06T00:00:30.001Z")); // +30.001s, past the TTL
+    const second = await checkAiBudget({ businessId: BUSINESS_ID, estimatedCostMicros: 1, now: new Date() });
+
+    expect(settingsReads).toBe(2);
+    expect(second.capMicros).toBe(100);
+    // Named mutant: force the cache to never expire (drop the `expiresAt`
+    // check in `loadAiBudgetSettingCached`, i.e.
+    // `if (cached !== undefined && cached.expiresAt > now)` ->
+    // `if (cached !== undefined)`). Killed here specifically, not by the
+    // "costs one settings read" test above: a permanent cache would still
+    // read 1 (not 2) and would still report the STALE cap of 1_000, not
+    // the operator's new 100 - so an incident-time cap change would never
+    // take effect in a long-lived process, which is exactly the failure
+    // mode review finding #1 identifies.
 
     vi.useRealTimers();
   });

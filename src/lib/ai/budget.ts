@@ -89,6 +89,27 @@ import { createServiceRoleClient } from "@/lib/supabase/service";
 // value for that slot. It costs no new code path - `checkAiBudget` and
 // `recordAiSpend` both resolve a "scope key" first and are otherwise
 // unchanged for a real business id.
+//
+// CAPPED, NOT FAIRLY CAPPED - stated once, here, so it is not read past. The
+// bucket is one shared platform-wide daily allowance for every unmatched
+// call across every consumer account, with no per-consumer or per-device
+// isolation inside it; a single misbehaving or coordinated client can
+// exhaust the whole thing for every OTHER consumer's genuinely-unmatched
+// receipt that day. That is still strictly better than the unbounded,
+// invisible, per-client exemption it replaces, and the loss on the losing
+// side is bounded (an unmatched receipt that skips parse-assist still
+// prices off the deterministic tiers) - but "capped" and "fairly capped"
+// are different claims, and only the first is true here.
+//
+// ONE MORE CONSEQUENCE WORTH NAMING: the platform `ai.budget` row is a
+// SINGLE KNOB serving two populations at once. It supplies both the cap
+// for this shared unmatched pool AND the default cap for every business
+// that has configured no override of its own (`resolveAiBudgetSetting`'s
+// platform fallback). An operator raising it to give the unmatched pool
+// more headroom during an incident silently raises the default ceiling
+// for every un-overridden tenant too, and there is no way to change one
+// without the other short of also writing a business-scope override row
+// for every affected tenant.
 // ===========================================================================
 
 const LOG_PREFIX = "[ai/budget]";
