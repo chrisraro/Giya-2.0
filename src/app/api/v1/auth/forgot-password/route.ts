@@ -16,6 +16,17 @@ const bodySchema = z.object({
     .max(320)
     .regex(EMAIL_RE, "Enter a valid email address")
     .toLowerCase(),
+  // Optional: hCaptcha is only rendered client-side when
+  // NEXT_PUBLIC_HCAPTCHA_SITE_KEY is configured (see captcha.tsx's
+  // CAPTCHA_ENABLED), so a deployment without it never sends this field.
+  // Zod strips unknown keys by default - this field MUST be declared here or
+  // a real, verified token the client went to the trouble of collecting is
+  // silently discarded before it ever reaches Supabase, which then either
+  // rejects the call outright (captcha required, none supplied) or - if
+  // captcha enforcement is off - just ignores it. Either way the caller sees
+  // the same "check your email" confirmation and no email ever arrives,
+  // which is a worse defect than the one this whole feature exists to fix.
+  captchaToken: z.string().optional(),
 });
 
 type ForgotPasswordBody = z.infer<typeof bodySchema>;
@@ -50,6 +61,13 @@ const IP_RATE_LIMIT = 10;
 const IP_RATE_LIMIT_WINDOW_SECONDS = 600;
 const EMAIL_RATE_LIMIT = 3;
 const EMAIL_RATE_LIMIT_WINDOW_SECONDS = 900;
+
+// Same defense, same number, as src/lib/api/handler.ts's own
+// RATE_LIMIT_KEY_MAX_LENGTH: the address is caller-controlled (zod caps it
+// at 320 chars, which is still far more than a rate-limit key suffix has
+// any business being), so it is clamped before it becomes part of a Redis
+// key rather than trusted to already be short.
+const RATE_LIMIT_KEY_MAX_LENGTH = 128;
 
 // Floor under the resetPasswordForEmail round trip so a known address (which
 // may involve minting a token and handing off to the mail provider) and an
@@ -88,7 +106,11 @@ export const POST = defineHandler<ForgotPasswordResponse, ForgotPasswordBody>({
     // in the body. See the file-level comment for why this is a second,
     // independent check rather than a single composite (ip, email) key.
     const emailLimit = await checkRateLimit({
-      key: redisKey("rl", "auth-forgot-password-email", body.email),
+      key: redisKey(
+        "rl",
+        "auth-forgot-password-email",
+        body.email.slice(0, RATE_LIMIT_KEY_MAX_LENGTH),
+      ),
       limit: EMAIL_RATE_LIMIT,
       windowSeconds: EMAIL_RATE_LIMIT_WINDOW_SECONDS,
     });
@@ -110,11 +132,21 @@ export const POST = defineHandler<ForgotPasswordResponse, ForgotPasswordBody>({
         () =>
           supabase.auth.resetPasswordForEmail(body.email, {
             redirectTo: `${request.nextUrl.origin}/auth/callback?next=/reset-password`,
+            ...(body.captchaToken ? { captchaToken: body.captchaToken } : {}),
           }),
         MIN_RESPONSE_DELAY_MS,
       );
-    } catch {
-      // Swallowed intentionally - see comment above.
+    } catch (error) {
+      // Swallowed toward the CALLER - see comment above for why the client
+      // must never learn this happened. But an empty catch with no server
+      // log is how this exact class of bug (captcha token silently
+      // discarded, zero emails sent) went unnoticed: enumeration-uniformity
+      // is a promise about what the CLIENT can observe, not about what this
+      // server logs for itself. Matches the logging convention already used
+      // for a swallowed/handled failure elsewhere in this pipeline (see
+      // src/lib/api/handler.ts's unhandled-error log and
+      // src/lib/rate-limit.ts's Redis-failure log).
+      console.error("[api] auth-forgot-password: resetPasswordForEmail failed", error);
     }
 
     return {

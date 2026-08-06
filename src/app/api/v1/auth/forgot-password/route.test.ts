@@ -44,11 +44,38 @@ async function callRoute(body: unknown = { email: "a@b.com" }) {
   return POST(request);
 }
 
+interface RateLimitAnswer {
+  ok: boolean;
+  remaining: number;
+  resetSeconds: number;
+}
+
+const RL_OK: RateLimitAnswer = { ok: true, remaining: 9, resetSeconds: 600 };
+
+// Keyed by which BUDGET the call is actually for (recognized by the key's
+// own content, via the `redisKey` mock below - the IP-scoped key always
+// contains "ip:", the address-scoped key never does), not by call order.
+// A previous version of this suite used `mockResolvedValueOnce` chains
+// instead, which pass regardless of whether the two budgets are wired
+// correctly: removing the IP limiter entirely just shifts which check
+// consumes the first queued answer, and a test asserting "429 when the IP
+// is over budget" can still see a 429 - for the wrong reason - because the
+// email check happened to inherit that answer. Keying by the real argument
+// closes that hole: an answer configured for "ip" is only ever returned to
+// a call whose key actually says "ip".
+function mockRateLimit(overrides: { ip?: RateLimitAnswer; email?: RateLimitAnswer } = {}) {
+  const ip = overrides.ip ?? RL_OK;
+  const email = overrides.email ?? RL_OK;
+  mocks.checkRateLimit.mockImplementation(async ({ key }: { key: string }) => {
+    return key.includes(":ip:") ? ip : email;
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.getUser.mockResolvedValue({ data: { user: null } });
   mocks.resetPasswordForEmail.mockResolvedValue({ data: {}, error: null });
-  mocks.checkRateLimit.mockResolvedValue({ ok: true, remaining: 9, resetSeconds: 600 });
+  mockRateLimit();
 });
 
 describe("POST /api/v1/auth/forgot-password", () => {
@@ -66,7 +93,7 @@ describe("POST /api/v1/auth/forgot-password", () => {
     expect(json.data.message).toBeTruthy();
   });
 
-  it("returns a byte-identical body whether Supabase answers with success or an error", async () => {
+  it("returns a byte-identical body AND header set whether Supabase answers with success or an error", async () => {
     mocks.resetPasswordForEmail.mockResolvedValueOnce({ data: {}, error: null });
     const successResponse = await callRoute({ email: "known@b.com" });
     const successJson = await successResponse.json();
@@ -81,6 +108,20 @@ describe("POST /api/v1/auth/forgot-password", () => {
     expect(errorResponse.status).toBe(successResponse.status);
     expect(errorJson.data).toEqual(successJson.data);
     expect(JSON.stringify(errorJson)).not.toMatch(/Unable to validate email address/);
+
+    // Body equality alone would miss a leak carried in a HEADER instead of
+    // the JSON payload (e.g. a hypothetical X-Account-Exists). X-Request-Id
+    // is excluded because it is a fresh, random per-call correlation id by
+    // design (src/lib/api/handler.ts's resolveRequestId) - it is SUPPOSED to
+    // differ every call, success or not, and asserting it matches would make
+    // this test fail for a reason that has nothing to do with enumeration.
+    function headersWithoutRequestId(response: Response): Record<string, string> {
+      const entries = [...response.headers.entries()].filter(
+        ([name]) => name.toLowerCase() !== "x-request-id",
+      );
+      return Object.fromEntries(entries);
+    }
+    expect(headersWithoutRequestId(errorResponse)).toEqual(headersWithoutRequestId(successResponse));
   });
 
   it("swallows a rejected resetPasswordForEmail call and still answers 200 with the generic body", async () => {
@@ -94,11 +135,41 @@ describe("POST /api/v1/auth/forgot-password", () => {
     expect(JSON.stringify(json)).not.toMatch(/network down/);
   });
 
+  it("logs a swallowed resetPasswordForEmail failure server-side, so it is not invisible everywhere", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const boom = new Error("network down");
+      mocks.resetPasswordForEmail.mockRejectedValueOnce(boom);
+
+      await callRoute({ email: "a@b.com" });
+
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("auth-forgot-password"), boom);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("422s a malformed email without calling resetPasswordForEmail", async () => {
     const response = await callRoute({ email: "not-an-email" });
 
     expect(response.status).toBe(422);
     expect(mocks.resetPasswordForEmail).not.toHaveBeenCalled();
+  });
+
+  it("forwards a submitted captchaToken to resetPasswordForEmail as options.captchaToken", async () => {
+    await callRoute({ email: "a@b.com", captchaToken: "verified-token" });
+
+    expect(mocks.resetPasswordForEmail).toHaveBeenCalledWith(
+      "a@b.com",
+      expect.objectContaining({ captchaToken: "verified-token" }),
+    );
+  });
+
+  it("omits captchaToken from options when the caller did not send one", async () => {
+    await callRoute({ email: "a@b.com" });
+
+    const [, options] = mocks.resetPasswordForEmail.mock.calls[0] as [string, Record<string, unknown>];
+    expect(options).not.toHaveProperty("captchaToken");
   });
 });
 
@@ -112,7 +183,7 @@ describe("rate limiting - per caller IP", () => {
   });
 
   it("answers 429 without calling resetPasswordForEmail once the caller's IP is over budget", async () => {
-    mocks.checkRateLimit.mockResolvedValueOnce({ ok: false, remaining: 0, resetSeconds: 45 });
+    mockRateLimit({ ip: { ok: false, remaining: 0, resetSeconds: 45 } });
 
     const response = await callRoute({ email: "a@b.com" });
 
@@ -136,11 +207,8 @@ describe("rate limiting - per target address", () => {
   });
 
   it("answers 429 without calling resetPasswordForEmail once the ADDRESS is over budget, even from a fresh IP", async () => {
-    // First call (IP check, inside defineHandler) succeeds; second call (the
-    // email check, made manually inside the handler) is over budget.
-    mocks.checkRateLimit
-      .mockResolvedValueOnce({ ok: true, remaining: 9, resetSeconds: 600 })
-      .mockResolvedValueOnce({ ok: false, remaining: 0, resetSeconds: 30 });
+    // IP budget is fine; the address budget alone is exhausted.
+    mockRateLimit({ email: { ok: false, remaining: 0, resetSeconds: 30 } });
 
     const response = await callRoute({ email: "victim@b.com" });
 
@@ -155,6 +223,22 @@ describe("rate limiting - per target address", () => {
     expect(mocks.checkRateLimit).toHaveBeenCalledWith(
       expect.objectContaining({ key: expect.stringContaining("victim@b.com") }),
     );
+  });
+
+  it("clamps a caller-controlled address to 128 chars before it enters the redis key, matching handler.ts's own defense for exactly this", async () => {
+    const longLocalPart = "x".repeat(300);
+    const email = `${longLocalPart}@b.com`; // 306 chars total, still under the 320 zod cap
+
+    await callRoute({ email });
+
+    const calls = mocks.checkRateLimit.mock.calls as [{ key: string }][];
+    const call = calls.find(([params]) => !params.key.includes(":ip:"));
+    expect(call).toBeDefined();
+    const [{ key }] = call!;
+    // "test:rl:auth-forgot-password-email:" is the fixed prefix the mocked
+    // redisKey produces; everything after it is the (clamped) address.
+    expect(key.length).toBeLessThanOrEqual("test:rl:auth-forgot-password-email:".length + 128);
+    expect(key).not.toContain(email); // the full 306-char address must not appear whole
   });
 });
 
@@ -180,7 +264,7 @@ describe("timing", () => {
   });
 
   it("does not delay a request refused by the rate limiter - only the real Supabase call is padded", async () => {
-    mocks.checkRateLimit.mockResolvedValueOnce({ ok: false, remaining: 0, resetSeconds: 45 });
+    mockRateLimit({ ip: { ok: false, remaining: 0, resetSeconds: 45 } });
     vi.useFakeTimers();
     try {
       const responsePromise = callRoute({ email: "a@b.com" });

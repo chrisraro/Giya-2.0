@@ -2,6 +2,200 @@
 
 Status: COMPLETE.
 
+## Round 2: review response (read this section first)
+
+The coordinator's review found one Critical (C1) and several Importants
+(I2-I6) against the round-1 submission below. All are fixed, TDD red-first
+for C1/I4/I5 as required, every new/changed assertion mechanically
+mutant-verified (edit source -> run -> watch fail -> revert -> confirm
+green). Full suite green (219 files / 4468 tests), `npx eslint .` clean
+(one pre-existing unrelated warning, untouched by this task), `npx tsc
+--noEmit` back to exactly 3 known errors (none in touched files - fixing
+C1/I4 introduced two real type errors of my own along the way, both fixed
+properly rather than cast away; see below).
+
+### C1 (Critical) - captchaToken silently dropped
+
+`route.ts`'s `bodySchema` was `z.object({ email })`. Zod strips unknown
+keys by default, so the `captchaToken` the client collected, transmitted,
+and expected to be verified was discarded before `resetPasswordForEmail`
+was ever called - with hCaptcha actually configured in this environment
+(confirmed by the coordinator against the ops doc) and GoTrue enforcing
+captcha on `/recover`, every submission with captcha enabled would have
+been silently rejected by Supabase, swallowed by my own enumeration-safe
+catch, and shown the success screen anyway. Zero emails, zero errors,
+zero log lines.
+
+Fix: added `captchaToken: z.string().optional()` to the schema and forward
+it as `options.captchaToken` in the `resetPasswordForEmail` call. Red
+first: `route.test.ts`'s "forwards a submitted captchaToken..." test failed
+against the original schema (proving the exact defect) before the fix.
+Mutant: re-drop `captchaToken` from the schema -> re-run -> caught by the
+same test. `login/page.tsx:96` and `signup/page.tsx`'s two call sites were
+the reference for what "forwarded correctly" looks like.
+
+### I6 - the swallow had no server-side log
+
+Added `console.error("[api] auth-forgot-password: resetPasswordForEmail
+failed", error)` inside the catch, matching the logging convention already
+used for a swallowed/handled failure elsewhere in this pipeline
+(`handler.ts`'s unhandled-error log, `rate-limit.ts`'s Redis-failure log).
+Client-visible uniformity (the whole point of this feature) and
+server-side observability are different concerns; the empty catch
+satisfied the first at the cost of making the second impossible, which is
+exactly how C1 went unnoticed. Test: mocks `console.error`, rejects
+`resetPasswordForEmail`, asserts the call. Mutant: drop the `console.error`
+call, keep the empty catch -> caught.
+
+### I3 - rate-limit tests were order-dependent, not content-dependent
+
+`route.test.ts` drove the shared `checkRateLimit` mock with
+`mockResolvedValueOnce` chains, implicitly assuming "first call = IP check,
+second call = address check." Removing the IP limiter entirely just shifts
+which check consumes the first queued answer, so the "429 when IP is over
+budget" test could still see a 429 - for the wrong reason. Fixed by keying
+the mock on the actual `key` argument (`mockImplementation(({key}) =>
+key.includes(":ip:") ? ipAnswer : emailAnswer)`) instead of call order, via
+a `mockRateLimit({ip, email})` helper. Mutant: drop the `rateLimit` config
+block from `defineHandler` entirely -> reran the full file -> exactly the
+three IP-scoped tests failed ("checks the caller's IP...", "answers 429...
+IP is over budget", "does not delay a request refused..."), while the
+address-scoped tests correctly stayed green (proving the two dimensions
+are now genuinely independent in the test, not just in the source).
+
+### I2 - the "byte-identical HTML" page test was vacuous
+
+`page.test.tsx` did `(await screen.findByText("Check your email")).closest
+("div")`. `AuthCard` splits into a header `<div>` (title + subtitle - both
+hard-coded, identical every render) and a sibling body `<div>` (the actual
+email address, which is what varies). `closest("div")` from the `<h1>`
+only ever reaches the header, so the assertion compared two things that
+were structurally guaranteed to be equal regardless of what the body
+contained. Fixed by diffing `render()`'s own `container.innerHTML` in
+full. Mutant, reproducing the reviewer's exact counter-example: changed
+`setSentTo(email)` to `setSentTo(response?.status === 200 ? email :
+\`${email} (not delivered)\`)` -> the new assertion failed with a diff
+showing exactly that suffix; confirmed restoring the source makes it pass
+again.
+
+### I4 - reset-password accepted ANY session, not a recovery session
+
+`getSession()` being truthy was the entire gate, so any already-signed-in
+user (or anyone holding an unlocked device with a stale session) could
+reach the new-password form and set a password without presenting the
+current one. This also falsified the "no captcha needed" reasoning from
+round 1, which assumed reaching the form required a real emailed link.
+
+Fix: the gate is now `getClaims()`'s `amr` (Authentication Methods
+Reference) JWT claim - entries are ordered most-recent-first, and GoTrue
+stamps `"recovery"` as the method exactly when the session's last
+authentication was a recovery flow, regardless of where the code exchange
+happened (confirmed via Supabase's own JWT Claims Reference docs, fetched
+during this round). `supabase.auth.onAuthStateChange`'s documented
+`PASSWORD_RECOVERY` event is kept as a first-class second admission path
+(literally what the coordinator asked for) - though I noted in the code
+that it may never fire in THIS app's specific architecture, since
+`/auth/callback` exchanges the recovery code server-side, and
+`PASSWORD_RECOVERY` is normally emitted by client-side code that
+processes the recovery URL itself, which this browser client never does.
+The `amr` check is what actually makes the gate work regardless; either
+signal admits (an "OR", not exclusive) since both are equally
+unforgeable evidence of a real recovery flow. `getSession()` is no longer
+called at all.
+
+Red first: all 9 tests in the rewritten `page.test.tsx` failed against the
+original `getSession()`-based page (the mock surface changed entirely, so
+this was a full red, not a targeted one). Mutants, each isolated and
+reverted: (1) admit on any truthy claims payload regardless of `amr` ->
+caught by the "ordinary signed-in session" test; (2) drop the
+`PASSWORD_RECOVERY` event listener's admit call -> caught by the dedicated
+event-path test; (3) drop the `subscription.unsubscribe()` cleanup ->
+caught by the unmount test.
+
+The no-captcha reasoning from round 1 is correct again now that "ready"
+actually requires recovery-specific evidence rather than merely a session,
+and I've said so explicitly rather than leaving it as a stale claim.
+
+### I5 - a rejected claims check left a permanently blank screen
+
+There was no `.catch()`, so a rejected `getSession()` (now `getClaims()`)
+left `status` at `"checking"` forever, which renders `null`. Fixed: both
+the resolve branch's non-recovery case and a new `.catch()` set
+`"no-session"` - the same honest, actionable "link expired, request a new
+one" state a genuinely absent session gets, since a failed check and a
+genuinely absent recovery session are indistinguishable from the user's
+perspective and both need the same recovery action. Mutant: delete the
+`.catch()` -> the I5 test reproduced the stuck screen as an unhandled
+promise rejection that never advances past `"checking"` -> caught (the
+test failure IS the bug, surfaced directly rather than needing a status
+assertion).
+
+### Two type errors introduced while fixing the above, fixed properly
+
+Fixing I4 required reading the JWT's `amr` claim, whose real type (checked
+against `@supabase/auth-js`'s actual `.d.ts`, not assumed) is `AMREntry[]
+| string[]` - a union of two array shapes, not an array of a union - so
+`amr[0]?.method` does not type-check. Added a small `mostRecentAuthMethod`
+helper that normalizes either shape (GoTrue's default detailed
+`{method, timestamp}` form, or the plainer RFC-8176 string form a custom
+access token hook could emit instead) down to the one string being
+compared. Fixing I3's clamp test hit an unrelated `Array.prototype.find`
+overload resolution issue from destructuring the predicate parameter
+inline; resolved by typing `mock.calls` once and destructuring inside the
+callback instead. `npx tsc --noEmit` is back to exactly the pre-existing 3
+errors, none of them mine.
+
+### Minors
+
+- **Header comparison added to the enumeration test.** `errorJson.data`
+  equality alone would miss a leak carried in a header instead of the
+  body. Added a header-set comparison (excluding `X-Request-Id`, which is
+  a fresh random correlation id by design and is SUPPOSED to differ every
+  call). Mutant: added a hypothetical `X-Debug-Existed: true/false` header
+  driven off whether `resetPasswordForEmail` returned an error -> caught.
+- **Caller-controlled address clamped before entering the Redis key**,
+  matching `handler.ts`'s own `RATE_LIMIT_KEY_MAX_LENGTH` (128) convention
+  for exactly this reason. Zod already caps the email at 320 chars, so
+  this is defense-in-depth rather than closing a live hole, but it matches
+  the established pattern rather than leaving this one caller-controlled
+  key un-clamped. Tested with a 306-char address; red before the fix,
+  green after.
+- **Dropped the dead `next/navigation`/`useRouter` mock scaffolding** from
+  `forgot-password/page.test.tsx` - leftover from copy-pasting login/signup's
+  test structure; that page never calls `useRouter` or `router.push`.
+
+### Recorded, not fixed (per the coordinator's explicit instruction)
+
+- **The 800ms timing floor is still unmeasured**, and the coordinator's
+  specific risk is worth restating precisely: GoTrue's known-address path
+  does a synchronous SMTP handoff that can routinely exceed 800ms, and if
+  the real p99 for this project is above the floor, the timing channel
+  this feature exists to close is still open for that slower tail. What
+  would turn 800ms from a guess into a number: measure `resetPasswordForEmail`'s
+  actual round trip against the live project for a known account vs. a
+  throwaway unregistered one, and set the floor to comfortably exceed the
+  **p99** of the slower (known-address) case specifically, not the mean -
+  the floor has to survive the tail. I have no live project reachable from
+  this sandbox to run that measurement.
+- **Moving the Supabase call server-side breaks cross-device password
+  recovery by construction.** The PKCE code verifier is written to cookies
+  during the `POST /api/v1/auth/forgot-password` request itself (per
+  Supabase's own PKCE flow docs: "the code exchange must be initiated on
+  the same browser and device where the flow was started"), so a user who
+  submits the form on a desktop and opens the emailed link on their phone
+  will hit a failed code exchange at `/auth/callback` (falling through to
+  the existing, honest `/login?error=confirm` path - not a crash, but also
+  not a working reset). This is the same trade-off round 1's own copy
+  already, if implicitly, worked around: `forgot-password`'s confirmation
+  screen already reads "Open the link on this device to choose a new
+  password" - stated here explicitly as the deliberate mitigation it is,
+  per the coordinator's ask, rather than left as copy nobody connected to
+  the underlying constraint.
+
+---
+
+## Round 1 (original submission, preserved below for context)
+
 ## Brief
 
 Found (after an initial miss on my part - see below) at

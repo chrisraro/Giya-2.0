@@ -12,14 +12,6 @@ import ForgotPasswordPage from "./page";
 // our own limiter, which is not an enumeration leak (see page.tsx) and is
 // worth a distinct, honest message.
 
-const nav = vi.hoisted(() => ({
-  push: vi.fn(),
-}));
-
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: nav.push }),
-}));
-
 // Same rationale as auth.test.tsx: @/lib/env throws at module-evaluation
 // time without the required NEXT_PUBLIC_SUPABASE_* vars, and captcha.tsx
 // pulls it in transitively.
@@ -72,7 +64,6 @@ function apiResponds(status: number, body: unknown = { data: { message: "ok" } }
 }
 
 beforeEach(() => {
-  nav.push.mockClear();
   envState.hcaptchaSiteKey = undefined;
   hcaptchaMocks.reset.mockClear();
   fetchMock.mockReset();
@@ -119,19 +110,29 @@ describe("ForgotPasswordPage", () => {
   });
 
   it("shows the same confirmation for a plain success and for an unexpected non-429 status, so nothing about the route's answer is surfaced", async () => {
-    const { unmount } = render(<ForgotPasswordPage />);
+    // Deliberately diffs the FULL rendered tree (render()'s own `container`),
+    // not `someNode.closest("div")`: AuthCard splits its title/subtitle into
+    // one header <div> and its children (the email address, in this case)
+    // into a SIBLING <div> - closest("div") from the "Check your email" <h1>
+    // only ever reaches the header, which is hard-coded and identical on
+    // every render by construction. That made the test pass for the wrong
+    // reason: it would stay green even if the confirmation's BODY (the part
+    // that actually varies) leaked something from the route's response.
+    const { unmount, container: successContainer } = render(<ForgotPasswordPage />);
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "known@b.com" } });
     fireEvent.click(screen.getByRole("button", { name: "Send reset link" }));
-    const successBodyHtml = (await screen.findByText("Check your email")).closest("div")?.innerHTML;
+    await screen.findByText("Check your email");
+    const successHtml = successContainer.innerHTML;
     unmount();
 
     apiResponds(500, { error: { code: "INTERNAL", message: "Something went wrong." } });
-    render(<ForgotPasswordPage />);
+    const { container: errorContainer } = render(<ForgotPasswordPage />);
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "known@b.com" } });
     fireEvent.click(screen.getByRole("button", { name: "Send reset link" }));
-    const errorBodyHtml = (await screen.findByText("Check your email")).closest("div")?.innerHTML;
+    await screen.findByText("Check your email");
+    const errorHtml = errorContainer.innerHTML;
 
-    expect(errorBodyHtml).toBe(successBodyHtml);
+    expect(errorHtml).toBe(successHtml);
   });
 
   it("shows the same confirmation even when the fetch itself rejects outright (e.g. a network failure)", async () => {
