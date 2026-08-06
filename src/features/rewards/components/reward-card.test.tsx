@@ -106,3 +106,102 @@ describe("RewardCard", () => {
     expect(screen.getByText("Kape Diaria")).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Affordability (doc 03 Key Finding 3 / doc 16's binding disabled treatment):
+// an unaffordable reward renders greyed, states the numeric shortfall, and its
+// Claim button is inert - never tappable-then-erroring with POINTS_INSUFFICIENT.
+// ---------------------------------------------------------------------------
+
+describe("RewardCard affordability", () => {
+  it("renders an affordable card exactly as before when no affordability prop is passed", () => {
+    render(<RewardCard reward={baseReward()} />);
+
+    expect(screen.getByText("Free latte")).toHaveClass("text-on-surface");
+    expect(screen.queryByText(/points to go/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Claim" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "Claim" })).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("renders an affordable card unchanged when affordability says affordable", () => {
+    render(
+      <RewardCard
+        reward={baseReward({ pointsCost: 500 })}
+        affordability={{ rewardId: "reward-1", affordable: true, shortfall: 0 }}
+      />,
+    );
+
+    expect(screen.getByText("Free latte")).toHaveClass("text-on-surface");
+    expect(screen.queryByText(/points to go/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Claim" })).not.toBeDisabled();
+  });
+
+  it("treats balance exactly equal to cost as affordable at the card level (the boundary)", () => {
+    render(
+      <RewardCard
+        reward={baseReward({ pointsCost: 500 })}
+        affordability={{ rewardId: "reward-1", affordable: true, shortfall: 0 }}
+      />,
+    );
+
+    expect(screen.queryByText(/points to go/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Claim" })).not.toBeDisabled();
+  });
+
+  it("greys the card, states the shortfall, and makes the button inert when unaffordable", () => {
+    render(
+      <RewardCard
+        reward={baseReward({ pointsCost: 1500 })}
+        affordability={{ rewardId: "reward-1", affordable: false, shortfall: 1222 }}
+      />,
+    );
+
+    expect(screen.getByText("Free latte")).toHaveClass("text-on-surface-variant");
+    expect(
+      screen.getByText(
+        (_content, element) =>
+          element?.tagName.toLowerCase() === "p" && element.textContent === "1,222 points to go",
+      ),
+    ).toBeInTheDocument();
+
+    const button = screen.getByRole("button", { name: "Claim" });
+    expect(button).toBeDisabled();
+  });
+
+  it("never accuses or uses the qualitative refusal copy on an unaffordable card", () => {
+    render(
+      <RewardCard
+        reward={baseReward({ pointsCost: 1500 })}
+        affordability={{ rewardId: "reward-1", affordable: false, shortfall: 1222 }}
+      />,
+    );
+
+    expect(screen.queryByText(/insufficient/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/not enough/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/while supplies last/i)).not.toBeInTheDocument();
+  });
+
+  it("marks the card aria-disabled when unaffordable so assistive tech does not announce it as tappable", () => {
+    const { container } = render(
+      <RewardCard
+        reward={baseReward({ pointsCost: 1500 })}
+        affordability={{ rewardId: "reward-1", affordable: false, shortfall: 1222 }}
+      />,
+    );
+
+    expect(container.querySelector('[aria-disabled="true"]')).not.toBeNull();
+  });
+
+  it("does not tap-then-error: clicking never calls claimReward on an unaffordable card", () => {
+    render(
+      <RewardCard
+        reward={baseReward({ pointsCost: 1500 })}
+        affordability={{ rewardId: "reward-1", affordable: false, shortfall: 1222 }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Claim" }));
+
+    expect(mocks.claimReward).not.toHaveBeenCalled();
+  });
+});

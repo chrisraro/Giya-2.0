@@ -207,6 +207,33 @@ export async function getMyBalances(): Promise<BalanceDTO[]> {
 }
 
 /**
+ * The caller's points balance at ONE business, or null when they have no
+ * `business_customers` row there (never earned/visited) - which the caller
+ * should treat as "0 points", not "no balance context at all". Scoped to a
+ * single business_id rather than reusing getMyBalances(): `/b/[slug]` is a
+ * public page a signed-out visitor can load too, so this only ever costs one
+ * narrow query for one business's worth of use, never a wallet-wide read.
+ *
+ * Callers on a page a signed-out visitor can reach (like `/b/[slug]`) MUST
+ * only call this when a user is actually signed in - RLS scopes
+ * business_customers_consumer_select to `authenticated`, so an anon caller
+ * gets no row back either way, but skipping the call entirely for a
+ * signed-out visitor avoids a query that can only ever answer null.
+ */
+export async function getMyBalanceForBusiness(businessId: string): Promise<number | null> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("business_customers")
+    .select("points_balance")
+    .eq("business_id", businessId)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return data.points_balance;
+}
+
+/**
  * The caller's points_transactions ledger (RLS: pt_consumer_select), newest
  * first, optionally filtered to one business.
  */
