@@ -140,6 +140,99 @@ describe("computePoints: base rule types", () => {
   });
 });
 
+describe("computePoints: fixed_per_visit same-day dedupe", () => {
+  const fixedVisit: PointsRule = {
+    id: "rule-fixed-visit",
+    kind: "base",
+    rule_type: "fixed_per_visit",
+    fixed_points: 10,
+    rounding: "floor",
+  };
+
+  it("dedupeFixedPerVisit: true zeroes the base of a fixed_per_visit rule", () => {
+    const result = computePoints(input({ baseRule: fixedVisit, dedupeFixedPerVisit: true }));
+    expect(result.breakdown.basePoints).toBe(0);
+    expect(result.points).toBe(0);
+  });
+
+  it("dedupeFixedPerVisit: false (or absent) pays the fixed amount normally", () => {
+    expect(
+      computePoints(input({ baseRule: fixedVisit, dedupeFixedPerVisit: false })).points,
+    ).toBe(10);
+    expect(computePoints(input({ baseRule: fixedVisit })).points).toBe(10);
+  });
+
+  it("has no effect on a non-fixed_per_visit base rule", () => {
+    // fixed_per_receipt intentionally pays every receipt; the flag must not
+    // leak into it.
+    const perReceipt: PointsRule = { ...fixedVisit, rule_type: "fixed_per_receipt" };
+    expect(
+      computePoints(input({ baseRule: perReceipt, dedupeFixedPerVisit: true })).points,
+    ).toBe(10);
+    expect(
+      computePoints(input({ baseRule: baseAmountRate(), dedupeFixedPerVisit: true })).points,
+    ).toBe(485);
+  });
+
+  it("multiplier extras zero out too, since they are proportional to the zeroed base", () => {
+    const friday2x: PointsRule = {
+      kind: "multiplier",
+      rule_type: "amount_rate",
+      multiplier: 2,
+      conditions: { days: [5] },
+      rounding: "floor",
+    };
+    const result = computePoints(
+      input({
+        baseRule: fixedVisit,
+        candidateRules: [friday2x],
+        dedupeFixedPerVisit: true,
+      }),
+    );
+    expect(result.breakdown.multipliers).toEqual([{ multiplier: 2, rounding: "floor", extra: 0 }]);
+    expect(result.points).toBe(0);
+  });
+
+  it("an independent bonus still pays when the base is deduped to zero", () => {
+    const bonus: PointsRule = { kind: "bonus", rule_type: "amount_rate", bonus_points: 15, rounding: "floor" };
+    const result = computePoints(
+      input({ baseRule: fixedVisit, candidateRules: [bonus], dedupeFixedPerVisit: true }),
+    );
+    expect(result.breakdown.basePoints).toBe(0);
+    expect(result.breakdown.bonusPoints).toBe(15);
+    expect(result.points).toBe(15);
+  });
+
+  it("does not dedupe a fixed_per_visit base that already fails its own conditions", () => {
+    // The base is ineligible for its own reason (earning floor); dedupe would
+    // be a no-op, and the snapshot should say WHY it is zero honestly.
+    const flooredVisit: PointsRule = { ...fixedVisit, conditions: { min_amount_centavos: 999_999 } };
+    const result = computePoints(input({ baseRule: flooredVisit, dedupeFixedPerVisit: true }));
+    const snapshot = result.ruleSnapshot as { base: { eligible: boolean; fixed_per_visit_deduped: boolean } };
+    expect(snapshot.base.eligible).toBe(false);
+    expect(snapshot.base.fixed_per_visit_deduped).toBe(false);
+  });
+
+  it("records the dedupe decision on the frozen rule_snapshot", () => {
+    const deduped = computePoints(input({ baseRule: fixedVisit, dedupeFixedPerVisit: true }));
+    const notDeduped = computePoints(input({ baseRule: fixedVisit, dedupeFixedPerVisit: false }));
+    const dedupedSnapshot = deduped.ruleSnapshot as { base: { fixed_per_visit_deduped: boolean; points: number } };
+    const notDedupedSnapshot = notDeduped.ruleSnapshot as {
+      base: { fixed_per_visit_deduped: boolean; points: number };
+    };
+    expect(dedupedSnapshot.base.fixed_per_visit_deduped).toBe(true);
+    expect(dedupedSnapshot.base.points).toBe(0);
+    expect(notDedupedSnapshot.base.fixed_per_visit_deduped).toBe(false);
+    expect(notDedupedSnapshot.base.points).toBe(10);
+  });
+
+  it("a non-fixed_per_visit base always reports fixed_per_visit_deduped: false", () => {
+    const result = computePoints(input());
+    const snapshot = result.ruleSnapshot as { base: { fixed_per_visit_deduped: boolean } };
+    expect(snapshot.base.fixed_per_visit_deduped).toBe(false);
+  });
+});
+
 describe("computePoints: rounding modes on the base rule", () => {
   // 48550 / 100 = 485.5 (exact half); 48540 / 100 = 485.4
   it("floor rounds down", () => {

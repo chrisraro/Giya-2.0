@@ -611,6 +611,7 @@ async function approve(context: DecisionContext): Promise<ReviewOutcome> {
     businessId,
     receipt: {
       id: receipt.id,
+      userId: receipt.user_id,
       createdAt: receipt.created_at,
       totalCentavos: effective.total_centavos,
       receiptDate:

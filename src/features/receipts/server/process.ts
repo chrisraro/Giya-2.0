@@ -2071,6 +2071,7 @@ async function runPipeline(receiptId: string, deps: ProcessReceiptDeps): Promise
           businessId: matchedBusinessId,
           receipt: {
             id: receipt.id,
+            userId: receipt.user_id,
             createdAt: receipt.created_at,
             totalCentavos: parsed.totalCentavos,
             receiptDate: parsed.receiptDate,

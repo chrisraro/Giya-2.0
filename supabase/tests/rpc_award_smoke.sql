@@ -32,7 +32,7 @@ begin;
 
 set local search_path = public, extensions;
 
-select plan(39);
+select plan(46);
 
 -- ---------------------------------------------------------------- fixtures
 -- Four fixed test users: the tenant owner, the main consumer, a blacklisted
@@ -46,7 +46,11 @@ values
   ('c4444444-4444-4444-8444-444444444444', 'authenticated', 'authenticated',
    'giya-award-blacklisted@example.com', '{"full_name": "Blocked Scanner"}'::jsonb),
   ('c5555555-5555-4555-8555-555555555555', 'authenticated', 'authenticated',
-   'giya-award-nodate@example.com', '{"full_name": "Dateless Scanner"}'::jsonb);
+   'giya-award-nodate@example.com', '{"full_name": "Dateless Scanner"}'::jsonb),
+  ('c6666666-6666-4666-8666-666666666666', 'authenticated', 'authenticated',
+   'giya-award-fpv@example.com', '{"full_name": "Fixed Per Visit Scanner"}'::jsonb),
+  ('c7777777-7777-4777-8777-777777777777', 'authenticated', 'authenticated',
+   'giya-award-fpv-nextday@example.com', '{"full_name": "Fixed Per Visit Next Day"}'::jsonb);
 
 -- the owner registers the tenant; the business id comes straight back from the
 -- RPC (0003_auth_plumbing.sql), so the tenant is never looked up by name
@@ -228,6 +232,88 @@ with ins as (
 select set_config('test.rc_nodate', (select id::text from ins), true),
        set_config('test.rc_nodate_created',
                   (select created_at::text from ins), true);
+
+-- fixed_per_visit dedupe (0037, task 1.1) fixtures, a dedicated consumer so
+-- this section's assertions are never affected by the accumulated same-day
+-- earns c3333... already has from rc1/rc2 above.
+--
+-- IMPORTANT: 0037's guard compares against `private.manila_day(now())` -
+-- processing time, per the brief's own wording, NOT the receipt's own dated
+-- Manila day (that is what the visit rule above already tests). Two receipts
+-- awarded moments apart inside this single test transaction therefore always
+-- share the SAME `now()`, regardless of what receipt_date they carry - so
+-- fpv1/fpv2 below are same-day BY CONSTRUCTION (both awarded "now"), and the
+-- "next day" case (fpv3) is instead simulated with a directly-inserted,
+-- explicitly backdated ledger row for a THIRD, unrelated consumer, which is
+-- the only deterministic way to exercise that branch inside one transaction.
+with ins as (
+  insert into public.receipts
+    (business_id, user_id, status, image_path, image_hash, sha256,
+     receipt_date, total_centavos)
+  values (current_setting('test.biz')::uuid,
+          'c6666666-6666-4666-8666-666666666666', 'approved',
+          'c6666666-6666-4666-8666-666666666666/fpv-1.jpg', 'a0b1c2d3e4f5010c',
+          'giya-award-smoke-sha-000000000000000000000000000000000000000c',
+          '2026-07-27T10:00:00Z'::timestamptz, 5000)
+  returning id
+)
+select set_config('test.rc_fpv1', (select id::text from ins), true);
+
+with ins as (
+  insert into public.receipts
+    (business_id, user_id, status, image_path, image_hash, sha256,
+     receipt_date, total_centavos)
+  values (current_setting('test.biz')::uuid,
+          'c6666666-6666-4666-8666-666666666666', 'approved',
+          'c6666666-6666-4666-8666-666666666666/fpv-2.jpg', 'a0b1c2d3e4f5010d',
+          'giya-award-smoke-sha-000000000000000000000000000000000000000d',
+          '2026-07-27T13:00:00Z'::timestamptz, 5000)
+  returning id
+)
+select set_config('test.rc_fpv2', (select id::text from ins), true);
+
+-- The "next day" consumer: one receipt, plus (below, after the plan() point
+-- so it counts as an assertion of its own) a directly-inserted earn row dated
+-- exactly 24h before now(), which is always the immediately preceding Manila
+-- day regardless of what time of day "now" actually is (manila_day is a
+-- fixed +08:00 shift, so subtracting exactly one day always subtracts
+-- exactly one calendar day from it too). receipt_id is left null: this row
+-- is not provenance of any receipt, only a seed fact for the dedupe check.
+with ins as (
+  insert into public.receipts
+    (business_id, user_id, status, image_path, image_hash, sha256,
+     receipt_date, total_centavos)
+  values (current_setting('test.biz')::uuid,
+          'c7777777-7777-4777-8777-777777777777', 'approved',
+          'c7777777-7777-4777-8777-777777777777/fpv-3.jpg', 'a0b1c2d3e4f5010e',
+          'giya-award-smoke-sha-000000000000000000000000000000000000000e',
+          '2026-07-28T10:00:00Z'::timestamptz, 5000)
+  returning id
+)
+select set_config('test.rc_fpv3', (select id::text from ins), true);
+
+insert into public.points_transactions
+  (business_id, consumer_id, type, points, balance_after, created_at)
+values
+  (current_setting('test.biz')::uuid, 'c7777777-7777-4777-8777-777777777777',
+   'earn', 5, 5, now() - interval '1 day');
+
+-- a fifth receipt for the ORIGINAL award consumer (c3333...), same Manila
+-- day as rc1/rc2 (already awarded above), used only for the backward-
+-- compatibility assertion: a caller that omits the new 6th parameter
+-- entirely must see byte-identical behaviour to 0023.
+with ins as (
+  insert into public.receipts
+    (business_id, user_id, status, image_path, image_hash, sha256,
+     receipt_date, total_centavos)
+  values (current_setting('test.biz')::uuid,
+          'c3333333-3333-4333-8333-333333333333', 'approved',
+          'c3333333-3333-4333-8333-333333333333/award-5.jpg', 'a0b1c2d3e4f5010f',
+          'giya-award-smoke-sha-000000000000000000000000000000000000000f',
+          '2026-07-25T14:00:00Z'::timestamptz, 1000)
+  returning id
+)
+select set_config('test.rc5', (select id::text from ins), true);
 
 -- ---------------------------------------------------------------- manila_day
 -- 1. the helper the visit rule is built on: 17:00Z is the NEXT Manila day
@@ -540,21 +626,112 @@ select is(
   '1/true/true/12300',
   'receipt with null receipt_date counts one visit anchored on created_at');
 
+-- ---------------------------------------------------------------- fixed_per_visit dedupe (0037, task 1.1)
+-- 39. self-check on the fixture: the c7777777 seed row really is a different
+--     Manila day from "now", so assertion 43 below tests what it claims to.
+select ok(
+  private.manila_day(now() - interval '1 day') <> private.manila_day(now()),
+  'the backdated fpv3 seed earn is genuinely a different Manila day than now()');
+
+-- 40. first receipt of the day, p_verify_no_prior_fixed_visit_earn = true:
+--     no prior earn exists yet for this consumer, so this pays normally.
+select public.award_receipt_points(
+  current_setting('test.rc_fpv1')::uuid, 10,
+  '{"engine":"points/v1","total_points":10}'::jsonb,
+  p_verify_no_prior_fixed_visit_earn => true);
+
+select is(
+  (select count(*)::int from public.points_transactions
+    where receipt_id = current_setting('test.rc_fpv1')::uuid and type = 'earn'),
+  1,
+  'first fixed_per_visit receipt of the day (p_verify=true) awards normally, no prior earn found');
+
+-- 41. SAME processing day (this test transaction shares one `now()`), p_verify
+--     = true again: the precheck this simulates (a second receipt priced as
+--     if it were still first, e.g. a genuine concurrent-request race) is
+--     exactly what this parameter exists to catch, and the RPC refuses rather
+--     than mint a second fixed_per_visit base for one Manila day.
+select throws_ok(
+  $$select public.award_receipt_points(
+      current_setting('test.rc_fpv2')::uuid, 10,
+      '{"engine":"points/v1","total_points":10}'::jsonb,
+      null, null, true)$$,
+  'P0001', 'FIXED_PER_VISIT_RACE',
+  'same-day second fixed_per_visit receipt with p_verify=true raises FIXED_PER_VISIT_RACE');
+
+-- 42. the refused call wrote nothing at all for rc_fpv2 (no ledger row, no
+--     visit, processed_at still null) - an honest "approved, award pending"
+--     state an operator can find, not a silent partial write.
+select is(
+  (select count(*)::int from public.points_transactions
+    where receipt_id = current_setting('test.rc_fpv2')::uuid)
+  || '/' ||
+  (select (processed_at is null)::text from public.receipts
+    where id = current_setting('test.rc_fpv2')::uuid),
+  '0/true',
+  'the refused fixed_per_visit race wrote no ledger row and left processed_at null');
+
+-- 43. the SAME receipt, retried with p_verify omitted (defaults false): this
+--     is what `award.ts` sends once ITS OWN precheck has already found the
+--     prior earn and priced accordingly (0, or an independent bonus alone) -
+--     re-verifying would wrongly refuse a legitimate, already-deduped award,
+--     so the RPC trusts the caller and mints exactly what it is given.
+select public.award_receipt_points(
+  current_setting('test.rc_fpv2')::uuid, 10,
+  '{"engine":"points/v1","total_points":10}'::jsonb);
+
+select is(
+  (select points::text from public.points_transactions
+    where receipt_id = current_setting('test.rc_fpv2')::uuid and type = 'earn'),
+  '10',
+  'retried without p_verify, the same same-day receipt is awarded on the caller''s word');
+
+-- 44. a DIFFERENT Manila day, p_verify_no_prior_fixed_visit_earn = true: the
+--     only prior earn for THIS consumer (c7777777) is the seeded row dated
+--     exactly 24h ago, a different Manila day than now() (assertion 39), so
+--     this pays normally too - the mirror of the strictly-later visit rule,
+--     and proof the guard is scoped by day, not "has ever earned before".
+select public.award_receipt_points(
+  current_setting('test.rc_fpv3')::uuid, 10,
+  '{"engine":"points/v1","total_points":10}'::jsonb,
+  p_verify_no_prior_fixed_visit_earn => true);
+
+select is(
+  (select count(*)::int from public.points_transactions
+    where receipt_id = current_setting('test.rc_fpv3')::uuid and type = 'earn'),
+  1,
+  'a prior earn from a different Manila day does not block p_verify=true (both days pay)');
+
+-- 45. backward compatibility: a caller that omits the 6th parameter entirely
+--     gets 0023's exact behaviour even against a pair with EXISTING same-day
+--     earns (c3333... already earned twice on 2026-07-25 above) - the new
+--     parameter is opt-in, not a default-on dedupe every rule type pays.
+select public.award_receipt_points(current_setting('test.rc5')::uuid, 25);
+
+select is(
+  (select points::text from public.points_transactions
+    where receipt_id = current_setting('test.rc5')::uuid and type = 'earn'),
+  '25',
+  'omitting p_verify_no_prior_fixed_visit_earn preserves 0023 behaviour even on a same-day duplicate');
+
 -- ---------------------------------------------------------------- grants
--- 37-38. system function: only the service-role pipeline may mint points
+-- 46-48. system function: only the service-role pipeline may mint points.
+-- Signature now carries the 0037 boolean parameter; the OLD 5-arg overload
+-- was dropped by 0037, so this is the only `award_receipt_points` in the
+-- database.
 select ok(
   not has_function_privilege('anon',
-    'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz)', 'EXECUTE'),
+    'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz, boolean)', 'EXECUTE'),
   'anon cannot execute award_receipt_points');
 
 select ok(
   not has_function_privilege('authenticated',
-    'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz)', 'EXECUTE'),
+    'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz, boolean)', 'EXECUTE'),
   'authenticated cannot execute award_receipt_points');
 
 select ok(
   has_function_privilege('service_role',
-    'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz)', 'EXECUTE'),
+    'public.award_receipt_points(uuid, integer, jsonb, uuid, timestamptz, boolean)', 'EXECUTE'),
   'service_role can execute award_receipt_points');
 
 select * from finish();

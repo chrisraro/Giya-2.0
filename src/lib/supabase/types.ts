@@ -2552,6 +2552,7 @@ export type Database = {
           p_points: number
           p_receipt_id: string
           p_rule_snapshot?: Json
+          p_verify_no_prior_fixed_visit_earn?: boolean
         }
         Returns: string
       }

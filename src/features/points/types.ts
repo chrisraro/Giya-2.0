@@ -75,6 +75,16 @@ export interface ComputePointsInput {
   // only evaluates each rule's conditions DSL.
   candidateRules: PointsRule[];
   visitContext?: VisitContext;
+  // Doc 35 fixed_per_visit dedupe (task 1.1): true when the caller has
+  // already established that this consumer has a positive earn transaction
+  // at this business earlier the same Manila day. Only affects a base rule
+  // of rule_type "fixed_per_visit" that is otherwise eligible: its
+  // fixed_points contributes 0 instead, and (because a multiplier's extra is
+  // `round(basePoints * (multiplier - 1))`) every multiplier extra collapses
+  // to 0 with it. Bonuses are unaffected, since they are never derived from
+  // basePoints. The caller is responsible for determining this boolean
+  // race-safely; this pure function only applies the arithmetic consequence.
+  dedupeFixedPerVisit?: boolean;
 }
 
 // One applied multiplier's contribution (doc 35 "Arithmetic (exact)"):
