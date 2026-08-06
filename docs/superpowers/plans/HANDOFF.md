@@ -1,7 +1,7 @@
 # Giya 2.0 — Build Handoff
 
-**Written:** 2026-08-06 · **Repo state:** `main` @ `447c43c`, pushed, clean
-**Suite:** 205 files / 4,289 tests green · **Types:** 3 known pre-existing errors · **Migrations:** 0037–0061 live
+**Written:** 2026-08-06 · **Repo state:** `main` @ `5052419`, pushed, clean
+**Suite:** 215 files / 4,433 tests green · **Types:** 3 known pre-existing errors · **Migrations:** 0037–0062 live
 
 You are picking up a multi-wave build-out of every module the docs specify and the code lacked. This document is the whole context. Read it top to bottom once; you should not need the prior conversation.
 
@@ -10,7 +10,7 @@ You are picking up a multi-wave build-out of every module the docs specify and t
 ## 1. Verify you're starting from a good state
 
 ```bash
-npx vitest run                    # expect 205 files / 4289 tests, all green
+npx vitest run                    # expect 215 files / 4433 tests, all green
 npx tsc --noEmit                  # expect EXACTLY 3 errors (see below)
 scripts/sdd/check-grants.sh 090bc96   # expect "OK"
 git status --porcelain            # expect empty
@@ -56,7 +56,7 @@ write brief → dispatch implementer (TDD, isolated) → adversarial review
 
 ---
 
-## 4. What is DONE (13 tasks, merged and pushed)
+## 4. What is DONE (16 tasks, merged and pushed)
 
 ### Wave 1 — money correctness (7/7 complete)
 
@@ -71,7 +71,7 @@ write brief → dispatch implementer (TDD, isolated) → adversarial review
 | T1.7 | Lifecycle transitions left no audit trail; resume skipped its gates |
 | *(0052)* | Unplanned: service role could reach three session-only RPCs |
 
-### Wave 2 — ops floor (7/8)
+### Wave 2 — ops floor (8/8 COMPLETE)
 
 | Task | What it closed |
 |---|---|
@@ -82,6 +82,7 @@ write brief → dispatch implementer (TDD, isolated) → adversarial review
 | T2.6 | `heartbeat_at` written once at claim, never refreshed |
 | T2.8 | `finishJob` had no lease guard *(debt T2.6's own fix created)* |
 | T2.4 | Dead-lettered jobs were invisible and unrecoverable through any interface |
+| T2.7 | No AI kill switch, no budget caps; `budgetMicros` existed and no caller passed it |
 
 ---
 
@@ -104,6 +105,8 @@ why the job originally died (the original is preserved in the audit `before`).
 These are in the plan's global constraints. They were each earned.
 
 ### Rule 1 — every assertion needs a NAMED mutant
+
+**And when you clone a mechanism, clone its mutants too.** The commonest way a gap survives this rule is copying a correct neighbour's *code* without its *test* — seen twice in one task, once with the omission argued in a comment that did not hold.
 
 > Every new or modified assertion must be red-verified against a named mutant, and the report must name the mutant for each. An assertion with no stated mutant is one nobody has shown can fail.
 
@@ -136,14 +139,16 @@ A row that does no work and writes nothing still matches the scan forever. With 
 
 ---
 
-## 8. REMAINING WORK — 30 tasks
+## 8. REMAINING WORK — 27 tasks
 
-### Wave 2, last task
-- **T2.7** — feature flags table + `src/lib/flags.ts` (30s cache) + `/admin/flags`, wiring the AI kill switch and Redis budget counters into the LLM gateway (doc 38 §1). *These are MVP-tagged in doc 38 and currently missing entirely.*
+### Wave 3 — auth + suspension (1/4 done)
 
-### Wave 3 — auth + suspension (4)
+| Task | What it closed |
+|---|---|
+| T3.2 | Suspension was written by the admin ladder and read by **nothing** — a suspended user kept scanning, claiming and redeeming |
+
+**Remaining in Wave 3:**
 - **T3.1** `/forgot-password` + `/reset-password` — the login page's link is currently `href="#"`
-- **T3.2** Suspension enforcement — `is_suspended` is written by admin flows and checked nowhere; needs `/suspended`, layout gates, `businesses.status='suspended'` portal block
 - **T3.3** Staff invites — **owners cannot add teammates at all**; needs `/business/staff`, `/invite/[token]`, the `staff_invite` notification kind
 - **T3.4** Profile edit + preferences + devices — profile is read-only with a dead "Devices" row; the four consent toggles exist in the schema with no UI. **NPC Circular 2023-04 requires separate, un-ticked marketing consent** — bundling it is non-compliant.
 
