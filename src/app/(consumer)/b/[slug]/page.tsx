@@ -78,7 +78,24 @@ export default async function PublicBusinessPage({
     // grants owner/manager/marketing staff SELECT over every customer row at
     // their own business, so business_id alone could return a stranger's
     // balance to a staff member browsing their own /b/[slug].
-    user ? getMyBalanceForBusiness(business.id, user.id) : Promise.resolve(null),
+    //
+    // getMyBalanceForBusiness now throws on a genuine query error rather than
+    // answering null for it (same I1 fix). This page has no error.tsx (the
+    // app has none at all), so an uncaught throw here would lose the menu,
+    // hours, location and Scan CTA too - on a public marketing page, over a
+    // balance that is a garnish. Chosen fix (reviewer's stated preference):
+    // fail SOFT, degrading to `null` (the same shape as "signed out" / "no
+    // relationship row yet") rather than adding a scoped boundary - never
+    // fabricate a shortfall from a read that never actually completed.
+    user
+      ? getMyBalanceForBusiness(business.id, user.id).catch((error: unknown) => {
+          console.error(
+            `[rewards] failed to load balance for business ${business.id}, rendering the catalogue without affordability`,
+            error,
+          );
+          return null;
+        })
+      : Promise.resolve(null),
   ]);
   // null means either "signed out" or "signed in but no business_customers
   // row here yet" (never earned at this business) - both read as "no

@@ -189,4 +189,30 @@ describe("public business page affordability", () => {
 
     expect(screen.queryByText("Rewards")).not.toBeInTheDocument();
   });
+
+  it("degrades to the signed-out-shaped catalogue and logs, rather than losing the whole page, when the balance read fails", async () => {
+    // Chosen fix for the reviewer's I2 follow-up: catch at the call site and
+    // fail soft (never fabricate a shortfall from a read that never actually
+    // completed), rather than adding a scoped error.tsx. There is no error.tsx
+    // anywhere in the app; letting a throw reach the default boundary would
+    // lose the menu, hours, location and Scan CTA for a public marketing page
+    // over what is, on this page, a garnish.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.getUser.mockResolvedValue({ data: { user: { id: "user-1" } } });
+    mocks.getPublicRewards.mockResolvedValue([reward({ pointsCost: 1500 })]);
+    mocks.getMyBalanceForBusiness.mockRejectedValue(new Error("connection reset"));
+
+    render(await PublicBusinessPage({ params: params() }));
+
+    expect(screen.getByText("Free latte")).toHaveClass("text-on-surface");
+    expect(screen.queryByText(/points to go/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    // The rest of the page - the parts that do NOT depend on the balance -
+    // must still render.
+    expect(screen.getByText("Kape Diaria")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /scan receipt/i })).toBeInTheDocument();
+    expect(consoleError).toHaveBeenCalled();
+
+    consoleError.mockRestore();
+  });
 });

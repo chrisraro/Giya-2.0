@@ -16,7 +16,17 @@ export default async function RewardsPage() {
   const [available, claimed, balances] = await Promise.all([
     listClaimableRewards(),
     listMyClaims(),
-    getMyBalances(),
+    // getMyBalances() throws on a genuine query error (not just "no rows") -
+    // see its doc comment. Fail SOFT here rather than let that take the whole
+    // page down: the balance is affordability CONTEXT for a catalogue that is
+    // still worth showing, not the catalogue itself. Degrading to `[]` means
+    // groupRewardsByBusiness renders every business as if the caller has no
+    // relationship there yet (plain catalogue, no grey/shortfall/progress) -
+    // never a fabricated shortfall from a read that never actually completed.
+    getMyBalances().catch((error: unknown) => {
+      console.error("[rewards] failed to load balances, rendering the catalogue without affordability", error);
+      return [];
+    }),
   ]);
 
   // Doc 03's Key Finding 3: the catalogue used to render an unaffordable

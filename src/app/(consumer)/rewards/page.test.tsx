@@ -171,4 +171,23 @@ describe("RewardsPage affordability wiring", () => {
 
     expect(screen.getByText("No rewards yet")).toBeInTheDocument();
   });
+
+  it("degrades to the plain catalogue and logs, rather than crashing the page, when getMyBalances fails", async () => {
+    // Coordinator follow-up: getMyBalances() now THROWS on a real query error
+    // (post-I1, [] means "no affordability treatment" too, so failing open
+    // would silently recreate tap-then-POINTS_INSUFFICIENT). Fail-soft at the
+    // call site, never fabricate a shortfall from a failed read.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.listClaimableRewards.mockResolvedValue([reward({ pointsCost: 1500 })]);
+    mocks.getMyBalances.mockRejectedValue(new Error("connection reset"));
+
+    render(await RewardsPage());
+
+    expect(screen.getByText("Free latte")).toHaveClass("text-on-surface");
+    expect(screen.queryByText(/points to go/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Claim" })).not.toBeDisabled();
+    expect(consoleError).toHaveBeenCalled();
+
+    consoleError.mockRestore();
+  });
 });

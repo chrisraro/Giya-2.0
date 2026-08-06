@@ -177,6 +177,16 @@ export async function getClaim(claimId: string): Promise<ClaimDetailDTO | null> 
 /**
  * The caller's business_customers rows (their balance at every business
  * they have a relationship with), with business name/slug resolved.
+ *
+ * Throws on a genuine query error rather than returning `[]` for it - same
+ * split as `getMyBalanceForBusiness` below, and for the same reason, made
+ * sharper by that fix: `groupRewardsByBusiness` now gates affordability on
+ * whether a business appears in this list AT ALL, so `[]` on a transient DB
+ * error would silently render the WHOLE `/rewards` catalogue plain with
+ * every Claim button enabled - the exact tap-then-POINTS_INSUFFICIENT defect
+ * this feature exists to remove, just reached through a different door.
+ * Failing open here is not a safe default; failing loud is the caller's
+ * signal to degrade deliberately (see `/rewards/page.tsx`'s `.catch()`).
  */
 export async function getMyBalances(): Promise<BalanceDTO[]> {
   const supabase = await createClient();
@@ -185,7 +195,10 @@ export async function getMyBalances(): Promise<BalanceDTO[]> {
     .from("business_customers")
     .select("business_id, points_balance, lifetime_points");
 
-  if (error || !balances || balances.length === 0) return [];
+  if (error) {
+    throw new Error(`getMyBalances: failed to load balances: ${error.message}`);
+  }
+  if (!balances || balances.length === 0) return [];
 
   const businessIds = Array.from(new Set(balances.map((b) => b.business_id)));
   const { data: businesses } = await supabase
