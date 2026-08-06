@@ -17,6 +17,7 @@ import {
   cooldownState,
   describeActor,
   describeAuditAction,
+  describePayloadIdentity,
   describeSignal,
   formatApprovalRatio,
   formatPlatformAmount,
@@ -223,5 +224,66 @@ describe("formatPlatformAmount", () => {
   it("says a missing total was not read rather than showing zero pesos", () => {
     expect(formatPlatformAmount(null)).toBe("Not read");
     expect(formatPlatformAmount(12500)).toContain("125");
+  });
+});
+
+describe("describePayloadIdentity", () => {
+  // Mutant: drop the `key !== "job_id"` half of the filter. job_id already
+  // names the row (it is the dead-letter list's own row key); this proves it
+  // is not repeated in the identity cell.
+  it("excludes job_id, which the row already names", () => {
+    const identity = describePayloadIdentity({ job_id: "job-1", receipt_id: "receipt-9" });
+    expect(identity).not.toContain("job_id");
+    expect(identity).toContain("receipt_id=receipt-9");
+  });
+
+  // Mutant: drop the `_ids?$` shape test and summarise every key. A payload
+  // carrying denormalized state (doc 39 forbids it, but the summariser must
+  // not repeat the mistake) would then leak into the identity cell.
+  it("only pulls identifier keys, not arbitrary payload fields", () => {
+    const identity = describePayloadIdentity({ receipt_id: "receipt-9", cached_total: 500 });
+    expect(identity).toBe("receipt_id=receipt-9");
+    expect(identity).not.toContain("cached_total");
+  });
+
+  // Mutant: remove the `Array.isArray` special case and let `String(value)`
+  // handle it. `notify.email`'s batch payload carries up to 500 ids; showing
+  // the whole array would make the dead-letter list unreadable, not detailed.
+  it("summarises an array identifier by its length, not its contents", () => {
+    const identity = describePayloadIdentity({ notification_ids: ["n1", "n2", "n3"] });
+    expect(identity).toBe("notification_ids=[3]");
+  });
+
+  // Mutant: multiple identifier keys collapse to only the first (e.g. `.find`
+  // instead of `.filter`/`.map`). ai.parse_assist's dedupe key is
+  // `receipt_id:ocr_result_id` - both keys must be visible to search the log.
+  it("joins every identifier key present, not just the first", () => {
+    const identity = describePayloadIdentity({ receipt_id: "r1", ocr_result_id: "o1" });
+    expect(identity).toBe("receipt_id=r1 ocr_result_id=o1");
+  });
+
+  // Mutant: drop the JSON-fallback branch and return "" for a shape with no
+  // recognised identifier key. A payload from a future queue that used a
+  // different vocabulary would then render an empty, unsearchable cell.
+  it("falls back to the raw payload when no identifier key is recognised", () => {
+    const identity = describePayloadIdentity({ window_ts: "2026-07-26T00:00:00Z" });
+    expect(identity).toContain("window_ts");
+  });
+
+  // Mutant: drop the `typeof payload !== "object"` guard and call
+  // `Object.entries` on a non-object payload, which throws for a primitive
+  // and silently returns `[]` for an array (masking a malformed row instead
+  // of describing it).
+  it("handles a non-object payload without throwing", () => {
+    expect(describePayloadIdentity("not an object")).toContain("not an object");
+    expect(describePayloadIdentity(null)).toBe("null");
+  });
+
+  // Mutant: remove the `truncate` call. A malformed or hostile payload with a
+  // very long string value must not blow out the dead-letter table's layout.
+  it("truncates a long identity rather than rendering it in full", () => {
+    const identity = describePayloadIdentity({ receipt_id: "x".repeat(500) });
+    expect(identity.length).toBeLessThanOrEqual(120);
+    expect(identity.endsWith("…")).toBe(true);
   });
 });

@@ -34,6 +34,12 @@ const NAV_ITEMS = [
   { href: "/admin/businesses", label: "Businesses", icon: "storefront", exact: false },
   { href: "/admin/fraud", label: "Fraud", icon: "gpp_maybe", exact: false },
   { href: "/admin/receipts", label: "Receipts", icon: "receipt_long", exact: false },
+  // Doc 31 §5 [V1]: `/admin/monitoring/{ocr,ai,queues,duplicates}`. Only
+  // `queues` exists so far - the sibling monitoring screens land with their
+  // own slices, same rule `src/lib/queue/queues.ts` states for unbuilt
+  // queues: a nav entry for a screen with no worker behind it is worse than
+  // no entry.
+  { href: "/admin/monitoring/queues", label: "Queues", icon: "dns", exact: false },
 ] as const;
 
 export function AdminNav() {

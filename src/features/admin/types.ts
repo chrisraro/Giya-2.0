@@ -40,6 +40,11 @@ import type {
   ReviewFieldValues,
   ReviewLineItemView,
 } from "../receipts/review/types";
+// Type-only: erased at compile time (tsconfig `isolatedModules`), so this file
+// stays IO-free even though the source module is `server-only`. Reused rather
+// than redeclared so the Queue Status screen's shapes cannot drift from what
+// t2-3's metrics module actually reads.
+import type { JobsDepthByStatus, SweepJobHealthRow } from "@/lib/observability/metrics";
 
 /** The tabs of `/admin/fraud`. `open` is the working queue; the rest is history. */
 export type AdminFraudFilter = "open" | "blocked" | "all";
@@ -199,6 +204,54 @@ export interface PlatformOverview {
   unmatchedReceipts: number | null;
   /** The most recent blocking signals, for the "what just happened" strip. */
   recentBlocks: AdminQueueItem[];
+}
+
+// ---------------------------------------------------------------------------
+// `/admin/monitoring/queues` (doc 31 §5, doc 39's DLQ view)
+// ---------------------------------------------------------------------------
+
+/**
+ * One `jobs` row in `status='dead'`, with enough to act on it (doc 31 §5:
+ * "dead list with `last_error` + requeue action").
+ *
+ * `payloadIdentity` is a rendered summary, not the raw payload: doc 39's own
+ * rule ("payloads carry identifiers, never denormalized state") makes the
+ * payload safe to summarise, but the raw JSON is still operator vocabulary -
+ * same standing as `lastError` - so the screen never receives it unshaped.
+ */
+export interface DeadJobItem {
+  jobId: string;
+  queue: string;
+  businessId: string | null;
+  payloadIdentity: string;
+  attempts: number;
+  maxAttempts: number;
+  lastError: string | null;
+  /** `finished_at` - when the job was marked dead. Null should not occur for a
+   * dead row (0029's `jobs_terminal_finished_at`), but the type stays honest
+   * about what the column allows. */
+  deadAt: string | null;
+  createdAt: string;
+}
+
+/**
+ * Everything `/admin/monitoring/queues` renders.
+ *
+ * Three independent nullable slices, not one - mirroring `loadMetrics`'s own
+ * per-field failure shape (see its module header) rather than collapsing to a
+ * single `unavailable` flag. A dead-letter read that fails must not blank out
+ * a jobs-by-status count that succeeded, and vice versa: they come from
+ * different queries and fail independently.
+ */
+export interface QueueStatusView {
+  /** Null only when the count read itself failed to run at all (no
+   * service-role key). Per-status nulls inside a non-null value are `loadMetrics`'s
+   * own "this one status could not be counted" signal - see its header. */
+  byStatus: JobsDepthByStatus | null;
+  sweepHealth: readonly SweepJobHealthRow[] | null;
+  /** Null means the read failed. `[]` means nothing is dead right now - a
+   * claim this screen must not make on a dropped connection's behalf. */
+  deadJobs: readonly DeadJobItem[] | null;
 }
 
 // ---------------------------------------------------------------------------
