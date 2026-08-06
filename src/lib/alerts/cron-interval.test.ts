@@ -53,4 +53,15 @@ describe("estimateMaxGapMinutes", () => {
   it("returns null for */0 (guards a division/zero-interval nonsense value)", () => {
     expect(estimateMaxGapMinutes("*/0 * * * *")).toBeNull();
   });
+
+  // B2 (review fix): the header previously claimed coverage this function
+  // did not have. Every minute IS now supported (doc 39's `ai.embed_refresh`
+  // retry tick); a stepped RANGE deliberately still is not.
+  it("reads a bare wildcard schedule as every minute ('* * * * *', doc 39's ai.embed_refresh)", () => {
+    expect(estimateMaxGapMinutes("* * * * *")).toBe(1);
+  });
+
+  it("returns null for a stepped RANGE minute ('2-57/5 * * * *') - a step from zero is supported, a step within a range is not", () => {
+    expect(estimateMaxGapMinutes("2-57/5 * * * *")).toBeNull();
+  });
 });

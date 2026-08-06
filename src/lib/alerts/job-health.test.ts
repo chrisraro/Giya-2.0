@@ -27,7 +27,19 @@ import {
   staleThresholdMinutes,
 } from "./job-health";
 
-interface SweepRowFixture {
+// -----------------------------------------------------------------------------
+// Fixture model: TWO independent sources, matching the two RPCs
+// checkJobHealth() actually calls. Deliberately NOT derived from one shared
+// "failures" field - the whole point of the C2(i) fix is that
+// sweep_job_health's `failures` (status <> 'succeeded', counts in-flight
+// runs) and sweep_job_terminal_failures's `terminal_failures` (status =
+// 'failed' only) are DIFFERENT aggregates that can legitimately disagree
+// (an in-flight run: wide.last_status = 'running', terminal_failures = 0,
+// simultaneously). A fixture model that could not express that disagreement
+// would not be able to test the fix at all - see the "C2(i)" suite below.
+// -----------------------------------------------------------------------------
+
+interface WideRowFixture {
   jobname: string;
   schedule: string;
   active: boolean;
@@ -38,6 +50,13 @@ interface SweepRowFixture {
   last_error: string | null;
 }
 
+interface TerminalRowFixture {
+  jobname: string;
+  terminal_runs: number;
+  terminal_failures: number;
+  last_terminal_error: string | null;
+}
+
 interface StateRow {
   jobname: string;
   since: string;
@@ -46,14 +65,8 @@ interface StateRow {
 }
 
 interface Windows {
-  recent: SweepRowFixture[];
-  wide: SweepRowFixture[];
-}
-
-/** Both windows carry the same rows - the common case for tests that do not
- * specifically exercise the recent-vs-wide split (I1, I4, C2 direction 2). */
-function sameWindow(rows: SweepRowFixture[]): Windows {
-  return { recent: rows, wide: rows };
+  wide: WideRowFixture[];
+  terminal: TerminalRowFixture[];
 }
 
 interface FakeHandle {
@@ -71,8 +84,10 @@ function createFakeSupabase(initial: Windows): FakeHandle {
   const supabase = {
     rpc: (name: string, args: Record<string, unknown>) => {
       rpcCalls.push({ name, args });
-      const rows = args.p_hours === RECENT_WINDOW_HOURS ? windows.recent : windows.wide;
-      return Promise.resolve({ data: rows, error: null });
+      if (name === "sweep_job_terminal_failures") {
+        return Promise.resolve({ data: windows.terminal, error: null });
+      }
+      return Promise.resolve({ data: windows.wide, error: null });
     },
     from: () => ({
       select: () => Promise.resolve({ data: Array.from(state.values()), error: null }),
@@ -108,10 +123,11 @@ const PROD_SCHEDULES: Record<string, string> = {
   "receipts.stuck_sweep": "50 * * * *",
 };
 
-/** Every EXPECTED_JOBS entry, healthy, as of `now`. Individual tests override
- * or drop the ONE job under test so a single signal is isolated. */
-function healthyExpectedRows(now: Date): SweepRowFixture[] {
-  return EXPECTED_JOBS.map((jobname) => ({
+/** Every EXPECTED_JOBS entry, healthy on both windows, as of `now`.
+ * Individual tests override the ONE job under test on whichever window(s)
+ * the scenario needs, isolating a single signal. */
+function healthyWindows(now: Date): Windows {
+  const wide = EXPECTED_JOBS.map((jobname) => ({
     jobname,
     schedule: PROD_SCHEDULES[jobname] ?? "7 * * * *",
     active: true,
@@ -121,18 +137,31 @@ function healthyExpectedRows(now: Date): SweepRowFixture[] {
     last_finished_at: now.toISOString(),
     last_error: null,
   }));
+  const terminal = EXPECTED_JOBS.map((jobname) => ({
+    jobname,
+    terminal_runs: 10,
+    terminal_failures: 0,
+    last_terminal_error: null,
+  }));
+  return { wide, terminal };
 }
 
-function withOverride(
-  rows: SweepRowFixture[],
-  jobname: string,
-  patch: Partial<SweepRowFixture>,
-): SweepRowFixture[] {
-  return rows.map((r) => (r.jobname === jobname ? { ...r, ...patch } : r));
+function withWide(windows: Windows, jobname: string, patch: Partial<WideRowFixture>): Windows {
+  return {
+    ...windows,
+    wide: windows.wide.map((r) => (r.jobname === jobname ? { ...r, ...patch } : r)),
+  };
 }
 
-function withoutJob(rows: SweepRowFixture[], jobname: string): SweepRowFixture[] {
-  return rows.filter((r) => r.jobname !== jobname);
+function withTerminal(windows: Windows, jobname: string, patch: Partial<TerminalRowFixture>): Windows {
+  return {
+    ...windows,
+    terminal: windows.terminal.map((r) => (r.jobname === jobname ? { ...r, ...patch } : r)),
+  };
+}
+
+function withoutWideJob(windows: Windows, jobname: string): Windows {
+  return { ...windows, wide: windows.wide.filter((r) => r.jobname !== jobname) };
 }
 
 function createSendMock(outcomes: SendEmailResult[] = []): {
@@ -158,10 +187,9 @@ describe("checkJobHealth", () => {
     expect(result).toBeNull();
   });
 
-  it("a healthy sweep set (every expected job present, active, recently succeeded) produces nothing", async () => {
+  it("a healthy sweep set (every expected job present, active, recently succeeded on both windows) produces nothing", async () => {
     const now = new Date("2026-08-06T12:00:00.000Z");
-    const rows = healthyExpectedRows(now);
-    const fake = createFakeSupabase(sameWindow(rows));
+    const fake = createFakeSupabase(healthyWindows(now));
     const { send, calls } = createSendMock();
 
     const result = await checkJobHealth({
@@ -177,29 +205,50 @@ describe("checkJobHealth", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("reads both the recent (24h) and the wide (staleness) window, and the wide window is wider than any threshold this schedule vocabulary produces", async () => {
+  it("reads sweep_job_terminal_failures over the recent window and sweep_job_health over the wide window - two DIFFERENT functions, not one function twice", async () => {
     const now = new Date("2026-08-06T12:00:00.000Z");
-    const fake = createFakeSupabase(sameWindow(healthyExpectedRows(now)));
+    const fake = createFakeSupabase(healthyWindows(now));
 
     await checkJobHealth({ supabase: fake.supabase, opsAddress: null, now: () => now });
 
-    const pHours = fake.rpcCalls
-      .map((c) => c.args.p_hours)
-      .sort((a, b) => Number(a) - Number(b));
-    expect(pHours).toEqual([RECENT_WINDOW_HOURS, STALE_WINDOW_HOURS]);
+    const byName = fake.rpcCalls.map((c) => [c.name, c.args.p_hours]);
+    expect(byName).toContainEqual(["sweep_job_terminal_failures", RECENT_WINDOW_HOURS]);
+    expect(byName).toContainEqual(["sweep_job_health", STALE_WINDOW_HOURS]);
+    expect(fake.rpcCalls).toHaveLength(2);
   });
 
   // ---------------------------------------------------------------------
-  // C2 - last_status alone was wrong in both directions.
+  // C2 - classification must not false-positive on in-flight status, and
+  // must not false-negative on a genuine terminal failure count.
   // ---------------------------------------------------------------------
   describe("C2: classification must not false-positive on in-flight status or false-negative on a failure count", () => {
-    it("does NOT page when the most recent run is merely in-flight ('running'), even with zero recent failures", async () => {
+    // C2(i), review pass 2. Root cause: sweep_job_health's own `failures`
+    // column is `count(...) filter (where status <> 'succeeded')`, which
+    // counts EVERY in-flight status ('starting'/'running'/'sending') as a
+    // failure - confirmed against the live `prosrc`. The FIRST review-fix
+    // pass read exactly that column (via a second, narrower
+    // sweep_job_health call) for its flapping detector, so a job caught
+    // mid-run - routine for campaigns.sweep, which runs every 5 minutes -
+    // paged with a false "N of M runs failed" claim. No TypeScript
+    // predicate downstream can recover a distinction the aggregate itself
+    // already discarded, which is why 0061 (`sweep_job_terminal_failures`)
+    // exists: it counts only `status = 'failed'`, verified live via pgTAP
+    // (supabase/tests/rpc_job_health_terminal_failures_smoke.sql) to return
+    // terminal_failures=0 for a job whose only run is 'running'.
+    //
+    // This fixture is now INTERNALLY CONSISTENT with real sweep_job_health
+    // output (unlike the pass-1 version of this test, which paired
+    // last_status:'running' with failures:0 - a combination the real
+    // function can never produce): `wide.last_status` genuinely is
+    // 'running' AND `terminal.terminal_failures` genuinely is 0, because
+    // the two are independent aggregates from independent functions, one of
+    // which (by construction, per 0061) cannot see the in-flight run as a
+    // failure at all.
+    it("C2(i): does NOT page when the most recent run is merely in-flight ('running'), because sweep_job_terminal_failures correctly excludes it", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
-      const rows = withOverride(healthyExpectedRows(now), "campaigns.sweep", {
-        last_status: "running",
-        failures: 0,
-      });
-      const fake = createFakeSupabase(sameWindow(rows));
+      let windows = withWide(healthyWindows(now), "campaigns.sweep", { last_status: "running" });
+      windows = withTerminal(windows, "campaigns.sweep", { terminal_failures: 0, terminal_runs: 0 });
+      const fake = createFakeSupabase(windows);
       const { send, calls } = createSendMock();
 
       const result = await checkJobHealth({
@@ -216,11 +265,9 @@ describe("checkJobHealth", () => {
     it("does NOT page on 'starting' or 'sending' either - the same in-flight family", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
       for (const status of ["starting", "sending"]) {
-        const rows = withOverride(healthyExpectedRows(now), "campaigns.sweep", {
-          last_status: status,
-          failures: 0,
-        });
-        const fake = createFakeSupabase(sameWindow(rows));
+        let windows = withWide(healthyWindows(now), "campaigns.sweep", { last_status: status });
+        windows = withTerminal(windows, "campaigns.sweep", { terminal_failures: 0, terminal_runs: 0 });
+        const fake = createFakeSupabase(windows);
         const { calls } = createSendMock();
 
         const result = await checkJobHealth({ supabase: fake.supabase, opsAddress: OPS_ADDRESS, now: () => now });
@@ -232,12 +279,11 @@ describe("checkJobHealth", () => {
 
     it("DOES page when the most recent run is the terminal 'failed' state", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
-      const rows = withOverride(healthyExpectedRows(now), "campaigns.sweep", {
+      const windows = withWide(healthyWindows(now), "campaigns.sweep", {
         last_status: "failed",
         last_error: "ERROR: division by zero",
-        failures: 1,
       });
-      const fake = createFakeSupabase(sameWindow(rows));
+      const fake = createFakeSupabase(windows);
       const { send, calls } = createSendMock();
 
       const result = await checkJobHealth({
@@ -252,19 +298,18 @@ describe("checkJobHealth", () => {
       expect(calls[0]?.text).toContain("ERROR: division by zero");
     });
 
-    // The reviewer's own probe: runs:24, failures:12, last_status:"succeeded"
-    // must NOT read as zero alerts.
-    it("DOES page when the recent window shows real failures, even though the LAST run succeeded", async () => {
+    // The reviewer's own probe (pass 1): runs:24, failures:12,
+    // last_status:"succeeded" must NOT read as zero alerts. Re-expressed
+    // against the corrected function: terminal_runs=24, terminal_failures=12.
+    it("DOES page when sweep_job_terminal_failures shows real terminal failures, even though the LAST run succeeded", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
-      const baseline = healthyExpectedRows(now);
-      const recent = withOverride(baseline, "campaigns.sweep", {
-        last_status: "succeeded",
-        runs: 24,
-        failures: 12,
-        last_error: "ERROR: connection to server was lost",
+      let windows = withWide(healthyWindows(now), "campaigns.sweep", { last_status: "succeeded" });
+      windows = withTerminal(windows, "campaigns.sweep", {
+        terminal_runs: 24,
+        terminal_failures: 12,
+        last_terminal_error: "ERROR: connection to server was lost",
       });
-      const wide = withOverride(baseline, "campaigns.sweep", { last_status: "succeeded" });
-      const fake = createFakeSupabase({ recent, wide });
+      const fake = createFakeSupabase(windows);
       const { send, calls } = createSendMock();
 
       const result = await checkJobHealth({
@@ -297,16 +342,12 @@ describe("checkJobHealth", () => {
 
     it("flags a weekly-cadence job stale when its last run is older than the threshold but still inside the window (positive case, not just 'does not false-positive')", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
-      // Weekly gap = 10080min, threshold = 10080*2+5 = 20165min = ~336.08h.
-      // 15 days = 360h is past the threshold and still well inside a
-      // 504h (21-day) window, so it must be VISIBLE (found, not null) and
-      // judged too old.
       const lastRun = new Date(now.getTime() - 15 * 24 * 60 * 60_000);
-      const rows = withOverride(healthyExpectedRows(now), "integrity.balance_check", {
+      const windows = withWide(healthyWindows(now), "integrity.balance_check", {
         schedule: "15 20 * * 0",
         last_finished_at: lastRun.toISOString(),
       });
-      const fake = createFakeSupabase(sameWindow(rows));
+      const fake = createFakeSupabase(windows);
       const { send } = createSendMock();
 
       const result = await checkJobHealth({
@@ -324,11 +365,11 @@ describe("checkJobHealth", () => {
     it("does NOT flag a weekly-cadence job stale merely because it has not run in the last few hours (negative case)", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
       const lastRun = new Date(now.getTime() - 3 * 60 * 60_000);
-      const rows = withOverride(healthyExpectedRows(now), "integrity.balance_check", {
+      const windows = withWide(healthyWindows(now), "integrity.balance_check", {
         schedule: "15 20 * * 0",
         last_finished_at: lastRun.toISOString(),
       });
-      const fake = createFakeSupabase(sameWindow(rows));
+      const fake = createFakeSupabase(windows);
       const { calls } = createSendMock();
 
       const result = await checkJobHealth({ supabase: fake.supabase, opsAddress: OPS_ADDRESS, now: () => now });
@@ -339,13 +380,11 @@ describe("checkJobHealth", () => {
 
     it("a job that has never run at all inside the wide window is flagged stale (hourly cadence, easy conclusive case)", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
-      const rows = withOverride(healthyExpectedRows(now), "claims.expiry_sweep", {
+      const windows = withWide(healthyWindows(now), "claims.expiry_sweep", {
         last_status: null,
         last_finished_at: null,
-        runs: 0,
-        failures: 0,
       });
-      const fake = createFakeSupabase(sameWindow(rows));
+      const fake = createFakeSupabase(windows);
       const { send } = createSendMock();
 
       const result = await checkJobHealth({
@@ -367,11 +406,11 @@ describe("checkJobHealth", () => {
   describe("I2: a retryable send failure must not swallow the alert for 24h", () => {
     it("retries on the very next check after a failed send, even seconds later", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
-      const rows = withOverride(healthyExpectedRows(now), "campaigns.sweep", {
+      const windows = withWide(healthyWindows(now), "campaigns.sweep", {
         last_status: "failed",
         last_error: "boom",
       });
-      const fake = createFakeSupabase(sameWindow(rows));
+      const fake = createFakeSupabase(windows);
       const { send, calls } = createSendMock([{ ok: false, retryable: true, reason: "resend was unreachable" }]);
 
       const first = await checkJobHealth({
@@ -383,8 +422,6 @@ describe("checkJobHealth", () => {
       expect(first?.sent).toBe(0);
       expect(calls).toHaveLength(1);
 
-      // Ten seconds later - nowhere near a 24h reminder window. Must retry
-      // because the first attempt never actually delivered.
       const soon = new Date(now.getTime() + 10_000);
       const second = await checkJobHealth({
         supabase: fake.supabase,
@@ -399,28 +436,27 @@ describe("checkJobHealth", () => {
 
     it("once a send SUCCEEDS, the normal 24h dedupe applies again", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
-      const rows = withOverride(healthyExpectedRows(now), "campaigns.sweep", {
+      const windows = withWide(healthyWindows(now), "campaigns.sweep", {
         last_status: "failed",
         last_error: "boom",
       });
-      const fake = createFakeSupabase(sameWindow(rows));
+      const fake = createFakeSupabase(windows);
       const { send, calls } = createSendMock([
         { ok: false, retryable: true, reason: "resend was unreachable" },
         { ok: true, id: "delivered-1" },
       ]);
 
-      await checkJobHealth({ supabase: fake.supabase, send, opsAddress: OPS_ADDRESS, now: () => now }); // fails
+      await checkJobHealth({ supabase: fake.supabase, send, opsAddress: OPS_ADDRESS, now: () => now });
       const soon = new Date(now.getTime() + 10_000);
       const secondCheck = await checkJobHealth({
         supabase: fake.supabase,
         send,
         opsAddress: OPS_ADDRESS,
         now: () => soon,
-      }); // succeeds
+      });
       expect(secondCheck?.sent).toBe(1);
       expect(calls).toHaveLength(2);
 
-      // Five minutes after the SUCCESSFUL delivery, still well under 24h.
       const later = new Date(soon.getTime() + 5 * 60_000);
       const thirdCheck = await checkJobHealth({
         supabase: fake.supabase,
@@ -429,7 +465,7 @@ describe("checkJobHealth", () => {
         now: () => later,
       });
 
-      expect(calls).toHaveLength(2); // no third attempt
+      expect(calls).toHaveLength(2);
       expect(thirdCheck?.alerted).toEqual([]);
     });
   });
@@ -440,28 +476,28 @@ describe("checkJobHealth", () => {
   describe("I4: a flapping job pages once, not once per failing sample", () => {
     it("6 checks alternating fail/succeed/fail/succeed/fail/succeed (all within 24h) produce exactly ONE send", async () => {
       const t0 = new Date("2026-08-06T12:00:00.000Z");
-      const baseline = healthyExpectedRows(t0);
-      const fake = createFakeSupabase(sameWindow(baseline));
+      const baseline = healthyWindows(t0);
+      const fake = createFakeSupabase(baseline);
       const { send, calls } = createSendMock();
 
-      const pattern: Array<{ status: string; failures: number }> = [
-        { status: "failed", failures: 1 },
-        { status: "succeeded", failures: 1 }, // recent window still shows the one failure
-        { status: "failed", failures: 2 },
-        { status: "succeeded", failures: 2 },
-        { status: "failed", failures: 3 },
-        { status: "succeeded", failures: 3 },
+      const pattern: Array<{ status: string; terminalFailures: number }> = [
+        { status: "failed", terminalFailures: 1 },
+        { status: "succeeded", terminalFailures: 1 }, // recent window still shows the one failure
+        { status: "failed", terminalFailures: 2 },
+        { status: "succeeded", terminalFailures: 2 },
+        { status: "failed", terminalFailures: 3 },
+        { status: "succeeded", terminalFailures: 3 },
       ];
 
       for (const [i, step] of pattern.entries()) {
         const now = new Date(t0.getTime() + i * 60_000);
-        const rows = withOverride(baseline, "campaigns.sweep", {
-          last_status: step.status,
-          failures: step.failures,
-          runs: 5 + i,
-          last_error: "ERROR: flaky upstream",
+        let windows = withWide(baseline, "campaigns.sweep", { last_status: step.status });
+        windows = withTerminal(windows, "campaigns.sweep", {
+          terminal_failures: step.terminalFailures,
+          terminal_runs: 5 + i,
+          last_terminal_error: "ERROR: flaky upstream",
         });
-        fake.setRows(sameWindow(rows));
+        fake.setRows(windows);
         await checkJobHealth({ supabase: fake.supabase, send, opsAddress: OPS_ADDRESS, now: () => now });
       }
 
@@ -470,29 +506,25 @@ describe("checkJobHealth", () => {
 
     it("recovery requires a full 24h clean, not just one successful run - and then a fresh failure alerts again", async () => {
       const t0 = new Date("2026-08-06T12:00:00.000Z");
-      const baseline = healthyExpectedRows(t0);
-      const fake = createFakeSupabase(sameWindow(baseline));
+      const fake = createFakeSupabase(healthyWindows(t0));
       const { send, calls } = createSendMock();
 
       // Fails once.
-      fake.setRows(
-        sameWindow(
-          withOverride(baseline, "campaigns.sweep", {
-            last_status: "failed",
-            failures: 1,
-            last_error: "boom",
-          }),
-        ),
-      );
+      let windows = withWide(healthyWindows(t0), "campaigns.sweep", {
+        last_status: "failed",
+        last_error: "boom",
+      });
+      windows = withTerminal(windows, "campaigns.sweep", { terminal_failures: 1, terminal_runs: 5 });
+      fake.setRows(windows);
       await checkJobHealth({ supabase: fake.supabase, send, opsAddress: OPS_ADDRESS, now: () => t0 });
       expect(calls).toHaveLength(1);
 
       // Ten minutes later, succeeded - but the recent window still shows the
-      // one failure inside 24h, so this is NOT yet "recovered".
+      // one terminal failure inside 24h, so this is NOT yet "recovered".
       const t1 = new Date(t0.getTime() + 10 * 60_000);
-      fake.setRows(
-        sameWindow(withOverride(baseline, "campaigns.sweep", { last_status: "succeeded", failures: 1 })),
-      );
+      let windows1 = withWide(healthyWindows(t1), "campaigns.sweep", { last_status: "succeeded" });
+      windows1 = withTerminal(windows1, "campaigns.sweep", { terminal_failures: 1, terminal_runs: 6 });
+      fake.setRows(windows1);
       const stillFlapping = await checkJobHealth({
         supabase: fake.supabase,
         send,
@@ -500,23 +532,12 @@ describe("checkJobHealth", () => {
         now: () => t1,
       });
       expect(stillFlapping?.unhealthy.find((i) => i.jobname === "campaigns.sweep")).toBeDefined();
-      expect(calls).toHaveLength(1); // no new send - still the same incident
+      expect(calls).toHaveLength(1);
 
       // 25 hours after the LAST failure, the recent window is genuinely
-      // clean (zero failures in the trailing 24h) - now it clears. Every
-      // OTHER expected job's `last_finished_at` is refreshed to `t2` too:
-      // the point of this step is campaigns.sweep's own recovery, not an
-      // incidental staleness alert on its five siblings whose fixture
-      // timestamps would otherwise still be anchored 25h in the past.
+      // clean (zero terminal failures in the trailing 24h) - now it clears.
       const t2 = new Date(t0.getTime() + 25 * 60 * 60_000);
-      fake.setRows(
-        sameWindow(
-          withOverride(healthyExpectedRows(t2), "campaigns.sweep", {
-            last_status: "succeeded",
-            failures: 0,
-          }),
-        ),
-      );
+      fake.setRows(healthyWindows(t2)); // every job, including campaigns.sweep, fully healthy again
       const recovered = await checkJobHealth({
         supabase: fake.supabase,
         send,
@@ -528,15 +549,12 @@ describe("checkJobHealth", () => {
 
       // A fresh failure afterwards is a genuinely new incident.
       const t3 = new Date(t2.getTime() + 5 * 60_000);
-      fake.setRows(
-        sameWindow(
-          withOverride(healthyExpectedRows(t3), "campaigns.sweep", {
-            last_status: "failed",
-            failures: 1,
-            last_error: "boom again",
-          }),
-        ),
-      );
+      let windows3 = withWide(healthyWindows(t3), "campaigns.sweep", {
+        last_status: "failed",
+        last_error: "boom again",
+      });
+      windows3 = withTerminal(windows3, "campaigns.sweep", { terminal_failures: 1, terminal_runs: 3 });
+      fake.setRows(windows3);
       const recurred = await checkJobHealth({
         supabase: fake.supabase,
         send,
@@ -555,8 +573,8 @@ describe("checkJobHealth", () => {
   describe("I5: an expected job that silently stopped being scheduled must be caught", () => {
     it("alerts when an expected job has NO cron.job row at all (as cron.unschedule leaves it)", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
-      const rows = withoutJob(healthyExpectedRows(now), "receipts.stuck_sweep");
-      const fake = createFakeSupabase(sameWindow(rows));
+      const windows = withoutWideJob(healthyWindows(now), "receipts.stuck_sweep");
+      const fake = createFakeSupabase(windows);
       const { send, calls } = createSendMock();
 
       const result = await checkJobHealth({
@@ -574,8 +592,8 @@ describe("checkJobHealth", () => {
 
     it("alerts when an expected job is present but active=false", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
-      const rows = withOverride(healthyExpectedRows(now), "points.expiry_warn", { active: false });
-      const fake = createFakeSupabase(sameWindow(rows));
+      const windows = withWide(healthyWindows(now), "points.expiry_warn", { active: false });
+      const fake = createFakeSupabase(windows);
       const { send } = createSendMock();
 
       const result = await checkJobHealth({
@@ -591,20 +609,18 @@ describe("checkJobHealth", () => {
 
     it("does NOT alert on an unexpected job that is simply inactive (not this check's business)", async () => {
       const now = new Date("2026-08-06T12:00:00.000Z");
-      const rows = [
-        ...healthyExpectedRows(now),
-        {
-          jobname: "old.retired_experiment",
-          schedule: "0 0 * * *",
-          active: false,
-          runs: 0,
-          failures: 0,
-          last_status: null,
-          last_finished_at: null,
-          last_error: null,
-        },
-      ];
-      const fake = createFakeSupabase(sameWindow(rows));
+      const windows = healthyWindows(now);
+      windows.wide.push({
+        jobname: "old.retired_experiment",
+        schedule: "0 0 * * *",
+        active: false,
+        runs: 0,
+        failures: 0,
+        last_status: null,
+        last_finished_at: null,
+        last_error: null,
+      });
+      const fake = createFakeSupabase(windows);
       const { calls } = createSendMock();
 
       const result = await checkJobHealth({ supabase: fake.supabase, opsAddress: OPS_ADDRESS, now: () => now });
@@ -619,11 +635,11 @@ describe("checkJobHealth", () => {
   // ---------------------------------------------------------------------
   it("no ops address configured: no send, no throw, and the check still reports and tracks the incident", async () => {
     const now = new Date("2026-08-06T12:00:00.000Z");
-    const rows = withOverride(healthyExpectedRows(now), "campaigns.sweep", {
+    const windows = withWide(healthyWindows(now), "campaigns.sweep", {
       last_status: "failed",
       last_error: "boom",
     });
-    const fake = createFakeSupabase(sameWindow(rows));
+    const fake = createFakeSupabase(windows);
     const { send, calls } = createSendMock();
 
     const result = await checkJobHealth({ supabase: fake.supabase, send, opsAddress: null, now: () => now });
@@ -636,16 +652,13 @@ describe("checkJobHealth", () => {
     expect(result?.alerted.find((i) => i.jobname === "campaigns.sweep")).toBeDefined();
   });
 
-  // M5: once an address IS configured, an incident that opened while
-  // unconfigured is told about on the very next check, not up to 24h later -
-  // the same ALERT_NOT_YET_DELIVERED mechanism I2 relies on.
   it("M5: wiring an ops address mid-incident alerts on the very next check, not after a 24h wait", async () => {
     const now = new Date("2026-08-06T12:00:00.000Z");
-    const rows = withOverride(healthyExpectedRows(now), "campaigns.sweep", {
+    const windows = withWide(healthyWindows(now), "campaigns.sweep", {
       last_status: "failed",
       last_error: "boom",
     });
-    const fake = createFakeSupabase(sameWindow(rows));
+    const fake = createFakeSupabase(windows);
     const { send, calls } = createSendMock();
 
     const unconfigured = await checkJobHealth({
@@ -669,7 +682,6 @@ describe("checkJobHealth", () => {
     expect(calls).toHaveLength(1);
   });
 
-  // M4: an unexpected exception anywhere in the check must not propagate.
   it("M4: never throws, even when the underlying read explodes unexpectedly", async () => {
     const now = new Date("2026-08-06T12:00:00.000Z");
     const supabase = {
@@ -684,15 +696,13 @@ describe("checkJobHealth", () => {
     expect(result?.unhealthy).toEqual([]);
   });
 
-  // M1: the parts of the composed alert beyond "job name + failure detail"
-  // are asserted, not merely present in the implementation unobserved.
   it("M1: the alert body also carries the duration line and the runbook pointer", async () => {
     const now = new Date("2026-08-06T12:00:00.000Z");
-    const rows = withOverride(healthyExpectedRows(now), "campaigns.sweep", {
+    const windows = withWide(healthyWindows(now), "campaigns.sweep", {
       last_status: "failed",
       last_error: "boom",
     });
-    const fake = createFakeSupabase(sameWindow(rows));
+    const fake = createFakeSupabase(windows);
     const { send, calls } = createSendMock();
 
     await checkJobHealth({ supabase: fake.supabase, send, opsAddress: OPS_ADDRESS, now: () => now });
@@ -705,12 +715,12 @@ describe("checkJobHealth", () => {
 
   it("two simultaneously failing jobs each get their own alert", async () => {
     const now = new Date("2026-08-06T12:00:00.000Z");
-    let rows = withOverride(healthyExpectedRows(now), "campaigns.sweep", {
+    let windows = withWide(healthyWindows(now), "campaigns.sweep", {
       last_status: "failed",
       last_error: "boom-1",
     });
-    rows = withOverride(rows, "points.expiry_sweep", { last_status: "failed", last_error: "boom-2" });
-    const fake = createFakeSupabase(sameWindow(rows));
+    windows = withWide(windows, "points.expiry_sweep", { last_status: "failed", last_error: "boom-2" });
+    const fake = createFakeSupabase(windows);
     const { send, calls } = createSendMock();
 
     const result = await checkJobHealth({

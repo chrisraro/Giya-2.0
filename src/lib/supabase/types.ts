@@ -158,11 +158,18 @@ export type Database = {
         }
         Relationships: [
           {
-            foreignKeyName: "balance_check_findings_pair_fkey"
-            columns: ["business_id", "consumer_id"]
-            isOneToOne: true
-            referencedRelation: "business_customers"
-            referencedColumns: ["business_id", "consumer_id"]
+            foreignKeyName: "balance_check_findings_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "balance_check_findings_consumer_id_fkey"
+            columns: ["consumer_id"]
+            isOneToOne: false
+            referencedRelation: "consumers"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -2721,6 +2728,15 @@ export type Database = {
           last_status: string
           runs: number
           schedule: string
+        }[]
+      }
+      sweep_job_terminal_failures: {
+        Args: { p_hours?: number }
+        Returns: {
+          jobname: string
+          last_terminal_error: string
+          terminal_failures: number
+          terminal_runs: number
         }[]
       }
       sweep_stuck_receipts: { Args: { p_limit?: number }; Returns: number }

@@ -1,17 +1,31 @@
 // The narrowest possible cron-gap estimator: "how many minutes can pass
 // between two runs of a job on THIS schedule before that gap is itself
-// evidence something is wrong". Not a general cron parser - it only has to
-// answer that question for the exact schedule SHAPES this codebase's own
-// pg_cron migrations (0028, 0043, 0044, 0053) and doc 39's schedule registry
-// actually use: `*/N * * * *`, `M * * * *`, `M H * * *`, and `M H * * D`.
+// evidence something is wrong". Not a general cron parser.
 //
-// Every other shape (a day-of-month restriction, a `*/N` hour, a malformed
-// string) returns null rather than guessing, and the caller (job-health.ts)
-// treats null as "no honest staleness call can be made for this job" and
-// skips the staleness check entirely rather than risk a false alarm - the
-// same "degrade the ONE thing that failed, not the whole read" discipline
-// src/lib/observability/metrics.ts documents at length for its own per-field
-// reads.
+// Review fix (B2): this header previously claimed to cover "the exact
+// schedule SHAPES this codebase's own pg_cron migrations ... and doc 39's
+// schedule registry actually use", which was not true of two shapes doc 39
+// genuinely lists (`* * * * *`, every minute - `ai.embed_refresh`'s retry
+// tick - and the registry's `2-57/5 * * * *`, a stepped range rather than a
+// step from zero). The former is now supported (see the wildcard-minute
+// branch below); the latter deliberately is not - a step WITHIN a range
+// needs a real interval calculation this function does not attempt, and
+// guessing wrong here is worse than the honest `null`. The shapes this
+// function actually recognises, precisely:
+//
+//   `*/N * * * *`   every N minutes
+//   `* * * * *`     every minute
+//   `M * * * *`     hourly, at minute M
+//   `M H * * *`     daily, at H:M
+//   `M H * * D`     weekly, at H:M on day-of-week D
+//
+// Every other shape (a day-of-month restriction, an hour-level `*/N`, a
+// stepped RANGE like `2-57/5`, a malformed string) returns null rather than
+// guessing, and the caller (job-health.ts) treats null as "no honest
+// staleness call can be made for this job" and skips the staleness check
+// entirely rather than risk a false alarm - the same "degrade the ONE thing
+// that failed, not the whole read" discipline src/lib/observability/
+// metrics.ts documents at length for its own per-field reads.
 
 const FIELD_COUNT = 5;
 
@@ -52,6 +66,13 @@ export function estimateMaxGapMinutes(schedule: string): number | null {
     if (hour !== "*" || dayOfWeek !== "*") return null;
     const step = Number(stepMatch[1]);
     return step > 0 ? step : null;
+  }
+
+  // Bare wildcard minute with wildcard hour and day-of-week: every minute
+  // (doc 39's `ai.embed_refresh` retry tick). Checked before the
+  // NUMBER_PATTERN gate below, which "*" deliberately fails.
+  if (minute === "*") {
+    return hour === "*" && dayOfWeek === "*" ? 1 : null;
   }
 
   if (!NUMBER_PATTERN.test(minute)) return null; // e.g. an hour-level `*/N`

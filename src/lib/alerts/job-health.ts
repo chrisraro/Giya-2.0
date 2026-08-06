@@ -88,6 +88,14 @@ import { estimateMaxGapMinutes } from "./cron-interval";
 // loop that only iterates the rows sweep_job_health returns. Checking a
 // fixed EXPECTED_JOBS list against the returned set catches both.
 //
+// This is not hypothetical. Live on this project as of 2026-08-06,
+// `cron.job_run_details` holds two genuine failures nobody has ever seen -
+// `sweep_stuck_receipts` raising `ERROR: LIMIT must not be negative` on
+// 2026-07-25 - belonging to a jobid `cron.job` no longer has a row for: an
+// orphaned run history, simultaneously proof of the exact gap this whole
+// task closes and a live instance of this specific `not_scheduled` case.
+//
+
 // `failing`: checked TWO ways, because one signal alone is wrong in both
 // directions (the review's finding, C2):
 //   1. The most recent run's own status is the terminal 'failed' state.
@@ -95,17 +103,31 @@ import { estimateMaxGapMinutes } from "./cron-interval";
 //      passes through 'starting', 'running' and 'sending' before landing on
 //      'succeeded' or 'failed', and a check that lands mid-run must not page
 //      on an in-flight status that will resolve on its own.
-//   2. Failures happened recently even though the MOST RECENT run happened
-//      to succeed (or is in flight) - an intermittently-flapping job, e.g.
-//      one failing every other run. This is read from a SEPARATE, narrower
-//      RPC call (RECENT_WINDOW_HOURS = 24h, matching sweep_job_health's own
-//      documented default and 0028's "the window" framing) rather than from
-//      the wide staleness window, and that separation is deliberate: a
-//      24h-bounded failure count naturally ages OUT after a full day
-//      failure-free, which is what makes "genuinely recovered" a meaningful,
-//      non-flappy signal (see the I4 note below) without ever needing to key
-//      on the ever-growing whole-history failure count the first cut's
-//      header correctly rejected.
+//   2. Genuine, TERMINAL failures happened recently even though the MOST
+//      RECENT run happened to succeed (or is in flight) - an
+//      intermittently-flapping job, e.g. one failing every other run. This
+//      is read from a SEPARATE RPC call, `public.sweep_job_terminal_failures`
+//      (0061) - NOT a second call to sweep_job_health with a narrower
+//      window, which was the first review-fix pass's own mistake (C2,
+//      second finding): sweep_job_health's `failures` column is `count(...)
+//      filter (where status <> 'succeeded')`, and every in-flight status
+//      satisfies that filter too, so a TypeScript predicate reading it can
+//      never tell "genuinely failed" from "simply still running" - the
+//      distinction is destroyed before it reaches application code, no
+//      matter what window the RPC is called with. `campaigns.sweep` runs
+//      every 5 minutes, so a check landing mid-run is routine, and the first
+//      fix (reading `sweep_job_health.failures` over a 24h window) paged on
+//      it every time. `sweep_job_terminal_failures` counts only `status =
+//      'failed'` - see that migration's header for why this could not be
+//      fixed by editing 0028 and had to be a new function.
+//
+//      RECENT_WINDOW_HOURS (24h, matching sweep_job_health's own documented
+//      default and 0028's "the window" framing) still bounds this call, and
+//      that bound is still what makes "genuinely recovered" a meaningful,
+//      non-flappy signal (I4 below): a 24h-bounded TERMINAL failure count
+//      ages OUT after a full day failure-free, without ever keying on the
+//      ever-growing whole-history failure count the first cut's header
+//      correctly rejected.
 //
 // `stale`: gone quieter than its own schedule can honestly explain - see
 // classifyKnownJob() and the STALE_WINDOW_HOURS note below for the window-
@@ -128,11 +150,12 @@ import { estimateMaxGapMinutes } from "./cron-interval";
 // =============================================================================
 
 /**
- * The narrow window for "has this job failed recently", independent of the
- * wide staleness window below. Matches sweep_job_health's own documented
- * default and src/lib/observability/metrics.ts's SWEEP_HEALTH_WINDOW_HOURS -
- * this is "the window" 0028's header already establishes as the unit doc 39
- * reasons about failures in.
+ * The window `public.sweep_job_terminal_failures` (0061) is called with for
+ * "has this job genuinely failed recently", independent of the wide
+ * staleness window below. Matches sweep_job_health's own documented default
+ * and src/lib/observability/metrics.ts's SWEEP_HEALTH_WINDOW_HOURS - this is
+ * "the window" 0028's header already establishes as the unit doc 39 reasons
+ * about failures in.
  */
 export const RECENT_WINDOW_HOURS = 24;
 
@@ -306,6 +329,17 @@ interface SweepRow {
   last_error: string | null;
 }
 
+/** public.sweep_job_terminal_failures (0061)'s row shape - deliberately NOT
+ * SweepRow's `failures`/`last_error`, which count in-flight runs too. See
+ * the module header (C2) and that migration's own header for why this is a
+ * separate function rather than a second field on the existing one. */
+interface TerminalFailureRow {
+  jobname: string;
+  terminal_runs: number;
+  terminal_failures: number;
+  last_terminal_error: string | null;
+}
+
 interface StateRow {
   jobname: string;
   since: string;
@@ -360,23 +394,23 @@ async function runCheck(
   const { supabase } = deps;
   const send = deps.send ?? sendEmail;
 
-  const [recentResult, wideResult] = await Promise.all([
-    supabase.rpc("sweep_job_health", { p_hours: RECENT_WINDOW_HOURS }),
+  const [terminalResult, wideResult] = await Promise.all([
+    supabase.rpc("sweep_job_terminal_failures", { p_hours: RECENT_WINDOW_HOURS }),
     supabase.rpc("sweep_job_health", { p_hours: STALE_WINDOW_HOURS }),
   ]);
 
-  if (recentResult.error !== null || wideResult.error !== null) {
+  if (terminalResult.error !== null || wideResult.error !== null) {
     console.error(
-      `${LOG_PREFIX} sweep_job_health read failed`,
-      recentResult.error ?? wideResult.error,
+      `${LOG_PREFIX} sweep_job_health/sweep_job_terminal_failures read failed`,
+      terminalResult.error ?? wideResult.error,
     );
     return emptyReport(now, opsAddress !== null);
   }
 
   const wideRows = (wideResult.data ?? []) as SweepRow[];
-  const recentRows = (recentResult.data ?? []) as SweepRow[];
+  const terminalRows = (terminalResult.data ?? []) as TerminalFailureRow[];
   const wideByJob = new Map(wideRows.map((r) => [r.jobname, r] as const));
-  const recentByJob = new Map(recentRows.map((r) => [r.jobname, r] as const));
+  const terminalByJob = new Map(terminalRows.map((r) => [r.jobname, r] as const));
 
   const { data: stateData, error: stateError } = await supabase
     .from("job_alert_state")
@@ -426,7 +460,7 @@ async function runCheck(
       // check tracks. Not this check's business.
       continue;
     } else {
-      classification = classifyKnownJob(wideRow, recentByJob.get(jobname), now);
+      classification = classifyKnownJob(wideRow, terminalByJob.get(jobname), now);
     }
 
     const existing = stateByJob.get(jobname);
@@ -539,7 +573,7 @@ async function runCheck(
  */
 function classifyKnownJob(
   wideRow: SweepRow,
-  recentRow: SweepRow | undefined,
+  terminalRow: TerminalFailureRow | undefined,
   now: Date,
 ): { reason: JobHealthReason; detail: string } | null {
   // 1. Terminal failure on the most recent recorded run. NOT `!==
@@ -554,14 +588,18 @@ function classifyKnownJob(
   }
 
   // 2. Flapping: the most recent run happened to succeed (or is in flight),
-  //    but real failures happened within the last RECENT_WINDOW_HOURS. See
-  //    the module header (C2 direction 2, and the brief's own req 1: "has
-  //    failures in the window").
-  const recentFailures = recentRow?.failures ?? 0;
-  if (recentFailures > 0) {
-    const recentRuns = recentRow?.runs ?? recentFailures;
-    const errorText = recentRow?.last_error ?? wideRow.last_error;
-    const summary = `${recentFailures} of ${recentRuns} runs failed in the last ${RECENT_WINDOW_HOURS}h`;
+  //    but GENUINE, TERMINAL failures happened within the last
+  //    RECENT_WINDOW_HOURS. Read from `sweep_job_terminal_failures` (0061),
+  //    NOT from sweep_job_health's `failures` - see the module header (C2)
+  //    and that migration's own header for why `failures` as 0028 defines
+  //    it (`status <> 'succeeded'`) cannot be used here at all: it counts
+  //    an in-flight run as a failure, so a job merely caught mid-run by this
+  //    check would page. `terminal_failures` counts only `status = 'failed'`.
+  const terminalFailures = terminalRow?.terminal_failures ?? 0;
+  if (terminalFailures > 0) {
+    const terminalRuns = terminalRow?.terminal_runs ?? terminalFailures;
+    const errorText = terminalRow?.last_terminal_error ?? wideRow.last_error;
+    const summary = `${terminalFailures} of ${terminalRuns} runs failed in the last ${RECENT_WINDOW_HOURS}h`;
     return {
       reason: "failing",
       detail: errorText !== null ? `${errorText} (${summary})` : summary,
