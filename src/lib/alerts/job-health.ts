@@ -54,8 +54,7 @@ import { estimateMaxGapMinutes } from "./cron-interval";
 // DEDUPE: see supabase/migrations/0060_job_health_alerts.sql's header for the
 // full argument (applied live as 0058_job_health_alerts, renamed twice on
 // merge - see that file's own top note on the ledger-name mismatch). Short
-// version: the
-// key is the job's own name, because that is the one part of "this job is
+// version: the key is the job's own name, because that is the one part of "this job is
 // currently unhealthy" that stays stable for exactly as long as the SAME
 // incident is open and changes the moment it stops being open - unlike a
 // last_finished_at (changes every run, healthy or not) or raw error text
@@ -96,7 +95,6 @@ import { estimateMaxGapMinutes } from "./cron-interval";
 // orphaned run history, simultaneously proof of the exact gap this whole
 // task closes and a live instance of this specific `not_scheduled` case.
 //
-
 // `failing`: checked TWO ways, because one signal alone is wrong in both
 // directions (the review's finding, C2):
 //   1. The most recent run's own status is the terminal 'failed' state.

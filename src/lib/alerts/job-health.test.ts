@@ -361,6 +361,43 @@ describe("checkJobHealth", () => {
       expect(calls[0]?.text).toContain("12 of 24 runs failed");
       expect(calls[0]?.text).toContain("ERROR: connection to server was lost");
     });
+
+    // E (review pass 3): the flapping branch's error text must come ONLY
+    // from sweep_job_terminal_failures, never fall back to wideRow.last_error
+    // - that column is built from the same `status <> 'succeeded'` filter as
+    // sweep_job_health's `failures`, so trusting it here would reopen the
+    // exact contamination path C2(i) exists to close, on the one caller left
+    // that had not been checked. terminalRow.last_terminal_error is null
+    // (a real, if narrow, shape - a failed run whose return_message itself
+    // came back empty) while wideRow.last_error carries a DIFFERENT,
+    // recognizable string that must never reach the alert.
+    //
+    // MUTANT: reintroduce `?? wideRow.last_error` into the flapping branch's
+    // `errorText` computation (job-health.ts's classifyKnownJob, restoring
+    // the exact line this review pass removed). Verified by temporarily
+    // re-adding that fallback and re-running this test: it fails, because
+    // the alert text then contains "STALE WIDE MESSAGE - must never leak".
+    // With the fallback removed (current code), it passes.
+    it("E: the flapping branch's error text never falls back to sweep_job_health's own last_error", async () => {
+      const now = new Date("2026-08-06T12:00:00.000Z");
+      let windows = withWide(healthyWindows(now), "campaigns.sweep", {
+        last_status: "succeeded",
+        last_error: "STALE WIDE MESSAGE - must never leak",
+      });
+      windows = withTerminal(windows, "campaigns.sweep", {
+        terminal_runs: 5,
+        terminal_failures: 1,
+        last_terminal_error: null,
+      });
+      const fake = createFakeSupabase(windows);
+      const { send, calls } = createSendMock();
+
+      await checkJobHealth({ supabase: fake.supabase, send, opsAddress: OPS_ADDRESS, now: () => now });
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.text).not.toContain("STALE WIDE MESSAGE");
+      expect(calls[0]?.text).toContain("1 of 5 runs failed in the last 24h");
+    });
   });
 
   // ---------------------------------------------------------------------
