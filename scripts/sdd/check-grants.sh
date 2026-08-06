@@ -6,15 +6,19 @@
 # (T1.1, T1.2, T1.3) despite being stated in bold in every brief. Prose did not
 # work; a mechanical check does. Run before dispatching a task reviewer:
 #
-#   .superpowers/sdd/check-grants.sh <BASE_SHA>
+#   scripts/sdd/check-grants.sh <BASE_SHA>
 #
 # Exits non-zero and names the unpinned functions if any are missing.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 BASE="${1:?usage: check-grants.sh <BASE_SHA>}"
 
-mapfile -t NEW_MIGRATIONS < <(git diff --name-only --diff-filter=A "$BASE"..HEAD -- 'supabase/migrations/*.sql')
-[ ${#NEW_MIGRATIONS[@]} -eq 0 ] && { echo "no new migrations; nothing to check"; exit 0; }
+# Added AND modified. A `create or replace function public.foo` landing inside
+# an existing migration is just as reachable as one in a new file, and
+# --diff-filter=A alone would wave it through - a hole found while this gate
+# was itself under review.
+mapfile -t NEW_MIGRATIONS < <(git diff --name-only --diff-filter=AM "$BASE"..HEAD -- 'supabase/migrations/*.sql')
+[ ${#NEW_MIGRATIONS[@]} -eq 0 ] && { echo "no added/modified migrations; nothing to check"; exit 0; }
 
 # Collect every function signature that is actually an ARGUMENT to
 # has_function_privilege, e.g.  has_function_privilege('anon',
