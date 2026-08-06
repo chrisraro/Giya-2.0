@@ -27,10 +27,12 @@
 -- should paper over by activating anyway or by silently unscheduling). G1 is
 -- different in kind: `businesses.status` is exactly the one gate input that
 -- can change AFTER scheduling for a reason that has nothing to do with the
--- campaign - the business can be suspended - and doc 34's own T5 already
--- gives "system" a business-standing-driven pause trigger, so a sweep that
--- respects business standing on activation is the same policy applied one
--- step earlier. A business that has lost `active` status must not have a
+-- campaign - the business can be suspended. (Doc 34's own T5 already gives
+-- "system" a pause trigger, though for a different cause - budget exhaustion,
+-- section 6, task 1.2's exhaustion.ts - not business standing; the point
+-- carried over here is only that "system" acting on a live campaign is
+-- already a precedented shape in this state machine, not that T5 shares this
+-- specific reason.) A business that has lost `active` status must not have a
 -- campaign switched on by a robot; the campaign is left `scheduled` and
 -- re-evaluated on the next tick, exactly as it would be if the merchant had
 -- not yet clicked "activate now" themselves.
