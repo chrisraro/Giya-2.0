@@ -48,22 +48,46 @@ export default function ResetPasswordPage() {
 
     if (!response || !response.ok) {
       setSubmitting(false);
+      // A submit-time 403 means the recovery cookie is gone (expired, or
+      // - reachable today - burned by another tab already finishing this
+      // same reset). The mount-time check already handles that as an
+      // honest message with a route back (status: "no-session"); a 403
+      // here must land in that same state, not a dead-end inline error
+      // that leaves the form mounted with no way forward.
+      if (response?.status === 403) {
+        setStatus("no-session");
+        return;
+      }
       const message = response
         ? await response
             .json()
             .then((json: { error?: { message?: string } }) => json?.error?.message)
             .catch(() => undefined)
         : undefined;
-      setFormError(message ?? GENERIC_ERROR);
+      // `||`, not `??`: Supabase can return an error with an empty-string
+      // message (e.g. a non-JSON upstream failure), and `??` only guards
+      // null/undefined, not "" - which would set formError to a falsy
+      // value that the `formError ? <alert> : null` render below then
+      // shows as nothing at all. toErrorMessage exists because of exactly
+      // this class of bug in the OTHER auth pages; this is the same fix.
+      setFormError(message || GENERIC_ERROR);
       return;
     }
 
     // The recovery link's session did its one job. Sign it out and send the
     // user back through a normal login with the new password rather than
     // leaving them signed in on whatever device opened the emailed link -
-    // that device is not guaranteed to be the account owner's.
+    // that device is not guaranteed to be the account owner's. Wrapped:
+    // the password has already changed and the marker already cleared by
+    // this point, so a rejected signOut() must not strand the user on a
+    // permanently disabled button - it is logged for visibility and
+    // otherwise treated as a non-fatal cleanup step.
     const supabase = createClient();
-    await supabase.auth.signOut();
+    try {
+      await supabase.auth.signOut();
+    } catch (error) {
+      console.error("[reset-password] signOut failed after a successful reset", error);
+    }
     setSubmitting(false);
     setStatus("done");
   }

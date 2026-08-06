@@ -2,7 +2,140 @@
 
 Status: COMPLETE.
 
-## Round 4: I8 - the recovery marker was never cleared (read this first)
+## Round 5: I9 - the clear's identity attributes were unpinned (read this first)
+
+Round 4's behavior was right (re-review confirmed all 7 named mutants died
+exactly as reported, plus the independent full-suite/tsc/eslint check) but
+one Important finding blocked merge: the load-bearing property of the I8
+fix - that the clearing Set-Cookie actually targets the SAME cookie
+`/auth/confirm` minted - had no assertion anywhere. The two prior tests
+(`route.test.ts:96-97`) checked only `name=` and `Max-Age=0`; a browser's
+actual cookie-deletion matching is by `(name, path, domain)`, and neither
+`path` nor the absence of `domain` was ever pinned. The reviewer built a
+real RFC-6265 cookie jar and confirmed four concrete mutants survived
+completely unnoticed by the green suite:
+
+- **X1** - clear's `Path` narrowed to `/reset-password` - the real marker
+  (minted at `Path=/`) survives untouched. I8 silently reopens.
+- **X15** - clear's `Path` omitted entirely - the browser computes a
+  default path from the request's own URI instead, which does not match
+  `Path=/` either. I8 silently reopens.
+- **X16** - clear given an explicit `Domain=.giya.test` - a domain-attribute
+  cookie is a different identity than the mint's host-only cookie (no
+  `Domain` at all) even for what looks like "the same" host. I8 silently
+  reopens.
+- **X8** - mint's own `Path` narrowed to `/reset-password` (the OTHER
+  direction: `src/app/auth/confirm/route.ts:62`) - `GET /auth/recovery-status`
+  lives at a different path and would never receive the cookie at all,
+  breaking the flow outright (every real user sees "link expired") rather
+  than subtly. Also unpinned.
+
+This is the project's own "when you clone a mechanism, clone its mutants
+too" rule: the mint/clear pairing was cloned across two files and neither
+side's identity-defining assertion was.
+
+**Fixed exactly as required, plus the preferred stronger form:**
+
+1. **`route.test.ts`** (the clear side), inside "updates the password and
+   clears the recovery cookie on success": added
+   `expect(setCookie).toMatch(/;\s*path=\/(;|$)/i)` (catches X1 and X15)
+   and `expect(setCookie).not.toMatch(/domain=/i)` (catches X16).
+2. **`confirm/route.test.ts`** (the mint side), inside the mint test: added
+   `expect(cookieHeader(response)).toMatch(/;\s*path=\/(;|$)/i)` (catches X8).
+3. **New: `src/lib/auth/recovery-cookie.test.ts`** - the file that gained
+   an exported function this round (`clearRecoveryCookieHeader`) and had
+   no test file of its own until now. This is the stronger form the
+   reviewer suggested and the coordinator preferred: it invokes the REAL
+   `/auth/confirm` `GET` handler (mocking only `verifyOtp`), extracts the
+   real minted `Set-Cookie`, extracts the real output of
+   `clearRecoveryCookieHeader()`, parses both down to `{name, path,
+   hasDomain}`, and asserts they are `toEqual` each other. This is a
+   genuine cross-file relationship test, not two independent hardcoded
+   assumptions - a drift on EITHER side breaks it, which the two mutant
+   runs below both confirm directly rather than by construction.
+
+**Named mutants, all four, each hand-applied to the real source, run
+against the real test, watched fail, then reverted and re-verified green:**
+X1 and X15 and X16 (mutating `clearRecoveryCookieHeader()`'s return string
+in `recovery-cookie.ts`) each independently caught by `route.test.ts`'s
+strengthened assertion; X8 (mutating the `path` option in `confirm/route.ts`'s
+`response.cookies.set(...)` call) caught by `confirm/route.test.ts`'s
+strengthened assertion. Then, separately, to prove the NEW cross-file test
+is not redundant with the other two: X8 applied again and caught by
+`recovery-cookie.test.ts`; X1 applied again (this time to the clear side)
+and ALSO caught by `recovery-cookie.test.ts` - the same one test catching
+drift introduced from either direction, exactly the property requested.
+
+**Noted per instruction, not asserted as if load-bearing:** the reviewer's
+X5 (stripping `HttpOnly`/`Secure`/`SameSite` from the clear) survives
+against a real cookie jar - deletion still works, because those three are
+not part of the browser's deletion-matching identity, only `(name, path,
+domain)` is. `HttpOnly`/`Secure` remain asserted on the MINT (where they
+are load-bearing: a JS-readable or unencrypted marker would be forgeable),
+not re-asserted on the clear as though they mattered there too.
+
+**The four Minors, all fixed, all with TDD red-first and a named mutant:**
+
+1. **Dropped the empty-string guard when `toErrorMessage` came out of this
+   page.** `setFormError(message ?? GENERIC_ERROR)` only guards
+   null/undefined; a server `error.message` of `""` (Supabase can produce
+   one for a non-JSON upstream failure) set `formError` to a falsy value,
+   which `formError ? <alert> : null` then rendered as nothing - a submit
+   that fails completely silently. Fixed: `message || GENERIC_ERROR`.
+   Named mutant: revert `||` to `??` -> the new "shows the generic error...
+   when the server's error message is an empty string" test failed,
+   reproducing the silent-failure exactly.
+2. **The new submit-time 403 was a dead end.** Two tabs open from one
+   recovery link: tab A resets and burns the marker (I8's own fix), tab
+   B's still-mounted form now 403s on submit forever, into an inline alert
+   with no route back - failing brief requirement #2's "honest message
+   AND a route back" on the one path this page itself introduced, even
+   though the mount-time check already gets this right. Fixed: a
+   submit-time 403 now calls `setStatus("no-session")`, landing in the
+   exact same state (message + "Request a new link") the mount-time check
+   uses. Named mutant: drop the `response?.status === 403` branch -> the
+   new test failed, showing the inline dead-end alert instead of the
+   route-back state.
+3. **Unguarded `await supabase.auth.signOut()`.** A rejection would
+   propagate out of the async handler, so `setSubmitting(false)` and
+   `setStatus("done")` never ran - the user stuck on a disabled "Updating…"
+   button, AFTER the password already changed and the marker already
+   cleared, so a retry would just 403 into (now-fixed) minor #2's state.
+   Fixed: wrapped in try/catch, logged (`console.error`) rather than
+   silently swallowed, since this is a genuine unexpected failure worth a
+   developer's visibility even though the user's flow completes anyway.
+   Named mutant: remove the try/catch -> the new "still reaches the
+   confirmation screen... when signOut rejects" test failed with an
+   unhandled rejection, reproducing the stuck-button bug directly.
+4. **No rate limit on `POST /api/v1/auth/reset-password`.** New
+   `/api/v1` endpoint proxying a Supabase Auth write with no repo-side
+   budget, and its sibling (`forgot-password`) documents two. Added one:
+   5 requests / 10 minutes, keyed by user (defineHandler's default
+   `keyBy` when a session is present, which this route always has via
+   `requireSession`) - narrower than the sibling needs, since this route
+   can only ever be reached by a caller who already holds both a session
+   and a valid recovery cookie, but not zero, since that caller could
+   still spam `updateUser` with password guesses or burn Auth quota.
+   Named mutant: drop the `rateLimit` config entirely -> both new tests
+   failed (the wiring check, and the 429-on-refusal check).
+
+**Comment-only, no behavior change (item 5):** added a comment to
+`HandlerResult.headers`'s type definition in `src/lib/api/handler.ts`
+noting that `jsonResponse()` applies these with `.set()`, not `.append()`,
+so a `defineHandler` route can currently emit only ONE `Set-Cookie` per
+response - true today (every route needing one needs only one), but worth
+finding by reading the type rather than by debugging a silently-dropped
+second cookie later.
+
+**Not in scope, recorded by the coordinator, not touched here:**
+`docs/30-modules/30-platform-core.md:56`'s post-reset side effects
+(password-changed email, revoking other refresh tokens, marking other
+`user_devices` rows revoked) - a pre-existing gap this route is the
+natural home for, not introduced by this task. The `credentials: "omit"`
+mutant surviving is an oracle limit of this repo's unit-test setup (the
+page test mocks `fetch` itself), not a defect in the code.
+
+## Round 4: I8 - the recovery marker was never cleared
 
 Approved verdict from round 3: the recovery cookie is decisively stronger
 than the old `amr` gate, not a forgeable substitute for it, and neither

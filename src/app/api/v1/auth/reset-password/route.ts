@@ -14,6 +14,20 @@ interface ResetPasswordResponse {
   message: string;
 }
 
+// This route's sibling (src/app/api/v1/auth/forgot-password/route.ts)
+// documents two budgets because it is public and unauthenticated. This
+// route always has both a session (requireSession) and a recovery
+// cookie (authorize) by the time it would ever call updateUser, so the
+// attacker surface is narrower - but not zero: an automated caller that
+// has both could still spam updateUser with password guesses hoping one
+// clears a policy check, or just burn Supabase's Auth quota. `keyBy`
+// defaults to "user" in defineHandler, which is exactly right here (this
+// route can never be reached without a signed-in user). 5 requests per
+// 10 minutes is generous for legitimate retries (a rejected password
+// policy, a typo) while still bounding the automated case.
+const RATE_LIMIT = 5;
+const RATE_LIMIT_WINDOW_SECONDS = 600;
+
 // POST /api/v1/auth/reset-password - the ONLY place updateUser() is called
 // for a password reset. This is what makes the recovery cookie a genuine
 // authorization control rather than just a UI hint: reset-password/page.tsx
@@ -34,6 +48,10 @@ export const POST = defineHandler<
 >({
   route: "auth-reset-password",
   requireSession: true,
+  rateLimit: {
+    limit: RATE_LIMIT,
+    windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+  },
   schema: bodySchema,
   authorize: ({ request }) => {
     const verified = request.cookies.get(RECOVERY_COOKIE_NAME)?.value === "1";

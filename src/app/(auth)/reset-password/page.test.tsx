@@ -180,4 +180,66 @@ describe("ResetPasswordPage - form", () => {
     expect(await screen.findByText("Something went wrong. Please try again.")).toBeInTheDocument();
     expect(authMocks.signOut).not.toHaveBeenCalled();
   });
+
+  it("shows the generic error, not a blank alert, when the server's error message is an empty string", async () => {
+    // Supabase can return an error with an empty message for a non-JSON
+    // upstream failure. `??` only guards null/undefined, not "" - a plain
+    // `message ?? GENERIC_ERROR` would set formError to "", which is falsy,
+    // so the `formError ? <alert> : null` below renders nothing: the
+    // submit fails with no visible message at all. This is the exact
+    // class of bug toErrorMessage exists to prevent (see its own comment,
+    // and login/page.tsx and signup/page.tsx, which both still route
+    // through it) - it just needed re-applying here after the client-side
+    // updateUser() call (and its toErrorMessage usage) moved server-side.
+    updatePasswordResponds(422, { error: { code: "VALIDATION_FAILED", message: "" } });
+    render(<ResetPasswordPage />);
+    await screen.findByLabelText("New password");
+
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "abc" } });
+    fireEvent.click(screen.getByRole("button", { name: "Update password" }));
+
+    expect(await screen.findByText("Something went wrong. Please try again.")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).not.toHaveTextContent("");
+  });
+
+  it("routes a submit-time 403 to the same expired-link state as the mount-time check, not a dead-end inline error", async () => {
+    // Reachable today: two tabs open from one recovery link. Tab A submits
+    // first and burns the marker (see I8's clearing fix); tab B's form is
+    // still mounted and showing, and its submit now 403s. The mount-time
+    // path already handles "no marker" correctly via status: "no-session"
+    // (an honest message AND a route back, per the brief); the submit-time
+    // path must reach that same state, not strand the user in a dead-end
+    // inline alert with no way forward but reloading.
+    updatePasswordResponds(403, {
+      error: { code: "FORBIDDEN", message: "That link expired or was already used." },
+    });
+    render(<ResetPasswordPage />);
+    await screen.findByLabelText("New password");
+
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "newSecret123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Update password" }));
+
+    expect(
+      await screen.findByText("That link expired or was already used."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Request a new link" })).toHaveAttribute(
+      "href",
+      "/forgot-password",
+    );
+    expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
+  });
+
+  it("still reaches the confirmation screen (not stuck on a disabled button) when signOut rejects after a successful reset", async () => {
+    // The password has already changed and the marker already cleared by
+    // this point - signOut() failing must not strand the user on a
+    // permanently disabled "Updating..." button with no way forward.
+    authMocks.signOut.mockRejectedValueOnce(new Error("network down"));
+    render(<ResetPasswordPage />);
+    await screen.findByLabelText("New password");
+
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "newSecret123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Update password" }));
+
+    expect(await screen.findByText("Password updated")).toBeInTheDocument();
+  });
 });

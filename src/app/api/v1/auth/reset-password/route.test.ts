@@ -24,12 +24,8 @@ vi.mock("@/lib/supabase/server", () => ({
   })),
 }));
 
-// This route sets no rateLimit config of its own, but defineHandler
-// (src/lib/api/handler.ts) unconditionally imports @/lib/rate-limit and
-// @/lib/redis at module scope, which eagerly reads @/lib/env's
-// NEXT_PUBLIC_SUPABASE_* vars - unset in this test environment. Same
-// mocks as forgot-password/route.test.ts, for the same reason.
-vi.mock("@/lib/rate-limit", () => ({ checkRateLimit: vi.fn() }));
+const rateLimitMocks = vi.hoisted(() => ({ checkRateLimit: vi.fn() }));
+vi.mock("@/lib/rate-limit", () => ({ checkRateLimit: rateLimitMocks.checkRateLimit }));
 vi.mock("@/lib/redis", () => ({
   redisKey: (...parts: string[]) => `test:${parts.join(":")}`,
 }));
@@ -54,6 +50,9 @@ function callRoute(body: unknown, cookieValue?: string): Promise<Response> {
 beforeEach(() => {
   mocks.getUser.mockReset().mockResolvedValue({ data: { user: { id: USER_ID } } });
   mocks.updateUser.mockReset().mockResolvedValue({ data: {}, error: null });
+  rateLimitMocks.checkRateLimit
+    .mockReset()
+    .mockResolvedValue({ ok: true, remaining: 4, resetSeconds: 600 });
 });
 
 describe("POST /api/v1/auth/reset-password", () => {
@@ -95,6 +94,14 @@ describe("POST /api/v1/auth/reset-password", () => {
     const setCookie = response.headers.get("set-cookie") ?? "";
     expect(setCookie).toContain(`${RECOVERY_COOKIE_NAME}=;`);
     expect(setCookie).toMatch(/max-age=0/i);
+    // A browser matches a clearing Set-Cookie against the real cookie by
+    // (name, path, domain) ONLY - not HttpOnly/Secure/SameSite/value. If
+    // either of these drifts from what /auth/confirm minted (path: "/",
+    // no explicit Domain - host-only), the clear silently targets a
+    // DIFFERENT cookie and the real marker survives, reopening I8's
+    // ten-minute reuse window even though this response looks correct.
+    expect(setCookie).toMatch(/;\s*path=\/(;|$)/i); // X1 (Path=/reset-password), X15 (Path omitted)
+    expect(setCookie).not.toMatch(/domain=/i); // X16 (Domain=.giya.test added)
   });
 
   it("does NOT clear the cookie when updateUser fails, so a retry inside the window still works", async () => {
@@ -109,5 +116,33 @@ describe("POST /api/v1/auth/reset-password", () => {
     expect(response.status).toBe(422);
     expect(json.error.message).toBe("Password should be at least 6 characters");
     expect(response.headers.get("set-cookie")).toBeNull();
+  });
+});
+
+describe("rate limiting", () => {
+  it("is rate-limited per user, matching the sibling forgot-password route's own budgets", async () => {
+    await callRoute({ password: "newSecret123" }, "1");
+
+    expect(rateLimitMocks.checkRateLimit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: expect.stringContaining(`user:${USER_ID}`),
+        limit: 5,
+        windowSeconds: 600,
+      }),
+    );
+  });
+
+  it("answers 429 without calling updateUser once the caller is over budget", async () => {
+    rateLimitMocks.checkRateLimit.mockResolvedValueOnce({
+      ok: false,
+      remaining: 0,
+      resetSeconds: 45,
+    });
+
+    const response = await callRoute({ password: "newSecret123" }, "1");
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("45");
+    expect(mocks.updateUser).not.toHaveBeenCalled();
   });
 });

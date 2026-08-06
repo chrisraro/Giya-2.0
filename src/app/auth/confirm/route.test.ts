@@ -53,6 +53,11 @@ describe("GET /auth/confirm", () => {
     expect(response.headers.get("location")).toBe("https://giya.test/reset-password");
     expect(cookieHeader(response)).toContain(`${RECOVERY_COOKIE_NAME}=1`);
     expect(cookieHeader(response)).toMatch(/HttpOnly/i);
+    // X8: if this mints with a narrower Path (e.g. "/reset-password"),
+    // GET /auth/recovery-status - a DIFFERENT path - would never receive
+    // the cookie at all, and every real user would see "link expired."
+    // Path=/ is what makes the cookie visible to both routes that need it.
+    expect(cookieHeader(response)).toMatch(/;\s*path=\/(;|$)/i);
   });
 
   it("does NOT verify or set the cookie for any type other than recovery (e.g. a magic-link sign-in)", async () => {
