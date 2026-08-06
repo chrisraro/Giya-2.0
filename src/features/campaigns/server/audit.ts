@@ -117,7 +117,7 @@ export async function writeCampaignLifecycleAuditRow(
 
   if (error !== null) {
     console.error(
-      `[campaigns/audit] could not write the audit row for campaign ${row.campaignId}'s ${row.action}`,
+      `[campaigns/audit] could not write the audit row for campaign ${row.campaignId}'s ${row.action} request=${row.requestId}`,
       error,
     );
     return { ok: false, message: error.message };

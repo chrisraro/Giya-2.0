@@ -38,13 +38,22 @@ import { createServiceRoleClient } from "@/lib/supabase/service";
  * Notifies downstream consumers that a campaign's lifecycle state changed.
  * Today this is just a log line; it is the seam a future analytics/sweep
  * job hangs off of once it exists.
+ *
+ * `requestId` is logged alongside the rest (review round 2, item 4) so this
+ * line can be correlated with the request log and with the `audit_logs` row
+ * `writeLifecycleAuditRow` writes for the SAME call - same pattern
+ * `receipts/server/review.ts`'s `request=${requestId}` suffix uses. null for
+ * a caller with no single inbound request to correlate to.
  */
 export function emitLifecycleEvent(
   businessId: string,
   campaignId: string,
   action: string,
+  requestId: string | null,
 ): void {
-  console.info(`[campaigns] campaign.lifecycle business=${businessId} campaign=${campaignId} action=${action}`);
+  console.info(
+    `[campaigns] campaign.lifecycle business=${businessId} campaign=${campaignId} action=${action} request=${requestId}`,
+  );
   // TODO(api): wire analytics + the ends_at sweep worker (doc 39)
 }
 
@@ -137,13 +146,19 @@ function runActivationGates(
   // to `undefined`): `failResult`'s own return type is `ActionResult<T>`, whose
   // `{ ok: true }` branch is not assignable to this function's narrower
   // `{ ok: false } | null` return type no matter what T is instantiated to.
-  const first = gateResult.failures[0];
-  if (first) {
-    return first.code !== undefined
-      ? { ok: false, message: first.message, code: first.code }
-      : { ok: false, message: first.message };
-  }
-  return { ok: false, message: "Campaign is not ready to activate." };
+  //
+  // `GateResult.ok` is DEFINED as `failures.length === 0` (../lifecycle.ts),
+  // so `gateResult.ok === false` on the line above already guarantees
+  // `failures[0]` exists - there is no second, fallback-message branch to
+  // maintain here. (Review round 2: the prior version hardcoded "...not
+  // ready to activate.", which was wrong for the resume caller and
+  // unreachable from either - dropped rather than reworded.) The non-null
+  // assertion documents that guarantee instead of restating a message that
+  // can never be read.
+  const first = gateResult.failures[0]!;
+  return first.code !== undefined
+    ? { ok: false, message: first.message, code: first.code }
+    : { ok: false, message: first.message };
 }
 
 /**
@@ -182,11 +197,28 @@ function runActivationGates(
  * "nothing minted" - hence `ok: false`, matching `src/features/customers/
  * server/audit.ts`'s `recordSegmentChange` convention (state stands, the
  * caller is told plainly that it did, and that the log entry did not).
+ *
  * A REVERT (the `admin/consequences.ts` pattern) was considered and
- * rejected: campaign status has other readers between the write and any
- * revert (list/detail pages, the live-window check the award path reads)
- * that a toggled-back column cannot un-show, unlike consequences.ts's
- * columns which nothing reads mid-request.
+ * rejected - NOT because "nothing reads mid-request" (`consequences.ts`'s
+ * own columns are read mid-request too: `profiles.is_suspended` gates every
+ * authenticated request and `consumers.scan_blocked_until` gates every scan,
+ * both during its own revert window - that argument does not distinguish
+ * the two files). Two arguments that do:
+ *   (a) `receipts/server/award.ts`'s `loadCampaigns` reads a campaign by id
+ *       with NO status predicate and decides liveness engine-side
+ *       (`isCampaignLive`, reading status/startsAt/endsAt off the row it
+ *       got). A receipt landing inside a write-then-revert window would be
+ *       priced against a campaign that both the reverted row AND the
+ *       now-absent audit trail say was never active - a self-contradicting
+ *       evidence state, strictly worse than "it activated and the log
+ *       failed". `consequences.ts`'s toggles mint nothing in their window,
+ *       so they have no analogous reader to contradict.
+ *   (b) The revert would not be a clean undo here anyway: it would have to
+ *       un-stamp `starts_at`/`archived_at` (not just `status`) and would
+ *       itself race `repo.setCampaignStatus`'s own optimistic
+ *       `.eq("status", expectedFrom)` predicate - a second write competing
+ *       with whatever already changed the row in between, exactly the
+ *       hazard that predicate exists to catch on the FORWARD path.
  *
  * A MISSING SERVICE-ROLE KEY is the separate, already-documented degraded
  * path (`customers/server/audit.ts`'s same distinction): the credential
@@ -204,7 +236,7 @@ async function writeLifecycleAuditRow(
   const supabase = createServiceRoleClient();
   if (supabase === null) {
     console.warn(
-      `[campaigns] no service-role key: campaign ${campaignId}'s ${transition} was applied but not audited`,
+      `[campaigns] no service-role key: campaign ${campaignId}'s ${transition} was applied but not audited request=${actor.requestId}`,
     );
     return { ok: true };
   }
@@ -288,10 +320,17 @@ export async function activateCampaign(
   const { data, error } = await repo.setCampaignStatus(businessId, campaignId, fromStatus, patch);
   if (error) return failResult(error.message, error.code);
 
+  // Emitted BEFORE the audit check (review round 2, item 1): the transition
+  // committed on the line above, so the lifecycle event is true regardless
+  // of whether the audit row lands - it is a fact about the state change,
+  // not about the logging. Emitting after would drop the one remaining
+  // record of this transition in exactly the case (an audit failure) where
+  // losing it matters most.
+  emitLifecycleEvent(businessId, campaignId, "activate", actor.requestId);
+
   const audit = await writeLifecycleAuditRow(businessId, campaignId, "activate", actor, fromStatus, target);
   if (!audit.ok) return failResult(auditFailureMessage("activate"));
 
-  emitLifecycleEvent(businessId, campaignId, "activate");
   return okResult(data);
 }
 
@@ -324,10 +363,13 @@ async function transitionCampaign(
   const { data, error } = await repo.setCampaignStatus(businessId, campaignId, expectedFrom, patch);
   if (error) return failResult(error.message, error.code);
 
+  // See activateCampaign's note: emitted before the audit check so a lost
+  // audit row never also costs the lifecycle event.
+  emitLifecycleEvent(businessId, campaignId, action, actor.requestId);
+
   const audit = await writeLifecycleAuditRow(businessId, campaignId, action, actor, expectedFrom, target);
   if (!audit.ok) return failResult(auditFailureMessage(action));
 
-  emitLifecycleEvent(businessId, campaignId, action);
   return okResult(data);
 }
 
@@ -397,10 +439,13 @@ export async function resumeCampaign(
   });
   if (error) return failResult(error.message, error.code);
 
+  // See activateCampaign's note: emitted before the audit check so a lost
+  // audit row never also costs the lifecycle event.
+  emitLifecycleEvent(businessId, campaignId, "resume", actor.requestId);
+
   const audit = await writeLifecycleAuditRow(businessId, campaignId, "resume", actor, expectedFrom, target);
   if (!audit.ok) return failResult(auditFailureMessage("resume"));
 
-  emitLifecycleEvent(businessId, campaignId, "resume");
   return okResult(data);
 }
 

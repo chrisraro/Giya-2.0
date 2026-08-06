@@ -817,6 +817,53 @@ describe("campaign lifecycle transitions write an audit_logs row", () => {
     errorSpy.mockRestore();
   });
 
+  // Review round 2, item 3: the pause case above only covers
+  // `transitionCampaign`'s shared audit-failure path. `activateCampaign` and
+  // `resumeCampaign` are separate physical code paths (resume is
+  // deliberately NOT routed through `transitionCampaign`, precisely so it
+  // can re-run activationGates - task 1.7's whole point), so each needs its
+  // own coverage rather than inheriting pause's.
+
+  it("surfaces ok:false (state NOT reverted) when the audit insert fails on activate", async () => {
+    table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "draft" }, error: null };
+    mocks.auditInsert.mockResolvedValue({ error: { message: "denied" } });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await actions.activateCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual({
+      ok: false,
+      message:
+        "The campaign was activated, but it could not be written to your activity log. Tell the owner.",
+    });
+    expect(table("campaigns").update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "active" }),
+    );
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+
+  it("surfaces ok:false (state NOT reverted) when the audit insert fails on resume", async () => {
+    table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "paused" }, error: null };
+    mocks.auditInsert.mockResolvedValue({ error: { message: "denied" } });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
+
+    expect(result).toEqual({
+      ok: false,
+      message:
+        "The campaign was resumed, but it could not be written to your activity log. Tell the owner.",
+    });
+    expect(table("campaigns").update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "active" }),
+    );
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+
   it("still applies the transition and reports ok:true when no service-role key is configured (documented degraded path)", async () => {
     table("campaigns").__result = { data: { ...FULL_PROMOTION_ROW, status: "active" }, error: null };
     mocks.serviceClient.mockReturnValue(null);
@@ -977,12 +1024,23 @@ describe("repo.getCampaignPayloadPresence", () => {
 });
 
 describe("service.emitLifecycleEvent", () => {
-  it("logs without throwing", async () => {
+  it("logs without throwing, including the request_id (review round 2, item 4)", async () => {
     const { emitLifecycleEvent } = await import("./server/service");
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
 
-    expect(() => emitLifecycleEvent("biz-1", "camp-1", "activate")).not.toThrow();
+    expect(() => emitLifecycleEvent("biz-1", "camp-1", "activate", "req-1")).not.toThrow();
     expect(spy).toHaveBeenCalledWith(expect.stringContaining("biz-1"));
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining("req-1"));
+
+    spy.mockRestore();
+  });
+
+  it("logs request=null when called with no request id", async () => {
+    const { emitLifecycleEvent } = await import("./server/service");
+    const spy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    emitLifecycleEvent("biz-1", "camp-1", "activate", null);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining("request=null"));
 
     spy.mockRestore();
   });
