@@ -96,6 +96,9 @@ class FakeQuery implements PromiseLike<FakeResult> {
   limit(count: number): this {
     return this.filter("limit", count);
   }
+  single(): this {
+    return this.filter("single");
+  }
 
   then<TResult1 = FakeResult, TResult2 = never>(
     onFulfilled?: ((value: FakeResult) => TResult1 | PromiseLike<TResult1>) | null,
@@ -122,16 +125,26 @@ function createFakeSupabase(input: {
   campaigns?: CampaignRow[];
   rulesError?: FakeError;
   campaignsError?: FakeError;
+  // Default response for award_receipt_points / record_receipt_visit calls.
   rpc?: FakeResult;
+  // FIFO queue consumed specifically by award_receipt_points calls, one entry
+  // per call: lets a test make the FIRST call raise FIXED_PER_VISIT_RACE and
+  // the RETRY (C2 recovery) succeed, without touching `rpc` above.
+  awardRpcQueue?: FakeResult[];
   updateError?: FakeError;
-  // The fixed_per_visit same-day precheck (`priceReceipt` querying
-  // points_transactions before pricing). `true` simulates a prior positive
-  // earn already existing for this business/consumer today.
-  priorSameDayEarn?: boolean;
-  priorSameDayEarnError?: FakeError;
+  // The fixed_per_visit VISIT-DAY precheck (`priceReceipt` calling the 0038
+  // RPC `fixed_per_visit_already_paid` before pricing). `true` simulates a
+  // prior PAID fixed_per_visit earn already existing for this visit day.
+  fixedPerVisitAlreadyPaid?: boolean;
+  fixedPerVisitCheckError?: FakeError;
+  // The receipts row `persistFixedPerVisitDedupeMarker` reads before merging
+  // its parse_meta update (C3).
+  receiptParseMeta?: Record<string, unknown> | null;
+  receiptReadError?: FakeError;
 }): FakeSupabase {
   const ops: FakeOp[] = [];
   const rpcCalls: Array<{ name: string; args: unknown }> = [];
+  const awardRpcQueue = input.awardRpcQueue !== undefined ? [...input.awardRpcQueue] : undefined;
 
   const respond: Responder = (op) => {
     if (op.op === "update") {
@@ -147,14 +160,11 @@ function createFakeSupabase(input: {
       }
       return { data: input.campaigns ?? [], error: null };
     }
-    if (op.table === "points_transactions") {
-      if (input.priorSameDayEarnError !== undefined) {
-        return { data: null, error: input.priorSameDayEarnError };
+    if (op.table === "receipts" && op.op === "select") {
+      if (input.receiptReadError !== undefined) {
+        return { data: null, error: input.receiptReadError };
       }
-      return {
-        data: input.priorSameDayEarn === true ? [{ id: "prior-earn" }] : [],
-        error: null,
-      };
+      return { data: { parse_meta: input.receiptParseMeta ?? null }, error: null };
     }
     return { data: [], error: null };
   };
@@ -163,6 +173,15 @@ function createFakeSupabase(input: {
     from: (table: string) => new FakeQuery(table, respond, (op) => ops.push(op)),
     rpc: (name: string, args: unknown) => {
       rpcCalls.push({ name, args });
+      if (name === "fixed_per_visit_already_paid") {
+        if (input.fixedPerVisitCheckError !== undefined) {
+          return Promise.resolve({ data: null, error: input.fixedPerVisitCheckError });
+        }
+        return Promise.resolve({ data: input.fixedPerVisitAlreadyPaid ?? false, error: null });
+      }
+      if (name === "award_receipt_points" && awardRpcQueue !== undefined && awardRpcQueue.length > 0) {
+        return Promise.resolve(awardRpcQueue.shift() as FakeResult);
+      }
       return Promise.resolve(input.rpc ?? { data: LEDGER_ROW_ID, error: null });
     },
   };
@@ -181,7 +200,7 @@ function createFakeSupabase(input: {
 
 const RECEIPT_ID = "01980000-0000-7000-8000-000000000001";
 const BUSINESS_ID = "01980000-0000-7000-8000-0000000000b1";
-const USER_ID = "01980000-0000-7000-8000-0000000000u1";
+const USER_ID = "01980000-0000-7000-8000-0000000000c1";
 const LEDGER_ROW_ID = "01980000-0000-7000-8000-0000000000e1";
 const NOW = new Date("2026-07-25T04:00:00.000Z");
 
@@ -229,6 +248,7 @@ function plan(overrides: Partial<AwardPlan> = {}): AwardPlan {
     campaignId: null,
     expiresAt: null,
     verifyNoPriorFixedPerVisitEarn: false,
+    dedupedFallback: null,
     ...overrides,
   };
 }
@@ -347,11 +367,11 @@ describe("priceReceipt", () => {
 // priceReceipt: fixed_per_visit same-day dedupe (task 1.1)
 // ===========================================================================
 
-describe("priceReceipt: fixed_per_visit same-day dedupe", () => {
-  it("pays normally on the first receipt of the day (no prior earn)", async () => {
+describe("priceReceipt: fixed_per_visit VISIT-DAY dedupe (C1 fix)", () => {
+  it("pays normally when no prior paid fixed_per_visit earn exists for this visit day", async () => {
     const supabase = createFakeSupabase({
       pointsRules: [FIXED_VISIT_RULE],
-      priorSameDayEarn: false,
+      fixedPerVisitAlreadyPaid: false,
     });
 
     const result = await priceReceipt({
@@ -365,12 +385,21 @@ describe("priceReceipt: fixed_per_visit same-day dedupe", () => {
     expect(result.verifyNoPriorFixedPerVisitEarn).toBe(true);
     const snapshot = result.ruleSnapshot as { base: { fixed_per_visit_deduped: boolean } };
     expect(snapshot.base.fixed_per_visit_deduped).toBe(false);
+    // C2: a fallback is precomputed so a race can recover without a second
+    // implementation of the rule math - here that fallback is the deduped
+    // total (0, no bonus configured).
+    expect(result.dedupedFallback).toEqual({
+      points: 0,
+      ruleSnapshot: expect.objectContaining({
+        base: expect.objectContaining({ points: 0, fixed_per_visit_deduped: true }),
+      }),
+    });
   });
 
-  it("suppresses the base to 0 and records the dedupe when a same-day earn already exists", async () => {
+  it("suppresses the base to 0 and records the dedupe when a prior paid earn exists for this visit day", async () => {
     const supabase = createFakeSupabase({
       pointsRules: [FIXED_VISIT_RULE],
-      priorSameDayEarn: true,
+      fixedPerVisitAlreadyPaid: true,
     });
 
     const result = await priceReceipt({
@@ -382,6 +411,8 @@ describe("priceReceipt: fixed_per_visit same-day dedupe", () => {
 
     expect(result.points).toBe(0);
     expect(result.verifyNoPriorFixedPerVisitEarn).toBe(false);
+    // Nothing to recover to: the precheck already applied the dedupe.
+    expect(result.dedupedFallback).toBeNull();
     const snapshot = result.ruleSnapshot as { base: { points: number; fixed_per_visit_deduped: boolean } };
     expect(snapshot.base.points).toBe(0);
     expect(snapshot.base.fixed_per_visit_deduped).toBe(true);
@@ -398,7 +429,7 @@ describe("priceReceipt: fixed_per_visit same-day dedupe", () => {
     };
     const supabase = createFakeSupabase({
       pointsRules: [FIXED_VISIT_RULE, bonus],
-      priorSameDayEarn: true,
+      fixedPerVisitAlreadyPaid: true,
     });
 
     const result = await priceReceipt({
@@ -413,9 +444,44 @@ describe("priceReceipt: fixed_per_visit same-day dedupe", () => {
     // must NOT re-verify: that prior earn is precisely why the base is 0, and
     // re-verifying would wrongly refuse the legitimate bonus-only award.
     expect(result.verifyNoPriorFixedPerVisitEarn).toBe(false);
+    expect(result.dedupedFallback).toBeNull();
   });
 
-  it("never queries points_transactions for a non-fixed_per_visit base", async () => {
+  it("precomputes a positive dedupedFallback (independent bonus) when the precheck has NOT yet found the prior earn", async () => {
+    const bonus: PointsRuleRow = {
+      ...FIXED_VISIT_RULE,
+      id: "01980000-0000-7000-8000-0000000000rb",
+      kind: "bonus",
+      fixed_points: null,
+      bonus_points: 5,
+      rule_type: "amount_rate",
+    };
+    const supabase = createFakeSupabase({
+      pointsRules: [FIXED_VISIT_RULE, bonus],
+      fixedPerVisitAlreadyPaid: false,
+    });
+
+    const result = await priceReceipt({
+      deps: createDeps(supabase),
+      businessId: BUSINESS_ID,
+      receipt: RECEIPT,
+      isFirstVisit: false,
+    });
+
+    // Primary (undeduped) plan: base 10 + bonus 5 = 15.
+    expect(result.points).toBe(15);
+    expect(result.verifyNoPriorFixedPerVisitEarn).toBe(true);
+    // Fallback, priced as if the prior earn WAS found: base suppressed to 0,
+    // bonus (never derived from base) still pays -> 5.
+    expect(result.dedupedFallback).toEqual({
+      points: 5,
+      ruleSnapshot: expect.objectContaining({
+        base: expect.objectContaining({ points: 0, fixed_per_visit_deduped: true }),
+      }),
+    });
+  });
+
+  it("never calls fixed_per_visit_already_paid for a non-fixed_per_visit base", async () => {
     const supabase = createFakeSupabase({ pointsRules: [BASE_RULE] });
 
     const result = await priceReceipt({
@@ -425,11 +491,14 @@ describe("priceReceipt: fixed_per_visit same-day dedupe", () => {
       isFirstVisit: false,
     });
 
-    expect(supabase.opsFor("points_transactions", "select")).toHaveLength(0);
+    expect(supabase.rpcCalls.map((call) => call.name)).not.toContain(
+      "fixed_per_visit_already_paid",
+    );
     expect(result.verifyNoPriorFixedPerVisitEarn).toBe(false);
+    expect(result.dedupedFallback).toBeNull();
   });
 
-  it("queries points_transactions scoped to this business/consumer/day, earn type, positive points", async () => {
+  it("calls fixed_per_visit_already_paid with the receipt's VISIT day, not the processing day (C1)", async () => {
     const supabase = createFakeSupabase({ pointsRules: [FIXED_VISIT_RULE] });
 
     await priceReceipt({
@@ -439,22 +508,47 @@ describe("priceReceipt: fixed_per_visit same-day dedupe", () => {
       isFirstVisit: false,
     });
 
-    const read = supabase.opsFor("points_transactions", "select")[0];
-    expect(read?.filters).toEqual([
-      { method: "eq", args: ["business_id", BUSINESS_ID] },
-      { method: "eq", args: ["consumer_id", USER_ID] },
-      { method: "eq", args: ["type", "earn"] },
-      { method: "gt", args: ["points", 0] },
-      { method: "gte", args: ["created_at", "2026-07-24T16:00:00.000Z"] },
-      { method: "lt", args: ["created_at", "2026-07-25T16:00:00.000Z"] },
-      { method: "limit", args: [1] },
-    ]);
+    // RECEIPT.receiptDate is 2026-07-24T05:45Z (Manila day 2026-07-24), while
+    // `now` (NOW, used only for computed_at) is 2026-07-25T04:00Z (Manila day
+    // 2026-07-25) - a full processing day later. The old (0037) check keyed
+    // on manila_day(now()) would have asked about 2026-07-25; the fix must
+    // ask about the receipt's OWN visit day, 2026-07-24.
+    const call = supabase.rpcCalls.find((c) => c.name === "fixed_per_visit_already_paid");
+    expect(call?.args).toEqual({
+      p_business_id: BUSINESS_ID,
+      p_consumer_id: USER_ID,
+      p_visit_day: "2026-07-24",
+    });
+  });
+
+  it("dedupes correctly when a receipt is approved a processing day (or more) after the visit it duplicates (review lag)", async () => {
+    // The exact scenario C1 named: a human-review approval lands a day after
+    // the auto-approved original of the SAME visit day. `now` here stands in
+    // for "today", well after the visit day RECEIPT itself carries; the
+    // precheck must still key on the receipt's visit day and find the prior
+    // paid earn regardless of how much later "now" is.
+    const supabase = createFakeSupabase({
+      pointsRules: [FIXED_VISIT_RULE],
+      fixedPerVisitAlreadyPaid: true,
+    });
+
+    const laterNow = new Date("2026-07-28T04:00:00.000Z"); // three processing days later
+    const result = await priceReceipt({
+      deps: { supabase: supabase.client, now: () => laterNow },
+      businessId: BUSINESS_ID,
+      receipt: RECEIPT,
+      isFirstVisit: false,
+    });
+
+    const call = supabase.rpcCalls.find((c) => c.name === "fixed_per_visit_already_paid");
+    expect(call?.args).toMatchObject({ p_visit_day: "2026-07-24" });
+    expect(result.points).toBe(0);
   });
 
   it("prices as NOT deduped (fails open to the RPC-side check) when the precheck read errors", async () => {
     const supabase = createFakeSupabase({
       pointsRules: [FIXED_VISIT_RULE],
-      priorSameDayEarnError: { message: "boom" },
+      fixedPerVisitCheckError: { message: "boom" },
     });
 
     const result = await priceReceipt({
@@ -694,7 +788,7 @@ describe("awardPoints", () => {
 // awardPoints: fixed_per_visit same-day dedupe race guard (0037, task 1.1)
 // ===========================================================================
 
-describe("awardPoints: fixed_per_visit dedupe race guard", () => {
+describe("awardPoints: fixed_per_visit dedupe verify flag", () => {
   it("sends p_verify_no_prior_fixed_visit_earn: true when the plan says so", async () => {
     const supabase = createFakeSupabase({});
 
@@ -720,25 +814,259 @@ describe("awardPoints: fixed_per_visit dedupe race guard", () => {
 
     expect(supabase.rpcCalls[0]?.args).not.toHaveProperty("p_verify_no_prior_fixed_visit_earn");
   });
+});
 
-  it("treats FIXED_PER_VISIT_RACE as a refusal (warn), same handling as every other 0018/0023/0037 code", async () => {
+// ===========================================================================
+// awardPoints: FIXED_PER_VISIT_RACE recovery (C2 fix)
+//
+// The reviewer's finding: the losing receipt used to end status='approved',
+// processed_at null, no ledger row, no visit - stranded, with the consumer
+// notified "points on their way" (false). None of these tests should ever see
+// `kind: "refused"` for FIXED_PER_VISIT_RACE; the race is recovered from
+// entirely in TypeScript, replaying `plan.dedupedFallback` (never a second
+// implementation of the rule math).
+// ===========================================================================
+
+describe("awardPoints: FIXED_PER_VISIT_RACE recovery (C2 fix)", () => {
+  it("falls back to the zero-point path when the fallback total is 0 (no bonus)", async () => {
+    // awardRpcQueue targets ONLY award_receipt_points calls, so the
+    // subsequent record_receipt_visit call still succeeds on its default.
     const supabase = createFakeSupabase({
-      rpc: { data: null, error: { message: "FIXED_PER_VISIT_RACE" } },
+      awardRpcQueue: [{ data: null, error: { message: "FIXED_PER_VISIT_RACE" } }],
     });
 
     const result = await awardPoints({
       deps: createDeps(supabase),
       receiptId: RECEIPT_ID,
-      plan: plan({ points: 10, verifyNoPriorFixedPerVisitEarn: true }),
+      plan: plan({
+        points: 10,
+        verifyNoPriorFixedPerVisitEarn: true,
+        dedupedFallback: {
+          points: 0,
+          ruleSnapshot: { engine: "points/v1", base: { fixed_per_visit_deduped: true, points: 0 } },
+        },
+      }),
     });
 
-    expect(result).toEqual({
-      kind: "refused",
-      code: "FIXED_PER_VISIT_RACE",
-      severity: "warn",
+    expect(supabase.rpcCalls.map((call) => call.name)).toEqual([
+      "award_receipt_points",
+      "record_receipt_visit",
+    ]);
+    expect(result).toEqual({ kind: "skipped_zero_points" });
+    // NEVER the stranded state: no reject_note, receipt not left refused.
+    expect(supabase.opsFor("receipts", "update")).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ payload: expect.objectContaining({ reject_note: expect.anything() }) })]),
+    );
+  });
+
+  it("retries award_receipt_points once with the fallback total when it is positive (independent bonus)", async () => {
+    const fallbackSnapshot = {
+      engine: "points/v1",
+      base: { fixed_per_visit_deduped: true, points: 0 },
+      total_points: 5,
+    };
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [
+        { data: null, error: { message: "FIXED_PER_VISIT_RACE" } },
+        { data: LEDGER_ROW_ID, error: null },
+      ],
     });
+
+    const result = await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 15,
+        verifyNoPriorFixedPerVisitEarn: true,
+        dedupedFallback: { points: 5, ruleSnapshot: fallbackSnapshot },
+      }),
+    });
+
+    expect(supabase.rpcCalls).toHaveLength(2);
+    expect(supabase.rpcCalls[0]?.name).toBe("award_receipt_points");
+    expect(supabase.rpcCalls[0]?.args).toMatchObject({ p_points: 15 });
+    // The retry must NOT set p_verify_no_prior_fixed_visit_earn: the prior
+    // earn that caused this race IS the fact the fallback already accounts
+    // for, so re-verifying would find that same earn and refuse in a loop.
+    expect(supabase.rpcCalls[1]?.name).toBe("award_receipt_points");
+    expect(supabase.rpcCalls[1]?.args).toMatchObject({
+      p_receipt_id: RECEIPT_ID,
+      p_points: 5,
+      p_rule_snapshot: fallbackSnapshot,
+    });
+    expect(supabase.rpcCalls[1]?.args).not.toHaveProperty("p_verify_no_prior_fixed_visit_earn");
+    expect(result).toEqual({ kind: "awarded", points: 5, transactionId: LEDGER_ROW_ID });
+  });
+
+  it("never re-strands the receipt: a failed retry falls all the way to the zero-point path (terminal fallback)", async () => {
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [
+        { data: null, error: { message: "FIXED_PER_VISIT_RACE" } },
+        { data: null, error: { message: "CUSTOMER_BLACKLISTED" } },
+      ],
+    });
+
+    const result = await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 15,
+        verifyNoPriorFixedPerVisitEarn: true,
+        dedupedFallback: {
+          points: 5,
+          ruleSnapshot: { engine: "points/v1", base: { fixed_per_visit_deduped: true, points: 0 } },
+        },
+      }),
+    });
+
+    // Two award_receipt_points attempts, then the terminal zero-point path -
+    // never a "refused" result for this receipt.
+    expect(supabase.rpcCalls.map((call) => call.name)).toEqual([
+      "award_receipt_points",
+      "award_receipt_points",
+      "record_receipt_visit",
+    ]);
+    expect(result).toEqual({ kind: "skipped_zero_points" });
+  });
+
+  it("falls back to the zero-point path when dedupedFallback is null (defensive: should not happen if verify was true)", async () => {
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [{ data: null, error: { message: "FIXED_PER_VISIT_RACE" } }],
+    });
+
+    const result = await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({ points: 10, verifyNoPriorFixedPerVisitEarn: true, dedupedFallback: null }),
+    });
+
+    expect(supabase.rpcCalls.map((call) => call.name)).toEqual([
+      "award_receipt_points",
+      "record_receipt_visit",
+    ]);
+    expect(result).toEqual({ kind: "skipped_zero_points" });
+  });
+});
+
+// ===========================================================================
+// awardPoints: fixed_per_visit dedupe persisted on the zero-point path (C3 fix)
+// ===========================================================================
+
+describe("awardPoints: fixed_per_visit dedupe persisted to parse_meta (C3 fix)", () => {
+  const dedupedSnapshot = {
+    engine: "points/v1",
+    base: { rule_type: "fixed_per_visit", fixed_per_visit_deduped: true, points: 0 },
+    total_points: 0,
+  };
+
+  it("merges an award block into parse_meta when the zero-point path was a fixed_per_visit dedupe", async () => {
+    const supabase = createFakeSupabase({ receiptParseMeta: { existing: "field" } });
+
+    const result = await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({ points: 0, ruleSnapshot: dedupedSnapshot }),
+    });
+
+    const read = supabase.opsFor("receipts", "select")[0];
+    expect(read?.filters).toEqual([
+      { method: "eq", args: ["id", RECEIPT_ID] },
+      { method: "single", args: [] },
+    ]);
+
     const update = supabase.opsFor("receipts", "update")[0];
-    expect(update?.payload).toEqual({ reject_note: "award_failed:FIXED_PER_VISIT_RACE" });
+    expect(update?.payload).toEqual({
+      parse_meta: { existing: "field", award: { total: 0, fixed_per_visit_deduped: true } },
+    });
+    expect(result).toEqual({ kind: "skipped_zero_points" });
+  });
+
+  it("does NOT write a parse_meta marker for an ordinary zero-price receipt (no active base rule, floor unmet)", async () => {
+    const supabase = createFakeSupabase({});
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({ points: 0, ruleSnapshot: { engine: "points/v1", total_points: 0, base: null } }),
+    });
+
+    expect(supabase.opsFor("receipts", "select")).toHaveLength(0);
+    expect(supabase.opsFor("receipts", "update")).toHaveLength(0);
+  });
+
+  it("logs and does not throw when the parse_meta read fails", async () => {
+    const supabase = createFakeSupabase({ receiptReadError: { message: "boom" } });
+
+    await expect(
+      awardPoints({
+        deps: createDeps(supabase),
+        receiptId: RECEIPT_ID,
+        plan: plan({ points: 0, ruleSnapshot: dedupedSnapshot }),
+      }),
+    ).resolves.toEqual({ kind: "skipped_zero_points" });
+    expect(console.error).toHaveBeenCalled();
+  });
+
+  it("persists the marker on the C2 recovery zero-point path too", async () => {
+    const supabase = createFakeSupabase({
+      awardRpcQueue: [{ data: null, error: { message: "FIXED_PER_VISIT_RACE" } }],
+      receiptParseMeta: null,
+    });
+
+    await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: plan({
+        points: 10,
+        verifyNoPriorFixedPerVisitEarn: true,
+        dedupedFallback: { points: 0, ruleSnapshot: dedupedSnapshot },
+      }),
+    });
+
+    const update = supabase.opsFor("receipts", "update")[0];
+    expect(update?.payload).toEqual({
+      parse_meta: { award: { total: 0, fixed_per_visit_deduped: true } },
+    });
+  });
+});
+
+// ===========================================================================
+// M4: end-to-end lifecycle - a deduped-to-zero receipt reaches
+// record_receipt_visit and completes its normal lifecycle (brief
+// requirement 3's happy path), pricing and awarding in one pass.
+// ===========================================================================
+
+describe("fixed_per_visit dedupe: end-to-end zero-point lifecycle (M4)", () => {
+  it("prices to 0, records the visit, and persists the dedupe marker - never a refusal", async () => {
+    const supabase = createFakeSupabase({
+      pointsRules: [FIXED_VISIT_RULE],
+      fixedPerVisitAlreadyPaid: true,
+      receiptParseMeta: {},
+    });
+
+    const priced = await priceReceipt({
+      deps: createDeps(supabase),
+      businessId: BUSINESS_ID,
+      receipt: RECEIPT,
+      isFirstVisit: false,
+    });
+    expect(priced.points).toBe(0);
+
+    const result = await awardPoints({
+      deps: createDeps(supabase),
+      receiptId: RECEIPT_ID,
+      plan: priced,
+    });
+
+    expect(supabase.rpcCalls.map((call) => call.name)).toEqual([
+      "fixed_per_visit_already_paid",
+      "record_receipt_visit",
+    ]);
+    const update = supabase.opsFor("receipts", "update")[0];
+    expect(update?.payload).toEqual({
+      parse_meta: { award: { total: 0, fixed_per_visit_deduped: true } },
+    });
+    expect(result).toEqual({ kind: "skipped_zero_points" });
   });
 });
 
@@ -846,8 +1174,12 @@ describe("award RPC error handling (0018)", () => {
     });
   });
 
+  // FIXED_PER_VISIT_RACE is deliberately excluded from this generic loop: it
+  // is the one code that is NOT a simple terminal refusal (see the dedicated
+  // "FIXED_PER_VISIT_RACE recovery (C2 fix)" describe block above), so a
+  // `plan()` with default flags does not exercise its real path here.
   for (const message of MIGRATION_ERRORS.filter(
-    (code) => code !== "RECEIPT_ALREADY_AWARDED",
+    (code) => code !== "RECEIPT_ALREADY_AWARDED" && code !== "FIXED_PER_VISIT_RACE",
   )) {
     it(`annotates the receipt with award_failed:${message}`, async () => {
       const supabase = createFakeSupabase({ rpc: { data: null, error: { message } } });

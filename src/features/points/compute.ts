@@ -163,12 +163,20 @@ export function computePoints(input: ComputePointsInput): PointsResult {
 
   const baseEligible = evaluateConditions(baseRule.conditions ?? {}, ctx);
   // fixed_per_visit same-day dedupe (doc 35, task 1.1): only takes effect
-  // when the base would otherwise contribute (baseEligible) and the base IS
-  // a fixed_per_visit rule; a base that already fails its own conditions has
-  // nothing to dedupe, and the snapshot below says so honestly rather than
+  // when the base would otherwise contribute (baseEligible), the base IS a
+  // fixed_per_visit rule, AND fixed_points is actually positive (M1: a rule
+  // with fixed_points 0 or unset has nothing to suppress, so dedupe must not
+  // claim it did; an unset fixed_points also has to reach computeBasePoints
+  // below so its "requires fixed_points" throw still fires even when dedupe
+  // was requested). A base that already fails its own conditions has
+  // nothing to dedupe either, and the snapshot says so honestly rather than
   // claiming a dedupe that changed nothing.
   const fixedPerVisitDeduped =
-    baseEligible && baseRule.rule_type === "fixed_per_visit" && (dedupeFixedPerVisit ?? false);
+    baseEligible &&
+    baseRule.rule_type === "fixed_per_visit" &&
+    baseRule.fixed_points !== undefined &&
+    baseRule.fixed_points > 0 &&
+    (dedupeFixedPerVisit ?? false);
   const basePoints =
     baseEligible && !fixedPerVisitDeduped ? computeBasePoints(baseRule, amountCentavos) : 0;
 

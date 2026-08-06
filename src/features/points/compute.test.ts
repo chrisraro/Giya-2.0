@@ -162,6 +162,17 @@ describe("computePoints: fixed_per_visit same-day dedupe", () => {
     expect(computePoints(input({ baseRule: fixedVisit })).points).toBe(10);
   });
 
+  it("does not claim a dedupe when fixed_points is 0 or unset (M1: nothing was suppressed)", () => {
+    // fixed_points: 0 is a degenerate but valid config: there is nothing to
+    // suppress, so dedupeFixedPerVisit must not flip fixed_per_visit_deduped.
+    const zeroFixed: PointsRule = { ...fixedVisit, fixed_points: 0 };
+    const result = computePoints(input({ baseRule: zeroFixed, dedupeFixedPerVisit: true }));
+    const snapshot = result.ruleSnapshot as { base: { fixed_per_visit_deduped: boolean; points: number } };
+    expect(snapshot.base.fixed_per_visit_deduped).toBe(false);
+    expect(snapshot.base.points).toBe(0);
+    expect(result.points).toBe(0);
+  });
+
   it("has no effect on a non-fixed_per_visit base rule", () => {
     // fixed_per_receipt intentionally pays every receipt; the flag must not
     // leak into it.

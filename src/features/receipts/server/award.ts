@@ -4,7 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { isCampaignLive } from "@/features/campaigns/lifecycle";
 import type { Campaign, CampaignType } from "@/features/campaigns/types";
-import { manilaDayOf, manilaDayWindow } from "@/features/analytics/manila-day";
+import { manilaDayOf } from "@/features/analytics/manila-day";
 import { computePoints } from "@/features/points/compute";
 import { ruleConditionsSchema } from "@/features/points/conditions";
 import type {
@@ -106,10 +106,10 @@ export interface AwardDeps {
 export interface AwardReceipt {
   id: string;
   /**
-   * `receipts.user_id`. Needed only for the fixed_per_visit same-day dedupe
-   * precheck (task 1.1), which has to scope its points_transactions read to
-   * this consumer; every other computation in this module already gets the
-   * consumer from the caller (`isFirstVisit`) or from the RPC itself.
+   * `receipts.user_id`. Needed only for the fixed_per_visit VISIT-DAY dedupe
+   * precheck (task 1.1), which has to scope its `fixed_per_visit_already_paid`
+   * check to this consumer; every other computation in this module already
+   * gets the consumer from the caller (`isFirstVisit`) or from the RPC itself.
    */
   userId: string;
   /** `receipts.created_at`, the doc 40 event_ts fallback for a dateless receipt. */
@@ -118,31 +118,51 @@ export interface AwardReceipt {
   receiptDate: Date | null;
 }
 
-/** What `priceReceipt` decided, and what `awardPoints` sends to 0018/0037. */
+/** What `priceReceipt` decided, and what `awardPoints` sends to 0018/0038. */
 export interface AwardPlan {
   points: number;
   ruleSnapshot: Json;
   campaignId: string | null;
   expiresAt: string | null;
   /**
-   * Doc 35 task 1.1 (fixed_per_visit pays once per Manila day). True only
+   * Doc 35 task 1.1 (fixed_per_visit pays once per VISIT DAY). True only
    * when the winning base rule is `fixed_per_visit`, its own conditions are
-   * met, AND `priceReceipt`'s own precheck found no prior same-day earn (so
-   * `points`/`ruleSnapshot` above were priced WITHOUT the dedupe applied).
+   * met, AND `priceReceipt`'s own precheck found no prior PAID fixed_per_visit
+   * earn for this receipt's visit day (so `points`/`ruleSnapshot` above were
+   * priced WITHOUT the dedupe applied). "Visit day" is doc 35's own
+   * definition - `manila_day(coalesce(receipt_date, created_at))` - not
+   * processing time: a receipt approved a day (or several) after the one it
+   * duplicates still needs to dedupe correctly, which is why this precheck
+   * cannot be a simple "same processing day" read.
    *
    * That precheck is an ordinary, non-locked read and is explicitly NOT
    * race-safe on its own: two concurrent receipts for the same pair could
-   * both read "no prior earn" before either commits. When this flag is true,
-   * `awardPoints` asks 0037's `award_receipt_points` to re-verify under the
-   * `business_customers` row lock it already holds and refuse
-   * (`FIXED_PER_VISIT_RACE`) rather than risk a second full award. When this
-   * flag is false - either the base is not fixed_per_visit, or the precheck
-   * already found a prior earn and priced accordingly (0, or an independent
-   * bonus alone) - no re-verification is requested, because re-verifying
-   * would find that SAME prior earn and wrongly refuse a legitimate,
-   * already-deduped award.
+   * both read "not yet paid" before either commits. When this flag is true,
+   * `awardPoints` asks 0038's `award_receipt_points` to re-verify under the
+   * `business_customers` row lock it already holds and raise
+   * `FIXED_PER_VISIT_RACE` rather than risk a second full award; `awardPoints`
+   * then recovers using `dedupedFallback` below rather than stranding the
+   * receipt. When this flag is false - either the base is not
+   * fixed_per_visit, or the precheck already found a prior paid earn and
+   * priced accordingly (0, or an independent bonus alone) - no
+   * re-verification is requested, because re-verifying would find that SAME
+   * prior earn and wrongly refuse a legitimate, already-deduped award.
    */
   verifyNoPriorFixedPerVisitEarn: boolean;
+  /**
+   * The alternate `{points, ruleSnapshot}` `priceReceipt` would have produced
+   * had its precheck found a prior paid fixed_per_visit earn for this visit
+   * day, computed with the SAME pure engine (`dedupeFixedPerVisit: true`) so
+   * it is never a second implementation of the rule math (doc 35 section
+   * 11). Present only when `verifyNoPriorFixedPerVisitEarn` is true - i.e.
+   * only when there is something worth recovering to.
+   *
+   * `awardPoints` uses this, not a fresh price, when `award_receipt_points`
+   * raises `FIXED_PER_VISIT_RACE`: the prior earn the RPC found under its
+   * lock is exactly the fact this fallback already assumed, so replaying it
+   * is authoritative, not a guess.
+   */
+  dedupedFallback: { points: number; ruleSnapshot: Json } | null;
 }
 
 /** How loudly a refused award is logged, and whether it is benign. */
@@ -395,6 +415,7 @@ export async function priceReceipt(input: {
     campaignId: null,
     expiresAt: null,
     verifyNoPriorFixedPerVisitEarn: false,
+    dedupedFallback: null,
   };
 
   const { data, error } = await deps.supabase
@@ -468,39 +489,77 @@ export async function priceReceipt(input: {
       )
       .find((zone): zone is string => zone !== undefined) ?? RECEIPT_TIMEZONE;
 
-  // Doc 35 task 1.1: fixed_per_visit pays once per Manila day, not once per
-  // receipt. This is the ADVISORY half of that fix - an ordinary read, not
-  // under any lock - so it is skipped entirely unless it could matter (a
-  // fixed_per_visit base rule), both to avoid a wasted query on every other
-  // rule type and because a false "true" here for an ineligible rule_type
-  // would incorrectly ask the RPC to re-verify a fact that has nothing to do
-  // with this receipt. See `awardPoints` and `AwardPlan.verifyNoPriorFixedPerVisitEarn`
-  // for the race-safe half, done under the RPC's `business_customers` lock.
+  // Doc 35 task 1.1: fixed_per_visit pays once per VISIT DAY, not once per
+  // receipt and not once per processing day. This is the ADVISORY half of
+  // that fix - an ordinary read, not under any lock - so it is skipped
+  // entirely unless it could matter (a fixed_per_visit base rule), both to
+  // avoid a wasted query on every other rule type and because a false "true"
+  // here for an ineligible rule_type would incorrectly ask the RPC to
+  // re-verify a fact that has nothing to do with this receipt. See
+  // `awardPoints` and `AwardPlan.verifyNoPriorFixedPerVisitEarn` for the
+  // race-safe half, done under the RPC's `business_customers` lock.
+  const visitDay = manilaDayOf(receiptDate);
   const dedupeFixedPerVisit =
     baseRule.rule_type === "fixed_per_visit"
-      ? await hasSameDayEarn({
+      ? await hasPaidFixedPerVisitEarn({
           supabase: deps.supabase,
           businessId,
           consumerId: receipt.userId,
-          now: deps.now(),
+          visitDay,
         })
       : false;
 
-  const result = computePoints({
+  // Shared by both computePoints calls below so the deduped fallback is
+  // priced from the identical inputs as the primary result - the ONLY
+  // difference between the two calls is dedupeFixedPerVisit itself.
+  const engineInput = {
     amountCentavos: receipt.totalCentavos ?? 0,
     receiptDate,
     businessTimezone: timezone,
     baseRule,
     candidateRules: applied.map((candidate) => candidate.rule),
     visitContext: { isFirstVisit: input.isFirstVisit },
-    dedupeFixedPerVisit,
-  });
+  };
+
+  const result = computePoints({ ...engineInput, dedupeFixedPerVisit });
 
   // Doc 35 step 9: campaign_id on the ledger row is "the primary applied
   // campaign or null". `resolveStacking` already emitted the candidates in
   // campaign priority order, so the first one that names a campaign is it.
   const campaignId =
     applied.find((candidate) => candidate.campaignId !== null)?.campaignId ?? null;
+
+  // True only when the base COULD have contributed a fixed_per_visit amount
+  // and this precheck believed nothing was already paid for this visit day:
+  // exactly the case a same-request race could get wrong. When the precheck
+  // instead found a prior paid earn (dedupeFixedPerVisit true),
+  // `result.breakdown.basePoints` is already 0 here and no re-verification is
+  // asked for - see `AwardPlan`'s own doc comment for why that direction must
+  // stay false.
+  const verifyNoPriorFixedPerVisitEarn =
+    baseRule.rule_type === "fixed_per_visit" &&
+    !dedupeFixedPerVisit &&
+    result.breakdown.basePoints > 0;
+
+  // C2 fix: precompute what this receipt would have priced at HAD the
+  // precheck found a prior paid earn, using the SAME pure engine. This is
+  // the number/snapshot `awardPoints` replays (never recomputed in SQL) if
+  // 0038 raises FIXED_PER_VISIT_RACE - i.e. if a concurrent request commits
+  // that prior earn between this precheck and the RPC's lock.
+  let dedupedFallback: AwardPlan["dedupedFallback"] = null;
+  if (verifyNoPriorFixedPerVisitEarn) {
+    const fallbackResult = computePoints({ ...engineInput, dedupeFixedPerVisit: true });
+    dedupedFallback = {
+      points: fallbackResult.points,
+      ruleSnapshot: enrichRuleSnapshot({
+        snapshot: fallbackResult.ruleSnapshot,
+        now: deps.now(),
+        receipt,
+        applied,
+        campaigns,
+      }),
+    };
+  }
 
   return {
     points: result.points,
@@ -517,74 +576,58 @@ export async function priceReceipt(input: {
     // on `points_rules` (0012). Until that column exists there is no policy to
     // read, and null is the documented "never expires".
     expiresAt: null,
-    // True only when the base COULD have contributed a fixed_per_visit amount
-    // and this precheck believed nothing was already earned today: exactly
-    // the case a same-request race could get wrong. When the precheck instead
-    // found a prior earn (dedupeFixedPerVisit true), `result.breakdown.basePoints`
-    // is already 0 here and no re-verification is asked for - see the field's
-    // own doc comment on `AwardPlan` for why that direction must stay false.
-    verifyNoPriorFixedPerVisitEarn:
-      baseRule.rule_type === "fixed_per_visit" &&
-      !dedupeFixedPerVisit &&
-      result.breakdown.basePoints > 0,
+    verifyNoPriorFixedPerVisitEarn,
+    dedupedFallback,
   };
 }
 
 /**
- * The ADVISORY half of the fixed_per_visit same-day dedupe (doc 35 task 1.1):
- * does this consumer already have a positive earn transaction at this
- * business earlier the same Manila day? Ordinary read, no lock - explicitly
- * NOT race-safe alone, which is why `priceReceipt` also threads
- * `verifyNoPriorFixedPerVisitEarn` through to 0037's RPC-side check under the
- * `business_customers` row lock. This function exists so the common,
- * non-racing case (a consumer's second receipt of the day, submitted well
- * after the first was already awarded) prices correctly up front rather than
- * relying on the RPC to refuse it.
+ * The ADVISORY half of the fixed_per_visit VISIT-DAY dedupe (doc 35 task
+ * 1.1): does this consumer already have a PAID fixed_per_visit earn at this
+ * business for this receipt's visit day? "Paid" excludes an earn whose own
+ * fixed base was itself deduped to 0 (a prior receipt on the SAME visit day
+ * that only collected an independent bonus must not suppress this one's
+ * base too - I3). "Visit day" is doc 35's own definition,
+ * `manila_day(coalesce(receipt_date, created_at))`, deliberately NOT
+ * processing time: doc 35 says conditions are evaluated at `receipt_date`,
+ * "never at processing time", and a human-reviewed receipt routinely lands a
+ * day (or more) after the one it duplicates.
  *
- * Uses the shared `manilaDayOf`/`manilaDayWindow` TS mirror of
- * `private.manila_day()` (src/features/analytics/manila-day.ts, verified
- * byte-for-byte against the SQL function in its own test suite) rather than
- * calling the SQL function directly: `private.manila_day` lives in the
- * `private` schema, which PostgREST does not expose, so there is no RPC route
- * to it from a Supabase client. "Do not reimplement timezone math in
- * TypeScript" (task brief) is about the AUTHORITATIVE check, which stays in
- * SQL; this mirror is the codebase's own established pattern for exactly this
- * kind of pre-filtering read (doc 40's "translate once, at the query edge").
+ * Delegates to `public.fixed_per_visit_already_paid` (0038), a thin wrapper
+ * over `private.fixed_per_visit_already_paid`, so this advisory check and the
+ * RPC's own authoritative re-check (inside `award_receipt_points`, under the
+ * `business_customers` lock) share ONE definition of the predicate rather
+ * than two hand-maintained copies that could drift apart. `private.manila_day`
+ * itself lives in the `private` schema, which PostgREST does not expose, so
+ * there is no direct RPC route to it - this wrapper is the seam.
  *
- * Fails OPEN to "no prior earn" on a read error: this is the same direction
- * `priceReceipt` already takes when the points_rules read itself fails, and
- * it is safe here specifically because the RPC-side verification this
- * produces (`verifyNoPriorFixedPerVisitEarn: true`) is what actually prevents
- * the over-award, not this read.
+ * Ordinary read, no lock - explicitly NOT race-safe on its own, which is why
+ * `priceReceipt` also threads `verifyNoPriorFixedPerVisitEarn` through for the
+ * RPC-side backstop. Fails OPEN to "not yet paid" on a read error, for the
+ * same reason `priceReceipt` already does when the points_rules read itself
+ * fails: the RPC-side verification this produces is the actual over-award
+ * guard, not this read.
  */
-async function hasSameDayEarn(input: {
+async function hasPaidFixedPerVisitEarn(input: {
   supabase: SupabaseClient<Database>;
   businessId: string;
   consumerId: string;
-  now: Date;
+  visitDay: string;
 }): Promise<boolean> {
-  const today = manilaDayOf(input.now);
-  const { startIso, endIso } = manilaDayWindow([today]);
-
-  const { data, error } = await input.supabase
-    .from("points_transactions")
-    .select("id")
-    .eq("business_id", input.businessId)
-    .eq("consumer_id", input.consumerId)
-    .eq("type", "earn")
-    .gt("points", 0)
-    .gte("created_at", startIso)
-    .lt("created_at", endIso)
-    .limit(1);
+  const { data, error } = await input.supabase.rpc("fixed_per_visit_already_paid", {
+    p_business_id: input.businessId,
+    p_consumer_id: input.consumerId,
+    p_visit_day: input.visitDay,
+  });
 
   if (error !== null) {
     console.error(
-      `[receipts/award] could not check for a prior same-day earn for business ${input.businessId}; pricing as if none exists (0037's RPC-side check under the business_customers lock is the authoritative guard)`,
+      `[receipts/award] could not check for a prior paid fixed_per_visit earn for business ${input.businessId}; pricing as if not yet paid (0038's RPC-side check under the business_customers lock is the authoritative guard)`,
       error,
     );
     return false;
   }
-  return (data ?? []).length > 0;
+  return data === true;
 }
 
 async function loadCampaigns(
@@ -683,13 +726,22 @@ function enrichRuleSnapshot(input: {
 // ---------------------------------------------------------------------------
 
 /**
- * Every P0001 message 0018, 0023 and 0037 raise, verified against the
+ * Every P0001 message 0018, 0023 and 0037/0038 raise, verified against the
  * migrations line by line. 0023 deliberately introduces no new string: it
  * reuses RECEIPT_NOT_AWARDABLE, AWARD_RECEIPT_ID_REQUIRED and
  * CUSTOMER_RECORD_MISSING so both RPCs share one taxonomy and one severity
- * map. 0037 (task 1.1, fixed_per_visit same-day dedupe) adds exactly one:
+ * map. 0037 (task 1.1, fixed_per_visit dedupe) adds exactly one:
  * FIXED_PER_VISIT_RACE, raised by award_receipt_points only when the caller
- * sets p_verify_no_prior_fixed_visit_earn.
+ * sets p_verify_no_prior_fixed_visit_earn; 0038 changes what that check keys
+ * on (visit day, not processing day - see `hasPaidFixedPerVisitEarn`) but
+ * introduces no new message.
+ *
+ * Note this map is NOT the whole story for FIXED_PER_VISIT_RACE: unlike every
+ * other code here, it is not a terminal refusal. `awardPoints` intercepts it
+ * before it would ever reach `refuseRpc` and recovers via
+ * `awardAfterFixedPerVisitRace` (C2 fix) instead of stranding the receipt.
+ * The entry stays in this map only as the documented severity for the rare
+ * case that recovery itself fails and the error is genuinely surfaced.
  *
  * Each one is a distinct operational fact, and none of them may take a caller
  * down: the receipt is already 'approved' in the database by the time either
@@ -713,14 +765,13 @@ export const AWARD_ERROR_HANDLING: Record<string, AwardErrorSeverity> = {
   // is a bug in this file if it ever appears.
   AWARD_POINTS_INVALID: "error",
   AWARD_RECEIPT_ID_REQUIRED: "error",
-  // 0037 (task 1.1): `priceReceipt`'s advisory precheck believed no same-day
-  // earn existed for this fixed_per_visit-based award, but the RPC's own
-  // re-check under the business_customers lock found one that landed after
-  // the precheck ran and before this call reached the lock - a genuine
-  // concurrent-request race, not a caller bug. warn, like the other
-  // legitimate mid-flight-state refusals: no points were minted (correct,
-  // over-awarding is the expensive direction), the receipt keeps
-  // status='approved' with processed_at null, and an operator can revisit it.
+  // 0037/0038 (task 1.1): `priceReceipt`'s advisory precheck believed no
+  // paid fixed_per_visit earn existed yet for this visit day, but the RPC's
+  // own re-check under the business_customers lock found one that became
+  // visible after the precheck ran and before this call reached the lock -
+  // a genuine concurrent-request race, not a caller bug. `awardPoints`
+  // recovers from this automatically (see `awardAfterFixedPerVisitRace`);
+  // this severity only applies if that recovery itself somehow fails too.
   FIXED_PER_VISIT_RACE: "warn",
 };
 
@@ -809,16 +860,7 @@ export async function awardPoints(input: {
   const { deps, receiptId, plan } = input;
 
   if (plan.points <= 0) {
-    const { error } = await deps.supabase.rpc("record_receipt_visit", {
-      p_receipt_id: receiptId,
-    });
-    if (error !== null) {
-      return refuseRpc({ deps, receiptId, error, notePrefix: "visit_failed" });
-    }
-    console.info(
-      `[receipts/award] receipt ${receiptId} priced at 0 points; visit recorded without a ledger row`,
-    );
-    return { kind: "skipped_zero_points" };
+    return awardZeroPoints({ deps, receiptId, points: plan.points, ruleSnapshot: plan.ruleSnapshot });
   }
 
   // 0018 declares p_campaign_id and p_expires_at as `default null`, and the
@@ -826,10 +868,10 @@ export async function awardPoints(input: {
   // nullable. Omitting the key and sending null are the same call at the
   // function (the default IS null), so the keys are dropped when there is
   // nothing to say rather than the argument list being widened by hand.
-  // p_verify_no_prior_fixed_visit_earn (0037, default false) is omitted the
-  // same way whenever the plan does not ask for it, which keeps this call's
-  // argument list identical to 0018's original five keys for every rule type
-  // other than fixed_per_visit.
+  // p_verify_no_prior_fixed_visit_earn (0037/0038, default false) is omitted
+  // the same way whenever the plan does not ask for it, which keeps this
+  // call's argument list identical to 0018's original five keys for every
+  // rule type other than fixed_per_visit.
   const { data, error } = await deps.supabase.rpc("award_receipt_points", {
     p_receipt_id: receiptId,
     p_points: plan.points,
@@ -842,6 +884,15 @@ export async function awardPoints(input: {
   });
 
   if (error !== null) {
+    // C2 fix: FIXED_PER_VISIT_RACE is not a terminal refusal. It means a
+    // concurrent request's earn for the SAME visit day became visible under
+    // the lock between our precheck and this call - the prior earn is now a
+    // committed fact, so replaying `plan.dedupedFallback` (computed by the
+    // same pure engine, never recomputed in SQL) is authoritative, not a
+    // guess.
+    if (error.message === "FIXED_PER_VISIT_RACE") {
+      return awardAfterFixedPerVisitRace({ deps, receiptId, plan });
+    }
     return refuseRpc({ deps, receiptId, error, notePrefix: "award_failed" });
   }
 
@@ -855,6 +906,167 @@ export async function awardPoints(input: {
     points: plan.points,
     transactionId: typeof data === "string" ? data : null,
   };
+}
+
+/**
+ * The zero-point path (0023's `record_receipt_visit`), extracted so both the
+ * ordinary zero-price case and the C2 race-recovery zero case call the exact
+ * same code. Also where C3 is fixed: `rule_snapshot` is only ever persisted by
+ * `award_receipt_points`, so a deduped-to-zero receipt - which never reaches
+ * that RPC - would otherwise discard the `fixed_per_visit_deduped` fact
+ * entirely. `persistFixedPerVisitDedupeMarker` merges it into
+ * `receipts.parse_meta` instead, best-effort, after the visit is recorded.
+ */
+async function awardZeroPoints(input: {
+  deps: AwardDeps;
+  receiptId: string;
+  points: number;
+  ruleSnapshot: Json;
+}): Promise<AwardResult> {
+  const { deps, receiptId, points, ruleSnapshot } = input;
+
+  const { error } = await deps.supabase.rpc("record_receipt_visit", {
+    p_receipt_id: receiptId,
+  });
+  if (error !== null) {
+    return refuseRpc({ deps, receiptId, error, notePrefix: "visit_failed" });
+  }
+
+  await persistFixedPerVisitDedupeMarker({ deps, receiptId, points, ruleSnapshot });
+
+  console.info(
+    `[receipts/award] receipt ${receiptId} priced at 0 points; visit recorded without a ledger row`,
+  );
+  return { kind: "skipped_zero_points" };
+}
+
+/**
+ * C2 recovery for `FIXED_PER_VISIT_RACE`. The RPC's own re-check (under the
+ * `business_customers` lock it already holds) found a prior paid
+ * fixed_per_visit earn for this receipt's visit day that `priceReceipt`'s
+ * unlocked precheck missed - almost always because a concurrent request for
+ * the SAME pair committed that earn in the gap between the two. That prior
+ * earn is now a committed, visible fact, so `plan.dedupedFallback` (computed
+ * by `priceReceipt` with the SAME pure engine, `dedupeFixedPerVisit: true`)
+ * is the authoritative repricing, not a second implementation of the rule
+ * math and not a guess.
+ *
+ *   - fallback total <= 0 (the common case: nothing but the fixed base was on
+ *     offer) -> the zero-point path, exactly as if `priceReceipt` had priced
+ *     it that way from the start.
+ *   - fallback total > 0 (an independent bonus still applies) -> retry
+ *     `award_receipt_points` ONCE with the fallback's own points/snapshot.
+ *     `p_verify_no_prior_fixed_visit_earn` is deliberately omitted: the prior
+ *     earn that caused THIS race is precisely what the fallback already
+ *     accounts for, so re-verifying would find that SAME earn and refuse
+ *     again in a loop.
+ *   - if that retry somehow still fails (any reason, including a second
+ *     FIXED_PER_VISIT_RACE) - a terminal fallback to the zero-point path
+ *     rather than ever returning to the stranded state this whole fix
+ *     exists to close. The specific failure is logged, not silently lost.
+ */
+async function awardAfterFixedPerVisitRace(input: {
+  deps: AwardDeps;
+  receiptId: string;
+  plan: AwardPlan;
+}): Promise<AwardResult> {
+  const { deps, receiptId, plan } = input;
+  const fallback = plan.dedupedFallback;
+
+  if (fallback === null || fallback.points <= 0) {
+    return awardZeroPoints({
+      deps,
+      receiptId,
+      points: fallback?.points ?? 0,
+      ruleSnapshot: fallback?.ruleSnapshot ?? plan.ruleSnapshot,
+    });
+  }
+
+  const { data, error } = await deps.supabase.rpc("award_receipt_points", {
+    p_receipt_id: receiptId,
+    p_points: fallback.points,
+    p_rule_snapshot: fallback.ruleSnapshot,
+    ...(plan.campaignId === null ? {} : { p_campaign_id: plan.campaignId }),
+    ...(plan.expiresAt === null ? {} : { p_expires_at: plan.expiresAt }),
+  });
+
+  if (error !== null) {
+    console.error(
+      `[receipts/award] retry after FIXED_PER_VISIT_RACE failed for receipt ${receiptId}; falling back to the zero-point path rather than stranding it`,
+      error,
+    );
+    return awardZeroPoints({
+      deps,
+      receiptId,
+      points: 0,
+      ruleSnapshot: fallback.ruleSnapshot,
+    });
+  }
+
+  console.info(
+    `[receipts/award] receipt ${receiptId} awarded ${fallback.points} points after a fixed_per_visit dedupe race (ledger row ${String(data)})`,
+  );
+  return {
+    kind: "awarded",
+    points: fallback.points,
+    transactionId: typeof data === "string" ? data : null,
+  };
+}
+
+/**
+ * C3 fix: `rule_snapshot.base.fixed_per_visit_deduped` is only ever written
+ * by `award_receipt_points`, so a zero-point award - which never reaches that
+ * RPC - would silently discard the ONE fact a review screen needs to explain
+ * why 0 was paid. Merges `{ award: { total, fixed_per_visit_deduped: true } }`
+ * into the receipt's existing `parse_meta` (read-modify-write, since
+ * PostgREST cannot express a partial jsonb merge from the client) whenever
+ * the snapshot says the dedupe actually fired. A no-op, not an error, when it
+ * did not (nothing to record) - a receipt priced at 0 for an unrelated reason
+ * (no active base rule, an earning floor) must not claim a dedupe that never
+ * happened. Best-effort and never throws: this is provenance for humans, not
+ * a ledger write, so a failure here logs and moves on rather than turning a
+ * successful visit-record into a reported failure.
+ */
+async function persistFixedPerVisitDedupeMarker(input: {
+  deps: AwardDeps;
+  receiptId: string;
+  points: number;
+  ruleSnapshot: Json;
+}): Promise<void> {
+  const { deps, receiptId, points, ruleSnapshot } = input;
+  if (!isRecord(ruleSnapshot)) return;
+  const base = ruleSnapshot.base;
+  if (!isRecord(base) || base.fixed_per_visit_deduped !== true) return;
+
+  const { data, error: readError } = await deps.supabase
+    .from("receipts")
+    .select("parse_meta")
+    .eq("id", receiptId)
+    .single();
+  if (readError !== null) {
+    console.error(
+      `[receipts/award] could not read parse_meta to record the fixed_per_visit dedupe for receipt ${receiptId}`,
+      readError,
+    );
+    return;
+  }
+
+  const currentParseMeta = isRecord(data?.parse_meta) ? data.parse_meta : {};
+  const mergedParseMeta = toJson({
+    ...currentParseMeta,
+    award: { total: points, fixed_per_visit_deduped: true },
+  });
+
+  const { error: writeError } = await deps.supabase
+    .from("receipts")
+    .update({ parse_meta: mergedParseMeta })
+    .eq("id", receiptId);
+  if (writeError !== null) {
+    console.error(
+      `[receipts/award] could not persist the fixed_per_visit dedupe marker for receipt ${receiptId}`,
+      writeError,
+    );
+  }
 }
 
 /**

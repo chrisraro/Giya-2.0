@@ -2567,6 +2567,14 @@ export type Database = {
         Returns: Json
       }
       expire_claims: { Args: { p_limit?: number }; Returns: number }
+      fixed_per_visit_already_paid: {
+        Args: {
+          p_business_id: string
+          p_consumer_id: string
+          p_visit_day: string
+        }
+        Returns: boolean
+      }
       receipt_routing_breakdown: {
         Args: { p_business_id?: string; p_days?: number }
         Returns: {
