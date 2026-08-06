@@ -103,6 +103,19 @@ export async function incr(key: string): Promise<number> {
   return Number(result);
 }
 
+// INCRBY key amount: atomically increments the integer stored at key by
+// `amount` (creating it at `amount` if absent) and returns the new value.
+// The building block for the AI budget counters in src/lib/ai/budget.ts,
+// where the increment is a metered cost in micro-USD, not a fixed step of 1
+// the way `incr` is for the velocity/rate-limit counters. `amount` is
+// truncated to an integer: Upstash's INCRBY is integer arithmetic and a
+// fractional micro-USD value here would either be silently floored by
+// Upstash or rejected, and neither is better than being explicit about it.
+export async function incrby(key: string, amount: number): Promise<number> {
+  const result = await sendCommand(["INCRBY", key, String(Math.trunc(amount))]);
+  return Number(result);
+}
+
 // EXPIRE key seconds: sets a TTL on an existing key. Returns true when the
 // TTL was set, false when the key does not exist. Combined with incr(), the
 // caller sets the TTL only on the first increment of a window so later

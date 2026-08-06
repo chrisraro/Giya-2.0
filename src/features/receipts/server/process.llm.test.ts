@@ -622,6 +622,66 @@ describe("parse tier 3 preconditions (doc 36 Stage 7)", () => {
 });
 
 // ===========================================================================
+// Doc 38 section 10 budget scoping: the receipt's business_id must reach the
+// gateway so a per-tenant Redis cap can be enforced. process.ts itself never
+// checks a budget - that is llm.ts's job (llm.test.ts) - this only proves
+// the WIRING: the third argument every ReceiptAiDeps call carries.
+// ===========================================================================
+
+describe("business_id is threaded through to the AI deps for budget scoping (doc 38 section 10)", () => {
+  it("passes the receipt's own business_id to both screenForInjection and extract", async () => {
+    const ai = createAi({ candidate: { total: "190.00" } });
+    const harness = createHarness({
+      response: ocrResponse({ rawText: FADED_RECEIPT_TEXT }),
+      ai,
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    expect(ai.screen).toHaveBeenCalledTimes(1);
+    expect(ai.extract).toHaveBeenCalledTimes(1);
+    expect(ai.screen.mock.calls[0]?.[2]).toBe(BUSINESS_ID);
+    expect(ai.extract.mock.calls[0]?.[2]).toBe(BUSINESS_ID);
+    // Named mutant: drop the third argument from either call site in
+    // runParseAssist (call `deps.ai.screenForInjection(response.rawText,
+    // meter)` with no business id). Killed - the production wiring
+    // (`defaultReceiptAiDeps`) would then always scope the budget check to
+    // `null`, which `checkAiBudget` treats as "no cap", silently exempting
+    // every receipt with a matched business from the daily limit.
+  });
+
+  it("passes null when the receipt matched no business", async () => {
+    const world = createWorld({
+      receipt: {
+        id: RECEIPT_ID,
+        business_id: null,
+        user_id: CONSUMER_ID,
+        status: "queued",
+        image_path: `${CONSUMER_ID}/photo.jpg`,
+        image_hash: IMAGE_HASH,
+        device_id: null,
+        created_at: "2026-07-25T03:55:00.000Z",
+      },
+    });
+    const ai = createAi({ candidate: { total: "190.00" } });
+    const harness = createHarness({
+      world,
+      response: ocrResponse({ rawText: FADED_RECEIPT_TEXT }),
+      ai,
+    });
+
+    await processReceipt(RECEIPT_ID, harness.deps);
+
+    expect(ai.screen.mock.calls[0]?.[2]).toBeNull();
+    expect(ai.extract.mock.calls[0]?.[2]).toBeNull();
+    // Named mutant: coerce a null business_id to the string "null" or throw
+    // instead of passing it through. Killed - checkAiBudget's own contract
+    // depends on receiving the real JS `null` (its "no tenant" branch),
+    // and this proves runParseAssist does not corrupt it in transit.
+  });
+});
+
+// ===========================================================================
 // Rail 4, end to end
 // ===========================================================================
 

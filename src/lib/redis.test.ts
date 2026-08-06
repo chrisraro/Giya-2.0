@@ -353,6 +353,62 @@ describe("incr", () => {
   });
 });
 
+describe("incrby", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("sends the exact INCRBY command payload and returns the new value", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 873 }),
+    });
+
+    const { incrby } = await import("./redis");
+    const result = await incrby("k1", 873);
+
+    expect(result).toBe(873);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual(["INCRBY", "k1", "873"]);
+  });
+
+  it("truncates a fractional amount to an integer before sending it", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 10 }),
+    });
+
+    const { incrby } = await import("./redis");
+    await incrby("k1", 10.9);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual(["INCRBY", "k1", "10"]);
+  });
+
+  it("throws on a non-200 response", async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: "boom" }),
+      text: async () => "boom",
+    });
+
+    const { incrby } = await import("./redis");
+
+    await expect(incrby("k1", 5)).rejects.toThrow();
+  });
+});
+
 describe("expire", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 

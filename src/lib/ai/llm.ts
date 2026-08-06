@@ -3,7 +3,9 @@ import "server-only";
 import { z } from "zod";
 
 import { getServerEnv } from "@/lib/env";
+import { AI_ANALYTICS_FLAG, AI_ASSISTANT_FLAG, AI_PARSE_ASSIST_FLAG, isFeatureEnabled } from "@/lib/flags";
 
+import { checkAiBudget, recordAiSpend } from "./budget";
 import {
   GROQ_CHAT_COMPLETIONS_URL,
   TASK_MODELS,
@@ -54,14 +56,21 @@ import type { LlmModelId } from "./models";
 // What this module does NOT do
 // -----------------------------------------------------------------------------
 //
-// It does not touch the database. Doc 38 section 1 has the gateway writing
-// `ai_usage_events` itself; here the usage is handed to an optional `meter`
+// It does not touch `ai_usage_events`. Doc 38 section 1 has the gateway
+// writing that table itself; here the usage is handed to an optional `meter`
 // callback and the caller writes the row. The pipeline already owns a
 // service-role client, a `receipts.id` for `ref_id`, the `business_id` and the
 // transaction those belong in; duplicating that here would put a second writer
 // on the money-adjacent path and would make this module untestable without a
 // database. The metering CONTENT is doc 38's verbatim (kind, model, units,
 // cost_micros); only the INSERT lives elsewhere.
+//
+// It DOES now touch two other things, both doc 38 section 1's own gateway
+// steps and both single-purpose reads/writes rather than a second copy of the
+// caller's business logic: `src/lib/flags.ts` (step 1, the kill switch - a
+// cached read of `feature_flags.is_enabled`) and `src/lib/ai/budget.ts`
+// (step 2, the Redis-backed daily cap). Both modules are documented to fail
+// in OPPOSITE directions under uncertainty; see their own headers.
 
 // -----------------------------------------------------------------------------
 // Timeouts and budgets
@@ -197,6 +206,15 @@ export interface LlmCallOptions extends LlmSeams {
    * this module does not read the database. Omitted means unbudgeted.
    */
   readonly budgetMicros?: number;
+  /**
+   * The tenant this call is FOR, for the doc 38 section 1 kill switch (n/a -
+   * that check is unconditional) and the doc 38 section 10 Redis budget
+   * cap (`src/lib/ai/budget.ts`). Optional, and `null`/omitted both mean "no
+   * tenant to scope a budget against" - see `checkAiBudget`'s own doc for why
+   * that is "allowed" rather than "refused": a receipt with no matched
+   * business (doc 36 Stage 5) has no per-business cap to have exceeded.
+   */
+  readonly businessId?: string | null;
 }
 
 export interface CompleteJsonRequest<T> extends LlmCallOptions {
@@ -311,6 +329,37 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || status === 408 || status >= 500;
 }
 
+/**
+ * Doc 38 section 1's kill-switch keys, mapped from `ai_usage_events.kind`
+ * (what every call site actually names) rather than from `LlmTask`
+ * (models.ts's `assistant`/`parse_assist`/`analytics`/`injection_screen` -
+ * a different vocabulary for a different purpose, model SELECTION rather
+ * than usage classification). `kind` is what `LlmCallOptions` carries and
+ * what this function already resolves at the top of `chat`, so reusing it
+ * here needs no new parameter.
+ *
+ * `ocr` and `embedding` are deliberately ABSENT, both for real reasons and
+ * not merely because nothing calls `chat()` with them today:
+ *   - `ocr` is doc 38 section 10's own carve-out, verbatim: "Caps never
+ *     affect OCR receipt processing: the money flow is never starved by
+ *     chat spend - `ocr` kind is metered but not counted against the AI
+ *     budget." OCR also never reaches THIS module in this codebase; it is a
+ *     separate self-hosted container (`receipts/server/ocr/provider.ts`).
+ *   - `embedding` retrieval (doc 38 section 2) is served by a separate
+ *     self-hosted BGE-M3 endpoint (`receipts/embed.ts`), not by this
+ *     Groq-only gateway, so it is not one of doc 38's three named
+ *     kill-switch surfaces (`ai_assistant`, `ai_parse_assist`,
+ *     `ai_analytics`) at all.
+ *
+ * A kind absent from this map skips BOTH the kill switch and the budget
+ * check below - not "fails open", genuinely "not this gate's business".
+ */
+const KILL_SWITCH_FLAG_BY_KIND: Partial<Record<AiUsageKind, string>> = {
+  parse_assist: AI_PARSE_ASSIST_FLAG,
+  chat: AI_ASSISTANT_FLAG,
+  analytics: AI_ANALYTICS_FLAG,
+};
+
 function resolveApiKey(): string | null {
   try {
     const key = getServerEnv().GROQ_API_KEY;
@@ -381,6 +430,19 @@ async function chat(request: ChatRequest): Promise<ChatOutcome | null> {
     const model = request.model ?? resolveDefaultModel();
     const entry = getLlmModel(model);
     const kind: AiUsageKind = request.kind ?? "parse_assist";
+
+    // -------------------------------------------------------------------
+    // Doc 38 section 1 step 1: the kill switch. Checked before anything
+    // else in this function - before the api key is even read - so a flag
+    // flip takes effect on every call shape this module serves, with
+    // nothing for a future caller to remember to wire.
+    // -------------------------------------------------------------------
+    const killSwitchFlag = KILL_SWITCH_FLAG_BY_KIND[kind];
+    if (killSwitchFlag !== undefined && !(await isFeatureEnabled(killSwitchFlag))) {
+      console.warn(`${LOG_PREFIX} feature flag "${killSwitchFlag}" is off; skipping the LLM call`);
+      return null;
+    }
+
     const maxTokens = Math.max(
       1,
       Math.min(request.maxTokens ?? DEFAULT_MAX_TOKENS, entry.maxOutputTokens),
@@ -391,6 +453,25 @@ async function chat(request: ChatRequest): Promise<ChatOutcome | null> {
     const deadline = startedAt + (request.totalBudgetMs ?? DEFAULT_TOTAL_BUDGET_MS);
     const doFetch = request.fetchImpl ?? globalThis.fetch;
     const sleep = request.sleepImpl ?? defaultSleep;
+
+    // -------------------------------------------------------------------
+    // Doc 38 section 1 step 2: the budget cap. Only for kinds the kill
+    // switch also gates (see KILL_SWITCH_FLAG_BY_KIND's own doc for why
+    // `ocr`/`embedding` are excluded). Uses the same worst-case estimate
+    // the caller-supplied `budgetMicros` check below has always used.
+    // -------------------------------------------------------------------
+    const businessId = request.businessId ?? null;
+    if (killSwitchFlag !== undefined) {
+      const estimate = estimateCostMicros(model, request.promptChars, maxTokens);
+      const budget = await checkAiBudget({ businessId, estimatedCostMicros: estimate, now: new Date() });
+      if (!budget.allowed) {
+        console.warn(
+          `${LOG_PREFIX} AI budget exceeded for business ${businessId ?? "(none)"}: ` +
+            `${budget.spentMicros} spent + ${estimate} estimated > ${budget.capMicros} cap; skipping the LLM call`,
+        );
+        return null;
+      }
+    }
 
     const apiKey = resolveApiKey();
     if (apiKey === null) {
@@ -520,6 +601,16 @@ async function chat(request: ChatRequest): Promise<ChatOutcome | null> {
       // Metered before any judgement about usability: these tokens are billed
       // whatever this function decides next.
       await reportUsage(request.meter, usage);
+
+      // Same standing as the meter above: the ACTUAL cost is recorded
+      // against the budget counter regardless of whether the answer turns
+      // out to be usable, because the spend already happened. Gated on
+      // `killSwitchFlag !== undefined` for the same reason the pre-call
+      // check above is - `ocr`/`embedding` calls do not count against the
+      // AI budget (doc 38 section 10).
+      if (killSwitchFlag !== undefined) {
+        await recordAiSpend({ businessId, costMicros: usage.costMicros, now: new Date() });
+      }
 
       const content = choice.message.content ?? "";
       const reasoning = choice.message.reasoning ?? "";

@@ -261,6 +261,22 @@ export interface QueueStatusView {
 }
 
 // ---------------------------------------------------------------------------
+// `/admin/flags` (doc 31 section 7)
+// ---------------------------------------------------------------------------
+
+/** One `feature_flags` row as the toggle screen renders it. `rollout` is
+ * deliberately absent - see `src/lib/flags.ts`'s header for why nothing in
+ * this codebase reads it yet; carrying it here would render a JSON editor
+ * for a value nothing acts on. */
+export interface FeatureFlagItem {
+  key: string;
+  description: string;
+  isEnabled: boolean;
+  /** ISO-8601. When this flag last changed, from any cause. */
+  updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
 // The merchant verification queue (doc 31 section 3, doc 32 section 2)
 // ---------------------------------------------------------------------------
 

@@ -788,6 +788,39 @@ export type Database = {
           },
         ]
       }
+      feature_flags: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          description: string
+          is_enabled: boolean
+          key: string
+          rollout: Json
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          description: string
+          is_enabled?: boolean
+          key: string
+          rollout?: Json
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          description?: string
+          is_enabled?: boolean
+          key?: string
+          rollout?: Json
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: []
+      }
       fraud_signals: {
         Row: {
           business_id: string | null

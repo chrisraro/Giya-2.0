@@ -334,19 +334,29 @@ export interface ReceiptAiDeps {
   /**
    * Prompt-injection screen over the OCR text. `null` means the screen did not
    * run, which is NOT the same as a pass; see `runParseAssist`.
+   *
+   * `businessId` is the receipt's matched tenant (`receipts.business_id`,
+   * possibly null - doc 36 Stage 5 leaves it unset on a header no business
+   * matched), threaded through so the production wiring
+   * (`defaultReceiptAiDeps`) can scope the doc 38 section 10 Redis budget cap
+   * to the right tenant. A fake in a test may ignore it.
    */
   screenForInjection: (
     text: string,
     meter: LlmMeter,
+    businessId: string | null,
   ) => Promise<InjectionScreenResult | null>;
   /**
    * One layout-guided extraction. The return value is the model's CANDIDATE,
    * shape-checked only; `validateExtraction` is what decides whether any of it
    * is true, and this pipeline never reads it directly.
+   *
+   * `businessId`: see `screenForInjection`'s note above - identical reason.
    */
   extract: (
     messages: readonly ExtractionMessage[],
     meter: LlmMeter,
+    businessId: string | null,
   ) => Promise<ExtractionCandidate | null>;
 }
 
@@ -488,8 +498,9 @@ export function findRivalMerchants(
 export function defaultReceiptAiDeps(): ReceiptAiDeps {
   return {
     embedText: (text) => embedText(text),
-    screenForInjection: (text, meter) => screenForInjection(text, { meter }),
-    extract: (messages, meter) =>
+    screenForInjection: (text, meter, businessId) =>
+      screenForInjection(text, { meter, businessId }),
+    extract: (messages, meter, businessId) =>
       completeJson({
         // buildExtractionPrompt owns the system slot (the standing rules) and
         // the user slot (the fenced, attacker-controlled receipt text); this
@@ -501,6 +512,7 @@ export function defaultReceiptAiDeps(): ReceiptAiDeps {
         schema: extractionCandidateSchema,
         kind: "parse_assist",
         meter,
+        businessId,
       }),
   };
 }
@@ -1099,7 +1111,7 @@ async function runParseAssist(input: ParseAssistInput): Promise<ParseAssistResul
 
   // Spec 4.2's trailing paragraph: the OCR text is attacker-controlled and is
   // screened before it reaches the extraction prompt.
-  const screen = await deps.ai.screenForInjection(response.rawText, meter);
+  const screen = await deps.ai.screenForInjection(response.rawText, meter, receipt.business_id);
 
   if (screen === null) {
     // THE SCREEN DID NOT RUN, which llm.ts is explicit is not a pass. It is
@@ -1151,7 +1163,7 @@ async function runParseAssist(input: ParseAssistInput): Promise<ParseAssistResul
     parseConfig: template?.config,
   });
 
-  const candidate = await deps.ai.extract(messages, meter);
+  const candidate = await deps.ai.extract(messages, meter, receipt.business_id);
   if (candidate === null) {
     // Timeout, 429, a body that failed the schema, a reasoning model, no key.
     // llm.ts collapses all of them to null on purpose, and the deterministic

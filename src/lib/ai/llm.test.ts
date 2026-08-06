@@ -13,6 +13,24 @@ const mocks = vi.hoisted(() => ({
     GROQ_MODEL: undefined,
   } as { GROQ_API_KEY: string | undefined; GROQ_MODEL: string | undefined },
   envThrows: { value: false },
+  // Every test in this file exercises the provider call itself, not the
+  // gateway's own kill-switch/budget gates - those get their own describe
+  // block below. Defaulting both to "allow" here means the ~900 lines of
+  // pre-existing tests below need no changes at all.
+  flagEnabled: { value: true },
+  budgetAllowed: { value: true },
+  // The named params below exist only so each mock's call signature matches
+  // the real function it stands in for; assertions on what was PASSED read
+  // `mock.calls` directly rather than through the parameter, so the names
+  // are structurally required but never referenced in the body.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  isFeatureEnabled: vi.fn((_key: string) => Promise.resolve(mocks.flagEnabled.value)),
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  checkAiBudget: vi.fn((_input: unknown) =>
+    Promise.resolve({ allowed: mocks.budgetAllowed.value, capMicros: 500_000, spentMicros: 0 }),
+  ),
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  recordAiSpend: vi.fn((_input: unknown) => Promise.resolve()),
 }));
 
 vi.mock("server-only", () => ({}));
@@ -25,6 +43,18 @@ vi.mock("@/lib/env", () => ({
     }
     return mocks.serverEnv;
   },
+}));
+
+vi.mock("@/lib/flags", () => ({
+  AI_PARSE_ASSIST_FLAG: "ai_parse_assist",
+  AI_ASSISTANT_FLAG: "ai_assistant",
+  AI_ANALYTICS_FLAG: "ai_analytics",
+  isFeatureEnabled: (key: string) => mocks.isFeatureEnabled(key),
+}));
+
+vi.mock("./budget", () => ({
+  checkAiBudget: (input: unknown) => mocks.checkAiBudget(input),
+  recordAiSpend: (input: unknown) => mocks.recordAiSpend(input),
 }));
 
 import {
@@ -165,6 +195,11 @@ afterEach(() => {
   mocks.serverEnv.GROQ_API_KEY = "gsk_test_key_0123456789abcdefghij";
   mocks.serverEnv.GROQ_MODEL = undefined;
   mocks.envThrows.value = false;
+  mocks.flagEnabled.value = true;
+  mocks.budgetAllowed.value = true;
+  mocks.isFeatureEnabled.mockClear();
+  mocks.checkAiBudget.mockClear();
+  mocks.recordAiSpend.mockClear();
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -1273,5 +1308,261 @@ describe("screenForInjection", () => {
 
     expect(result?.flagged).toBe(true);
     expect(doFetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Doc 38 section 1 steps 1-2: the kill switch and the budget cap
+// ---------------------------------------------------------------------------
+//
+// Every test above ran with both gates defaulted to "allow" (see the mock
+// setup at the top of this file), which is what proves those ~85 tests are
+// about the PROVIDER call, not about these gates. These tests are the
+// mirror image: the provider is never reached, so `fetchImpl` failing the
+// test by being called at all is the assertion that matters most.
+
+describe("the kill switch (doc 38 section 1 step 1)", () => {
+  it("does not call the model when the flag is off", async () => {
+    mocks.flagEnabled.value = false;
+    const doFetch = fetchReturning(groqBody());
+
+    const result = await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(result).toBeNull();
+    expect(doFetch).not.toHaveBeenCalled();
+    // Named mutant: drop the `if (!(await isFeatureEnabled(...))) return null`
+    // branch entirely. Killed by `doFetch` being called - the gate would no
+    // longer stop the request.
+  });
+
+  it("checks the parse_assist flag for a completeJson call (kind defaults to parse_assist)", async () => {
+    const doFetch = fetchReturning(groqBody());
+
+    await completeJson({ prompt: PROMPT, schema: PARSE_SCHEMA, fetchImpl: asFetch(doFetch) });
+
+    expect(mocks.isFeatureEnabled).toHaveBeenCalledWith("ai_parse_assist");
+    // Named mutant: check a hardcoded/wrong flag key (e.g. "ai_assistant").
+    // Killed - a caller asking about parse-assist must gate on that flag,
+    // not another surface's.
+  });
+
+  it("checks the analytics flag when the caller passes kind: 'analytics'", async () => {
+    const doFetch = fetchReturning(groqBody());
+
+    await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      kind: "analytics",
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(mocks.isFeatureEnabled).toHaveBeenCalledWith("ai_analytics");
+  });
+
+  it("calls the model when the flag is on", async () => {
+    mocks.flagEnabled.value = true;
+    const doFetch = fetchReturning(groqBody());
+
+    const result = await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(result).toEqual({ total_centavos: 15_000, merchant_name: "KAPE" });
+    expect(doFetch).toHaveBeenCalledTimes(1);
+    // Named mutant: invert the flag check (`if (await isFeatureEnabled(...))
+    // return null`). Killed - an ENABLED flag must let the call through, not
+    // block it; paired with the "flag is off" test above, the two together
+    // kill a mutant that hardcodes the branch outcome either way.
+  });
+
+  it("does not gate a kind with no registered flag (ocr)", async () => {
+    mocks.flagEnabled.value = false; // if this were consulted, the call would be blocked
+    const doFetch = fetchReturning(groqBody());
+
+    const result = await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      kind: "ocr",
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(result).not.toBeNull();
+    expect(doFetch).toHaveBeenCalledTimes(1);
+    expect(mocks.isFeatureEnabled).not.toHaveBeenCalled();
+    // Named mutant: fall back to a default flag key (e.g. "ai_parse_assist")
+    // for a kind absent from KILL_SWITCH_FLAG_BY_KIND instead of skipping
+    // the gate. Killed - with `flagEnabled` forced to `false`, any lookup at
+    // all would block the call and doFetch would never fire.
+  });
+});
+
+describe("the budget cap (doc 38 section 1 step 2, section 10)", () => {
+  it("does not call the model when the budget is exceeded", async () => {
+    mocks.budgetAllowed.value = false;
+    const doFetch = fetchReturning(groqBody());
+
+    const result = await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      businessId: "11111111-1111-4111-8111-111111111111",
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(result).toBeNull();
+    expect(doFetch).not.toHaveBeenCalled();
+    // Named mutant: drop the `if (!budget.allowed) return null` branch.
+    // Killed by `doFetch` being called despite an exceeded budget.
+  });
+
+  it("calls the model when the budget allows it", async () => {
+    mocks.budgetAllowed.value = true;
+    const doFetch = fetchReturning(groqBody());
+
+    const result = await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      businessId: "11111111-1111-4111-8111-111111111111",
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(result).not.toBeNull();
+    expect(doFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the caller's businessId and a worst-case cost estimate through to checkAiBudget", async () => {
+    const doFetch = fetchReturning(groqBody());
+
+    await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      businessId: "11111111-1111-4111-8111-111111111111",
+      maxTokens: 400,
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(mocks.checkAiBudget).toHaveBeenCalledTimes(1);
+    const call = at(mocks.checkAiBudget.mock.calls, 0)[0] as unknown as {
+      businessId: string | null;
+      estimatedCostMicros: number;
+    };
+    expect(call.businessId).toBe("11111111-1111-4111-8111-111111111111");
+    expect(call.estimatedCostMicros).toBeGreaterThan(0);
+    // Named mutant: pass `null` instead of `request.businessId` to
+    // checkAiBudget. Killed - the recorded call would carry the wrong
+    // tenant, and a receipt's business could never be budget-capped.
+  });
+
+  it("treats an omitted businessId as null, scoping nothing", async () => {
+    const doFetch = fetchReturning(groqBody());
+
+    await completeJson({ prompt: PROMPT, schema: PARSE_SCHEMA, fetchImpl: asFetch(doFetch) });
+
+    const call = at(mocks.checkAiBudget.mock.calls, 0)[0] as unknown as { businessId: string | null };
+    expect(call.businessId).toBeNull();
+  });
+
+  it("does not check the budget for a kind with no registered flag (ocr)", async () => {
+    mocks.budgetAllowed.value = false; // if this were consulted, the call would be blocked
+    const doFetch = fetchReturning(groqBody());
+
+    const result = await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      kind: "ocr",
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(result).not.toBeNull();
+    expect(mocks.checkAiBudget).not.toHaveBeenCalled();
+  });
+
+  it("records the ACTUAL metered cost against the budget after a successful call", async () => {
+    const doFetch = fetchReturning(groqBody()); // USAGE: 1_500 in / 300 out tokens
+    const expectedCost = computeCostMicros("llama-3.3-70b-versatile", 1_500, 300);
+
+    await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      businessId: "11111111-1111-4111-8111-111111111111",
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(mocks.recordAiSpend).toHaveBeenCalledTimes(1);
+    const call = at(mocks.recordAiSpend.mock.calls, 0)[0] as unknown as {
+      businessId: string | null;
+      costMicros: number;
+    };
+    expect(call.businessId).toBe("11111111-1111-4111-8111-111111111111");
+    expect(call.costMicros).toBe(expectedCost);
+    // Named mutant: pass `estimatedCostMicros` (the pre-call guess) instead
+    // of `usage.costMicros` (the provider-reported actual) to recordAiSpend.
+    // Killed - the two differ whenever the completion is shorter than
+    // maxTokens, which this fixture's 300-of-1024 tokens exercises.
+  });
+
+  it("still records spend when the answer comes back unusable (empty content) - the tokens were billed regardless", async () => {
+    const doFetch = fetchReturning(groqBody({ content: "" })); // empty content -> null
+
+    const result = await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      businessId: "11111111-1111-4111-8111-111111111111",
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(result).toBeNull();
+    expect(mocks.recordAiSpend).toHaveBeenCalledTimes(1);
+    // Named mutant: only call recordAiSpend on the SUCCESS return path
+    // (after the content/finish-reason checks) instead of right after
+    // `usage` is computed. Killed - this fixture's provider response bills
+    // real tokens (`usage` in the wire body) even though the content is
+    // empty, so an unusable answer must still be metered against the
+    // budget; the module's own comment says this in nearly these words for
+    // `reportUsage` immediately above the call this mirrors.
+  });
+
+  it("never records spend for a call that never reached the provider (no api key)", async () => {
+    mocks.serverEnv.GROQ_API_KEY = undefined;
+    const doFetch = fetchReturning(groqBody());
+
+    const result = await completeJson({
+      prompt: PROMPT,
+      schema: PARSE_SCHEMA,
+      businessId: "11111111-1111-4111-8111-111111111111",
+      fetchImpl: asFetch(doFetch),
+    });
+
+    expect(result).toBeNull();
+    expect(doFetch).not.toHaveBeenCalled();
+    expect(mocks.recordAiSpend).not.toHaveBeenCalled();
+    // Named mutant: call recordAiSpend unconditionally, even on the "no key
+    // configured" early return. Killed - nothing was ever billed on this
+    // path, so nothing may be recorded as spend.
+  });
+
+  it("never mints a usable answer on a capped call - the same null the flag-off path returns", async () => {
+    mocks.budgetAllowed.value = false;
+    const doFetch = fetchReturning(groqBody());
+
+    const capped = await completeJson({ prompt: PROMPT, schema: PARSE_SCHEMA, fetchImpl: asFetch(doFetch) });
+
+    mocks.budgetAllowed.value = true;
+    mocks.flagEnabled.value = false;
+    const flaggedOff = await completeJson({ prompt: PROMPT, schema: PARSE_SCHEMA, fetchImpl: asFetch(doFetch) });
+
+    // Same shape, not merely the same value: both are `null`, which is the
+    // one signal `runParseAssist` (receipts/server/process.ts) knows how to
+    // read as "take the deterministic fallback, never invent or award a
+    // value". A capped call returning anything else - an empty object, a
+    // partially-filled candidate - would be read as a real (if sparse)
+    // answer instead of "the gateway declined to call the model".
+    expect(capped).toBeNull();
+    expect(flaggedOff).toBeNull();
   });
 });
