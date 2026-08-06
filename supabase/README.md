@@ -381,6 +381,33 @@ outcome is visible; the push is owed to the notifications slice.
 
 ## Known limitations (tracked)
 
+- **Points-expiry warnings burst for a dense-lot consumer (I-D).** The warn
+  job notifies per *lot*: the dedupe key is `(pair, horizon, soonest lot's
+  expires_at)`, so a new notice fires each time a different lot becomes the
+  soonest. That is correct and deliberate - it is what stopped 0046's nightly
+  duplicate - but it means the archetypal daily-coffee customer, who earned on
+  ~30 consecutive days twelve months ago, enters a tail phase where one lot
+  expires each night and promotes the next. Each newly-promoted lot is already
+  inside 7 days, so BOTH horizons fire together: roughly two notices a day for
+  about thirty days, in the channel `src/features/notifications/kinds.ts`
+  itself calls the one that "cannot be recalled".
+  The fix is to coalesce rather than to re-key: one notice per pair per horizon
+  per *window* (bucket on the horizon edge's Manila day rather than on lot
+  identity), with copy naming a range - "1,250 pts expire between Mar 3 and
+  Apr 2". At most one 30d and one 7d message per pair per rolling period
+  regardless of lot density, which matches how a consumer experiences this: as
+  one situation, not thirty. Not yet built; no consumer has hit it because no
+  lot is near expiry yet.
+- **Backfilled expiry lots get no grace period (I-B, decision recorded).**
+  `0042`'s backfill stamps `expires_at = created_at + 12 months` on earn rows
+  that predate the column, so a row older than twelve months is past due the
+  moment it is stamped and is swept without ever being warned (the warn job
+  only sees `expires_at > now()`). This is deliberate: the 12-month policy has
+  been published in the consumer terms since before those points were earned,
+  so honouring it is not retroactive. Pinned by the pgTAP fixtures asserting a
+  backfilled past-due lot is swept and never warned. Recorded here rather than
+  in 0042, which must not describe anything that came after it.
+
 - `private.jwt_biz_role()` keeps doc 12's table-lookup fallback for `biz_overflow` users (>20 memberships). Under RLS this recurses (policy -> helper -> same table) and Postgres aborts the query for those users. [SCALE]-only surface; fixing requires a security definer lookup variant and an ADR against the Locked doc 12. Do not ship overflow accounts before that ADR.
 - The custom access token hook runs as `supabase_auth_admin` with explicit grants/policies (current Supabase-documented pattern) instead of doc 12's literal `security definer` wording. Functionally equivalent; noted as doc drift.
 - ~~**`consumers.scan_blocked_until` is now load-bearing and still self-writable.**~~ **CLOSED by `0021_consumer_selfupdate_column_fence.sql`.** `consumers_owner_update` and `profiles_owner_update` are still row-scoped only (RLS cannot express column grants), but `authenticated` no longer holds table-level UPDATE on either table. It now holds UPDATE on exactly these columns, and nothing else:
@@ -498,8 +525,13 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0046_points_expiry_warn_projected_remainder.sql | 20260806050158 | 0046_points_expiry_warn_projected_remainder |
 | 0047_points_expiry_append_only_narrow_guard.sql | 20260806054229 | 0047_points_expiry_append_only_narrow_guard |
 | 0048_points_expiry_warn_window_stable_ordering.sql | 20260806054312 | 0048_points_expiry_warn_window_stable_ordering |
+| 0049_points_expiry_warn_honest_deadline.sql | (applied 2026-08-06) | 0049_points_expiry_warn_honest_deadline |
 
-**These versions are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`.**
+**Rows 0001-0035 are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`; rows 0036-0049 were applied later, and 0042-0049 on 2026-08-06.** The
+sentence below describes the replay only. It does NOT describe 0042-0049: one
+of those (0047) had its *content* reach the database out-of-band BEFORE its own
+ledger row existed, which is recorded in the Notes bullet at the end of this
+section. Read that bullet before restoring any environment from this ledger.
 Every migration was applied in file order in a single pass, so unlike the
 first run there is no ordering inversion and no ledger-name drift: live names
 match the file base names 1:1, with one exception noted in the table: 0032 was
