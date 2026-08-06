@@ -302,15 +302,29 @@ describe("ProfileEditForm: the avatar", () => {
 
   it("CRITICAL: clears the file input so the SAME photo can be retried", async () => {
     // Without this a failed upload cannot be retried without picking a
-    // different file: the input still holds the old value, so choosing it again
-    // fires no change event.
+    // DIFFERENT file: a file input whose value is unchanged fires no `change`
+    // event when the same file is chosen again.
+    //
+    // Asserted by watching the value SETTER rather than by reading `.value`
+    // back. jsdom's `fireEvent.change(input, { target: { files } })` never
+    // populates `.value` in the first place, so `expect(input.value).toBe("")`
+    // is true whether or not the component clears anything - a green assertion
+    // about nothing.
     mocks.saveConsumerAvatar.mockResolvedValue({ ok: false, message: "nope" });
     renderForm({ avatarUrl: null });
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const writes: string[] = [];
+    Object.defineProperty(input, "value", {
+      configurable: true,
+      get: () => "",
+      set: (next: string) => writes.push(next),
+    });
 
     pickPhoto();
     await screen.findByRole("alert");
 
-    expect((document.querySelector('input[type="file"]') as HTMLInputElement).value).toBe("");
+    expect(writes).toContain("");
   });
 
   it("offers only the formats the bucket accepts", () => {
