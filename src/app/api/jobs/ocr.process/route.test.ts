@@ -36,8 +36,10 @@ vi.mock("@/lib/supabase/service", () => ({
   createServiceRoleClient: () => createServiceRoleClient(),
 }));
 
+type FinishResult = { kind: "recorded" } | { kind: "lease-lost" } | { kind: "error"; reason: string };
+
 const claimJob = vi.fn();
-const finishJob = vi.fn(async () => undefined);
+const finishJob = vi.fn(async (): Promise<FinishResult> => ({ kind: "recorded" }));
 vi.mock("@/lib/queue/claim", () => ({
   claimJob: (args: unknown) => claimJob(args),
   finishJob: (...args: unknown[]) => finishJob(...(args as [])),
@@ -220,7 +222,7 @@ describe("a verified request", () => {
       { job_id: JOB_ID, receipt_id: RECEIPT_ID },
       expect.objectContaining({ supabase: serviceClient }),
     );
-    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, { kind: "succeeded" });
+    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, 1, { kind: "succeeded" });
   });
 
   it("hands the real pipeline to the worker", async () => {
@@ -238,7 +240,9 @@ describe("a verified request", () => {
 
     expect(response.status).toBe(200);
     expect(runOcrProcess).not.toHaveBeenCalled();
-    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, {
+    // No claim was made for this delivery - it never got past payload
+    // parsing - so there is no lease to guard the write on.
+    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, null, {
       kind: "dead",
       error: "payload failed schema validation",
     });
@@ -261,7 +265,7 @@ describe("terminal outcomes stop the retries", () => {
       const response = await post(VALID_BODY, sign(VALID_BODY));
 
       expect(response.status).toBe(200);
-      expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, { kind: "succeeded" });
+      expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, 1, { kind: "succeeded" });
     },
   );
 
@@ -272,10 +276,25 @@ describe("terminal outcomes stop the retries", () => {
     expect(response.status).toBe(200);
     // `dead`, not `succeeded`: nothing was processed, and the operator should
     // see it in the DLQ view.
-    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, {
+    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, 1, {
       kind: "dead",
       error: "receipt does not exist",
     });
+  });
+});
+
+describe("a lost lease", () => {
+  // t2-8: this invocation was reclaimed by another while it was still
+  // running - finishJob(...) resolves "lease-lost" rather than writing
+  // anything. The route must not turn that into a retry: the reclaiming
+  // invocation now owns the row and will report its own outcome, so asking
+  // QStash to redeliver would only run the work a third time.
+  it("does not turn a lease-lost outcome into a retryable response", async () => {
+    finishJob.mockResolvedValueOnce({ kind: "lease-lost" });
+    const response = await post(VALID_BODY, sign(VALID_BODY));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, status: "approved" });
   });
 });
 
@@ -293,6 +312,7 @@ describe("retryable outcomes ask for another delivery", () => {
       expect(finishJob).toHaveBeenCalledWith(
         serviceClient,
         JOB_ID,
+        1,
         expect.objectContaining({ kind: "failed" }),
       );
     },
@@ -306,6 +326,7 @@ describe("retryable outcomes ask for another delivery", () => {
     expect(finishJob).toHaveBeenCalledWith(
       serviceClient,
       JOB_ID,
+      1,
       expect.objectContaining({ kind: "failed" }),
     );
   });
@@ -326,6 +347,7 @@ describe("retryable outcomes ask for another delivery", () => {
     expect(finishJob).toHaveBeenCalledWith(
       serviceClient,
       JOB_ID,
+      1,
       expect.objectContaining({ kind: "failed" }),
     );
   });
@@ -430,7 +452,7 @@ describe("the heartbeat", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, status: "approved" });
     expect(runOcrProcess).toHaveBeenCalledTimes(1);
-    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, { kind: "succeeded" });
+    expect(finishJob).toHaveBeenCalledWith(serviceClient, JOB_ID, 1, { kind: "succeeded" });
     // The fallback handle's own stop() is a fresh no-op, not the shared
     // `heartbeatStop` mock - so this only asserts nothing blew up on the way
     // to a real, correctly-reported outcome.

@@ -160,7 +160,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       `${LOG_PREFIX} payload does not match the schema for job ${jobId ?? "(unreadable)"}`,
     );
     if (jobId !== null) {
-      await finishJob(supabase, jobId, { kind: "dead", error: "payload failed schema validation" });
+      // No claim was made - this invocation never reached step 3 - so there
+      // is no lease to guard on. `attempts: null` is finishJob's explicit
+      // escape hatch for exactly that; see its doc comment.
+      await finishJob(supabase, jobId, null, { kind: "dead", error: "payload failed schema validation" });
     }
     return NextResponse.json({ ok: false }, { status: 200 });
   }
@@ -237,14 +240,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         // approved | review | rejected. The pipeline decided; the job did its
         // job. A rejection is a SUCCESSFUL job with a negative domain outcome
         // (doc 39's `ocr.process` failure notes), not a failed one.
-        await finishJob(supabase, jobId, { kind: "succeeded" });
+        //
+        // The result of this write is not consumed: whether it records
+        // normally or reports "lease-lost" (t2-8 - this invocation was
+        // reclaimed while still running), the response to QStash is decided
+        // by `result` above and must not change. A lost lease means another
+        // invocation now owns the row and will report its own outcome.
+        await finishJob(supabase, jobId, claim.job.attempts, { kind: "succeeded" });
         return NextResponse.json({ ok: true, status: result.status }, { status: 200 });
 
       case "gone":
         // A signed message for a receipt that is not there. Re-delivery cannot
         // make it exist, so 200 - but `dead`, not `succeeded`: nothing was
         // processed, and the operator should see it in the DLQ view.
-        await finishJob(supabase, jobId, { kind: "dead", error: "receipt does not exist" });
+        await finishJob(supabase, jobId, claim.job.attempts, { kind: "dead", error: "receipt does not exist" });
         return NextResponse.json({ ok: false, dead: true }, { status: 200 });
 
       case "retryable":
@@ -252,14 +261,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         // predicate (`status in ('queued','failed')`) lets the next delivery
         // pick the job up; the receipt's own status is left exactly as the
         // pipeline left it, which is the state the next attempt expects.
-        await finishJob(supabase, jobId, {
+        await finishJob(supabase, jobId, claim.job.attempts, {
           kind: "failed",
           error: `receipt still '${result.status}' after the attempt`,
         });
         return new NextResponse(null, { status: 503 });
 
       case "unreadable":
-        await finishJob(supabase, jobId, {
+        await finishJob(supabase, jobId, claim.job.attempts, {
           kind: "failed",
           error: `could not read the receipt outcome: ${result.reason}`,
         });
@@ -270,7 +279,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // Retryable, because nothing here proves another attempt would fail and
     // `processReceipt` is safe to run again by construction.
     console.error(`${LOG_PREFIX} unexpected failure running job ${jobId}`, error);
-    await finishJob(supabase, jobId, { kind: "failed", error: "unexpected worker failure" });
+    await finishJob(supabase, jobId, claim.job.attempts, { kind: "failed", error: "unexpected worker failure" });
     return new NextResponse(null, { status: 503 });
   } finally {
     // Every exit above - each `return` in the switch, and the catch above -

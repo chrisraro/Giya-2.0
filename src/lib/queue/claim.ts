@@ -282,9 +282,12 @@ export async function claimJob(input: ClaimJobInput): Promise<ClaimResult> {
  *   and this arm will reclaim a worker that is still running. That trade is
  *   deliberate and is doc 39's own design (60s of exposure beats 120s of
  *   wasted `held` responses on a dead row), but it is an inference, not a
- *   proof, and the difference matters downstream: see `finishJob`, which
- *   filters on `id` alone and was previously protected by the guarantee this
- *   arm gives up.
+ *   proof, and the difference matters downstream: `finishJob` (t2-8) now
+ *   guards its own write on the same `(id, attempts, status='running')` lease
+ *   tuple `heartbeat.ts`'s refresh() guards on, rather than resting on the
+ *   guarantee this arm gives up - so a worker this arm reclaims wrongly can
+ *   no longer overwrite the terminal status of the worker that now owns the
+ *   row.
  *
  *   Everything else - no `heartbeat_at` at all, or one still equal to
  *   `started_at` because no refresh has landed yet - falls back to
@@ -344,15 +347,58 @@ export type JobOutcome =
   /** Terminal: retrying cannot help (doc 39's failure taxonomy). */
   | { readonly kind: "dead"; readonly error: string };
 
+export type FinishResult =
+  | { readonly kind: "recorded" }
+  /**
+   * The guarded write matched zero rows: this invocation's lease on
+   * `(id, attempts)` has moved on, either because a reclaim already won the
+   * row (another `claimJob` bumped `attempts`) or because a previous
+   * `finishJob` call already moved the row's status off `running`. Not an
+   * error - the work this invocation did may well have succeeded, it simply
+   * no longer owns the row to say so. See `finishJob`'s own comment for why
+   * this must never become a retryable failure.
+   */
+  | { readonly kind: "lease-lost" }
+  | { readonly kind: "error"; readonly reason: string };
+
 /**
  * Record the outcome on the job row. Doc 39 step 5.
  *
- * Best effort by design, and it returns nothing. The work has already happened
- * by the time this runs, so a failure to write the outcome must not change what
- * the route tells QStash: reporting a 5xx because the bookkeeping failed would
- * re-run a send that already went out. What it costs instead is a row that the
- * reclaim path above will eventually pick up, which is the recoverable
- * direction.
+ * `attempts` is the ownership half of the `(id, attempts)` lease `claimJob`
+ * granted this invocation - `ClaimResult`'s `job.attempts` on the `"claimed"`
+ * branch, the same value `startHeartbeat` is handed. The write is guarded on
+ * `id` + that `attempts` + `status = 'running'`, which is deliberately the
+ * SAME ownership tuple `heartbeat.ts`'s `refresh()` guards its own write on -
+ * see that module's header for why this exact tuple and not something
+ * looser. Before t2-6 that guard would have been redundant: reclaim only
+ * happened past `2 * maxDuration`, so a reclaim could not race a live
+ * worker and a stale `finishJob` filtering on `id` alone was harmless. t2-6
+ * gave the live heartbeat arm a 60s window that is an inference rather than
+ * a proof (see `isStale`'s header), which means a worker CAN be reclaimed
+ * while it is still genuinely running - and without this guard, that
+ * worker's own late `finishJob` would overwrite the reclaiming worker's live
+ * claim with a terminal status that was never true for the row it now is.
+ * Matching `attempts` alone is not enough either: a second `finishJob` call
+ * for the same claim (e.g. a caller bug, or the schema-failure branch racing
+ * a claim that already ran) must not resurrect an already-terminal row, so
+ * `status = 'running'` is required too, exactly as `heartbeat.ts` requires it.
+ *
+ * Pass `attempts: null` ONLY when no claim was ever established for this
+ * jobId by THIS invocation - the schema-validation-failure branches in both
+ * worker routes, which mark a job dead from a payload that failed to parse
+ * BEFORE `claimJob` ever ran. There is no lease to check there, so the write
+ * is guarded on `id` alone, exactly as every `finishJob` call was before this
+ * task.
+ *
+ * Best effort by design. The work has already happened by the time this
+ * runs, so a failure to write the outcome - for ANY reason, including a lost
+ * lease - must not change what the route tells QStash: reporting a 5xx
+ * because the bookkeeping failed (or lost a race) would re-run a send that
+ * already went out, or re-run work whose real owner is already running it.
+ * What it costs instead is a row that the reclaim path above will eventually
+ * resolve on its own, which is the recoverable direction. Callers are not
+ * required to inspect the return value for correctness; it exists so a
+ * lease-lost outcome can be logged and dropped rather than silently ignored.
  *
  * A `failed` job is left with its attempt count intact and no `finished_at`,
  * because the 0029 constraint `jobs_terminal_finished_at` says a non-terminal
@@ -362,23 +408,57 @@ export type JobOutcome =
 export async function finishJob(
   supabase: SupabaseClient<Database>,
   jobId: string,
+  attempts: number | null,
   outcome: JobOutcome,
   now: Date = new Date(),
-): Promise<void> {
+): Promise<FinishResult> {
   const terminal = outcome.kind !== "failed";
+  const patch = {
+    status: outcome.kind,
+    last_error: outcome.kind === "succeeded" ? null : outcome.error,
+    finished_at: terminal ? now.toISOString() : null,
+  };
+
   try {
-    const { error } = await supabase
+    if (attempts === null) {
+      // No claim to guard on - see the doc comment above. Filtered on `id`
+      // alone, unchanged from before this task.
+      const { error } = await supabase.from("jobs").update(patch).eq("id", jobId);
+      if (error !== null) {
+        console.error(`${LOG_PREFIX} could not record outcome ${outcome.kind} for job ${jobId}`, error);
+        return { kind: "error", reason: error.message };
+      }
+      return { kind: "recorded" };
+    }
+
+    const { data, error } = await supabase
       .from("jobs")
-      .update({
-        status: outcome.kind,
-        last_error: outcome.kind === "succeeded" ? null : outcome.error,
-        finished_at: terminal ? now.toISOString() : null,
-      })
-      .eq("id", jobId);
+      .update(patch)
+      .eq("id", jobId)
+      .eq("attempts", attempts)
+      .eq("status", "running")
+      .select("id")
+      .maybeSingle<{ id: string }>();
+
     if (error !== null) {
       console.error(`${LOG_PREFIX} could not record outcome ${outcome.kind} for job ${jobId}`, error);
+      return { kind: "error", reason: error.message };
     }
+
+    if (data === null) {
+      // Zero rows matched: this invocation no longer owns the row - see
+      // `FinishResult`'s `"lease-lost"` doc above for the two ways that
+      // happens. Dropped, not retried: there is nothing here another
+      // delivery could fix.
+      console.info(
+        `${LOG_PREFIX} job ${jobId} no longer matches this invocation's claim (attempts=${attempts}, status='running'); dropping outcome ${outcome.kind}`,
+      );
+      return { kind: "lease-lost" };
+    }
+
+    return { kind: "recorded" };
   } catch (error) {
     console.error(`${LOG_PREFIX} unexpected failure recording job ${jobId}`, error);
+    return { kind: "error", reason: "unexpected failure" };
   }
 }
