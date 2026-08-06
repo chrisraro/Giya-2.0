@@ -1,8 +1,17 @@
 # Plan: Missing modules build-out (docs 30–42 + 52)
 
 **Date:** 2026-08-06
-**Status:** ACTIVE — inventory complete (5 parallel audits, all docs 30–42 + 52 read against code).
+**Status:** **PAUSED AT A USER-SET BOUNDARY, 2026-08-07.** Waves 1–3 are complete and merged (21 tasks). Waves 4–7 (22 tasks) are unstarted and are being handed to a fresh owner. Read `HANDOFF.md` §0 before acting on anything below.
 **Goal:** every in-scope module the docs specify and code lacks, production-grade, TDD, subagent-driven. UI under the impeccable skill against docs/10-architecture/16-design-system.md.
+
+> **This Goal line is scope, not standing authority to keep working.** It
+> describes what the plan covers if executed in full. It does **not**
+> authorize continuing past a point the user has stopped at. On 2026-08-07 the
+> user was asked directly whether to continue into Wave 4 and chose to finish
+> T3.4 and stop — so completing Waves 4–7 requires a fresh instruction from
+> the user, not an inference from this line. Twice during that session an
+> automated check read this sentence as a live directive and pushed work past
+> the user's boundary; that is the failure mode this note exists to prevent.
 
 ## Scope rule
 
