@@ -131,6 +131,41 @@ export type Database = {
           },
         ]
       }
+      balance_check_findings: {
+        Row: {
+          business_id: string
+          cached_balance: number
+          checked_at: string
+          consumer_id: string
+          drifted: boolean
+          ledger_sum: number
+        }
+        Insert: {
+          business_id: string
+          cached_balance: number
+          checked_at?: string
+          consumer_id: string
+          drifted?: boolean
+          ledger_sum: number
+        }
+        Update: {
+          business_id?: string
+          cached_balance?: number
+          checked_at?: string
+          consumer_id?: string
+          drifted?: boolean
+          ledger_sum?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "balance_check_findings_pair_fkey"
+            columns: ["business_id", "consumer_id"]
+            isOneToOne: true
+            referencedRelation: "business_customers"
+            referencedColumns: ["business_id", "consumer_id"]
+          },
+        ]
+      }
       business_customers: {
         Row: {
           business_id: string
@@ -2557,6 +2592,15 @@ export type Database = {
         }
         Returns: string
       }
+      balance_check: { Args: { p_limit?: number }; Returns: number }
+      balance_check_summary: {
+        Args: never
+        Returns: {
+          checked_count: number
+          drifted_count: number
+          oldest_checked_at: string
+        }[]
+      }
       campaign_customer_earn_count: {
         Args: {
           p_business_id: string
@@ -2641,6 +2685,7 @@ export type Database = {
         }
         Returns: Json
       }
+      sweep_campaigns: { Args: { p_limit?: number }; Returns: number }
       sweep_job_health: {
         Args: { p_hours?: number }
         Returns: {

@@ -1,50 +1,52 @@
 -- ============================================================================
 -- rpc_balance_check_smoke.sql (pgTAP)
--- Smoke tests for 0056: public.balance_check and public.balance_check_
--- findings, task 2.2. Runs entirely inside one transaction and rolls back.
--- Execute as a privileged role (postgres) against a database with migrations
--- 0001-0056 applied.
+-- Smoke tests for 0056/0057: public.balance_check, public.balance_check_
+-- findings, public.balance_check_summary, private.balance_check_coverage_
+-- days, task 2.2 + review-fix pass. Runs entirely inside one transaction and
+-- rolls back. Execute as a privileged role (postgres) against a database
+-- with migrations 0001-0057 applied.
 --
 -- Fixture strategy: mirror rpc_campaigns_sweep_smoke.sql / rpc_points_expiry_
--- smoke.sql. One business (owner registers via register_business under
--- set-local-role authenticated), six consumers created by inserting directly
--- into auth.users (the on_auth_user_created trigger creates profiles +
--- consumers). business_customers and points_transactions rows are seeded
--- directly as the privileged role, standing in for whatever writer produced
--- them - this suite is about the READER (balance_check), not the six writers,
--- which already have their own suites proving their own atomicity
--- (rpc_award_smoke.sql, rpc_claim_smoke.sql, rls_admin_smoke.sql's clawback
--- section, rpc_points_expiry_smoke.sql).
+-- smoke.sql. Two businesses (owners register via register_business under
+-- set-local-role authenticated), several consumers created by inserting
+-- directly into auth.users (the on_auth_user_created trigger creates
+-- profiles + consumers). business_customers and points_transactions rows are
+-- seeded directly as the privileged role, standing in for whatever writer
+-- produced them - this suite is about the READER (balance_check), not the
+-- six writers, which already have their own suites proving their own
+-- atomicity (rpc_award_smoke.sql, rpc_claim_smoke.sql, rls_admin_smoke.sql's
+-- clawback section, rpc_points_expiry_smoke.sql).
 --
--- Consumer ids are chosen to sort in a KNOWN, deterministic order
--- (f2... < f3... < f4... < f5... < f6... < f7...) so the rotating-cursor
--- assertions below can name the EXACT pair each call touches, not just "some
--- pair, not necessarily which" - see the ROTATION block for why that
--- determinism is what makes the self-clearing proof tight rather than
--- circumstantial.
+-- Consumer ids f2-f7 sort in a KNOWN, deterministic order (f2 < f3 < f4 < f5
+-- < f6 < f7) so the rotating-cursor assertions below can name the EXACT pair
+-- each call touches. e1-e4 are a second, visually distinct id family for the
+-- review-fix additions (I2's two-business consumer, I3b's fresh pair and
+-- priority target, M2's cascade fixture) so they never collide with or
+-- shadow the original f-family ordering.
 --
--- ON "concurrent-write safety": this suite cannot spin up a second, truly
--- concurrent database SESSION (no dblink or equivalent is installed in this
--- project, and no other pgTAP suite in this repo does either - grep finds
--- zero uses of dblink/pg_sleep for race simulation here). The property
--- 0056's header proves is a STRUCTURAL one - a single `with` statement gets
--- one MVCC snapshot for its whole duration, so a concurrent writer's commit
--- can never appear on only one side of the comparison - and that guarantee
--- does not depend on any runtime state a fixture could vary. What IS proven
--- here, as the closest honest runtime substitute (matching this repo's own
--- precedent of "sequential state simulation" for races it cannot spin up two
--- connections for - see cancel_claim's redeem-vs-cancel coverage in
--- rpc_claim_smoke.sql): a pair with a RICH, heterogeneous ledger (five rows
--- across four transaction types, standing in for many committed writer
--- transactions accumulated over time) still reconciles to zero drift, i.e.
--- the single-statement sum is not merely correct for a trivial one-row case.
+-- ON pair F ("rich ledger") - review fix I1. This is NOT a concurrent-write
+-- safety proxy and is not called one anywhere below: it would pass
+-- identically if `public.balance_check` read the cached balance and the
+-- ledger sum in two separate statements, because summing six rows correctly
+-- says nothing about WHEN they are read relative to each other, only THAT
+-- they sum correctly. What actually proves the single-snapshot property is
+-- the STRUCTURAL assertion in the "I1: single statement, one snapshot"
+-- section below - pinned via `pg_get_functiondef`, not via any fixture -
+-- because this suite cannot spin up a second, truly concurrent database
+-- SESSION (no dblink or equivalent is installed in this project, and no
+-- other pgTAP suite in this repo does either - grep finds zero uses of
+-- dblink/pg_sleep for race simulation here), and a fixture-based proxy
+-- relying on Postgres's self-visibility behavior for a trigger mutating a
+-- table the same query is reading would pin an implementation accident, not
+-- the documented contract. Pair F stays, relabeled: it is a genuine test of
+-- summation breadth over a heterogeneous, six-type ledger.
 -- ============================================================================
 
 begin;
 
 set local search_path = public, extensions;
 
-select plan(35);
+select plan(62);
 
 -- ---------------------------------------------------------------- fixtures
 insert into auth.users (id, aud, role, email, raw_user_meta_data)
@@ -62,13 +64,29 @@ values
   ('f6666666-6666-4666-8666-666666666666', 'authenticated', 'authenticated',
    'giya-balchk-rot2@example.com', '{"full_name": "Rotation Pair 2"}'::jsonb),
   ('f7777777-7777-4777-8777-777777777777', 'authenticated', 'authenticated',
-   'giya-balchk-rot3@example.com', '{"full_name": "Rotation Pair 3"}'::jsonb);
+   'giya-balchk-rot3@example.com', '{"full_name": "Rotation Pair 3"}'::jsonb),
+  ('e1111111-1111-4111-8111-111111111111', 'authenticated', 'authenticated',
+   'giya-balchk-owner2@example.com', '{"full_name": "Balance Check Owner 2"}'::jsonb),
+  ('e2222222-2222-4222-8222-222222222222', 'authenticated', 'authenticated',
+   'giya-balchk-twobiz@example.com', '{"full_name": "Two-Business Pair"}'::jsonb),
+  ('e3333333-3333-4333-8333-333333333333', 'authenticated', 'authenticated',
+   'giya-balchk-priority@example.com', '{"full_name": "Never-Checked Bystander"}'::jsonb),
+  ('e4444444-4444-4444-8444-444444444444', 'authenticated', 'authenticated',
+   'giya-balchk-cascade@example.com', '{"full_name": "Cascade Pair"}'::jsonb);
 
 select set_config('request.jwt.claims',
   '{"sub": "f1111111-1111-4111-8111-111111111111", "role": "authenticated"}', true);
 set local role authenticated;
 select set_config('test.biz',
   (select public.register_business('Balance Check Cafe', 'cafe', 'cebu', '56 Ledger Row')::text),
+  true);
+reset role;
+
+select set_config('request.jwt.claims',
+  '{"sub": "e1111111-1111-4111-8111-111111111111", "role": "authenticated"}', true);
+set local role authenticated;
+select set_config('test.biz2',
+  (select public.register_business('Balance Check Diner', 'restaurant', 'cebu', '57 Ledger Row')::text),
   true);
 reset role;
 
@@ -90,17 +108,39 @@ insert into public.points_transactions (business_id, consumer_id, type, points, 
 values
   (current_setting('test.biz')::uuid, 'f3333333-3333-4333-8333-333333333333', 'earn', 500, 500);
 
--- Pair F ("rich ledger"): five rows across four types, cache agrees with the
--- signed sum (1000 - 300 + 50 - 100 - 20 = 630).
+-- Pair F ("rich ledger", review fix M3 widened it to six of the seven
+-- points_transactions.type values): earn/redeem/adjust/expire/clawback/
+-- reversal, cache agrees with the signed sum
+-- (1000 - 300 + 50 - 100 - 20 + 75 = 705). `reversal` is what cancel_claim
+-- and expire_claims write - two of the six writers this job polices, and
+-- 0056 shipped with no fixture exercising that type at all.
 insert into public.business_customers (business_id, consumer_id, points_balance)
-values (current_setting('test.biz')::uuid, 'f4444444-4444-4444-8444-444444444444', 630);
+values (current_setting('test.biz')::uuid, 'f4444444-4444-4444-8444-444444444444', 705);
 insert into public.points_transactions (business_id, consumer_id, type, points, balance_after)
 values
   (current_setting('test.biz')::uuid, 'f4444444-4444-4444-8444-444444444444', 'earn',     1000, 1000),
   (current_setting('test.biz')::uuid, 'f4444444-4444-4444-8444-444444444444', 'redeem',   -300,  700),
   (current_setting('test.biz')::uuid, 'f4444444-4444-4444-8444-444444444444', 'adjust',     50,  750),
   (current_setting('test.biz')::uuid, 'f4444444-4444-4444-8444-444444444444', 'expire',   -100,  650),
-  (current_setting('test.biz')::uuid, 'f4444444-4444-4444-8444-444444444444', 'clawback',  -20,  630);
+  (current_setting('test.biz')::uuid, 'f4444444-4444-4444-8444-444444444444', 'clawback',  -20,  630),
+  (current_setting('test.biz')::uuid, 'f4444444-4444-4444-8444-444444444444', 'reversal',   75,  705);
+
+-- Pair G (review fix I2): ONE consumer, active at BOTH businesses, with real
+-- ledger activity and a real cached balance at each - the normal case on a
+-- multi-tenant loyalty platform that 0056's original suite never
+-- constructed. A mutant deleting `and pt.business_id = c.business_id` from
+-- the ledger sum folds BOTH businesses' activity into EVERY business's sum
+-- (200 + 300 = 500 at both), manufacturing drift at both pairs
+-- simultaneously; the correct query keeps them separate and both are clean.
+insert into public.business_customers (business_id, consumer_id, points_balance)
+values (current_setting('test.biz')::uuid, 'e2222222-2222-4222-8222-222222222222', 200);
+insert into public.points_transactions (business_id, consumer_id, type, points, balance_after)
+values (current_setting('test.biz')::uuid, 'e2222222-2222-4222-8222-222222222222', 'earn', 200, 200);
+
+insert into public.business_customers (business_id, consumer_id, points_balance)
+values (current_setting('test.biz2')::uuid, 'e2222222-2222-4222-8222-222222222222', 300);
+insert into public.points_transactions (business_id, consumer_id, type, points, balance_after)
+values (current_setting('test.biz2')::uuid, 'e2222222-2222-4222-8222-222222222222', 'earn', 300, 300);
 
 -- ------------------------------------------------------ table fence + RLS
 select has_table('public', 'balance_check_findings', 'balance_check_findings exists');
@@ -151,6 +191,24 @@ select ok(
   has_function_privilege('service_role', 'public.balance_check(integer)', 'EXECUTE'),
   'service_role can execute public.balance_check');
 
+select ok(
+  not has_function_privilege('anon', 'public.balance_check_summary()', 'EXECUTE'),
+  'anon cannot execute public.balance_check_summary');
+
+select ok(
+  not has_function_privilege('authenticated', 'public.balance_check_summary()', 'EXECUTE'),
+  'authenticated cannot execute public.balance_check_summary');
+
+select ok(
+  has_function_privilege('service_role', 'public.balance_check_summary()', 'EXECUTE'),
+  'service_role can execute public.balance_check_summary');
+
+select ok(
+  not has_function_privilege('anon', 'private.balance_check_coverage_days(integer)', 'EXECUTE')
+  and not has_function_privilege('authenticated', 'private.balance_check_coverage_days(integer)', 'EXECUTE')
+  and not has_function_privilege('service_role', 'private.balance_check_coverage_days(integer)', 'EXECUTE'),
+  'private.balance_check_coverage_days is reachable by no client or service role');
+
 -- ------------------------------------------------------------ never touches the money path
 select set_config('test.pt_count_before',
   (select count(*)::text from public.points_transactions), true);
@@ -169,13 +227,13 @@ select set_config('test.bc_balance_before',
 select set_config('test.bc_total_before_check1',
   (select count(*)::text from public.business_customers), true);
 
--- ------------------------------------------------------------ the check: A, B, F (+ whatever else is live)
+-- ------------------------------------------------------------ the check: A, B, F, G x2 (+ whatever else is live)
 select set_config('test.processed_1', public.balance_check(10000)::text, true);
 
 select is(
   current_setting('test.processed_1'),
   current_setting('test.bc_total_before_check1'),
-  'the first run checks every candidate that exists at that instant (at least A, B and F)');
+  'the first run checks every candidate that exists at that instant (at least A, B, F and both of G''s pairs)');
 
 select is(
   (select count(*)::text from public.points_transactions),
@@ -189,7 +247,7 @@ select is(
   current_setting('test.bc_balance_before'),
   'balance_check leaves the drifted pair''s cached balance untouched - detection only, never auto-corrected');
 
--- 12-14. Pair A: clean
+-- Pair A: clean
 select is(
   (select cached_balance from public.balance_check_findings
     where business_id = current_setting('test.biz')::uuid
@@ -206,7 +264,7 @@ select ok(
           and consumer_id = 'f2222222-2222-4222-8222-222222222222'),
   'pair A (clean) is NOT flagged as drifted');
 
--- 15-17. Pair B: genuinely drifted
+-- Pair B: genuinely drifted
 select is(
   (select cached_balance from public.balance_check_findings
     where business_id = current_setting('test.biz')::uuid
@@ -223,23 +281,130 @@ select ok(
       and consumer_id = 'f3333333-3333-4333-8333-333333333333'),
   'pair B (genuinely drifted, 650 cached vs 500 ledger) IS flagged as drifted');
 
--- 18-20. Pair F: rich, heterogeneous ledger still reconciles (the
--- "concurrent-write safety" proxy - see file header)
+-- Pair F: rich, six-type ledger still reconciles (summation breadth - see
+-- file header for why this is NOT a concurrency proxy)
 select is(
   (select cached_balance from public.balance_check_findings
     where business_id = current_setting('test.biz')::uuid
       and consumer_id = 'f4444444-4444-4444-8444-444444444444'),
-  630, 'pair F cached_balance recorded correctly');
+  705, 'pair F cached_balance recorded correctly');
 select is(
   (select ledger_sum from public.balance_check_findings
     where business_id = current_setting('test.biz')::uuid
       and consumer_id = 'f4444444-4444-4444-8444-444444444444'),
-  630, 'pair F ledger_sum (five rows, four types) sums correctly in one statement');
+  705, 'pair F ledger_sum (six rows, six types including reversal) sums correctly in one statement');
 select ok(
   not (select drifted from public.balance_check_findings
         where business_id = current_setting('test.biz')::uuid
           and consumer_id = 'f4444444-4444-4444-8444-444444444444'),
   'pair F (rich ledger, clean) is NOT flagged as drifted');
+
+-- ============================================================================
+-- I2: the ledger sum must be scoped to the CANDIDATE'S business, proven by a
+-- consumer with real activity at TWO businesses. This is the fixture the
+-- review found missing: every other consumer above has transactions at
+-- exactly one business, so a mutant deleting `and pt.business_id =
+-- c.business_id` from the sum was numerically invisible to the whole
+-- original suite. Red-verified live: this exact block, run against a
+-- deliberately reintroduced mutant of public.balance_check with that
+-- predicate removed, failed both assertions below (both pairs read
+-- cached=200/ledger=500 and cached=300/ledger=500 - the mutant's cross-
+-- tenant leak - rather than each matching its own business) before being
+-- run against the real function and passing.
+-- ============================================================================
+select is(
+  (select cached_balance from public.balance_check_findings
+    where business_id = current_setting('test.biz')::uuid
+      and consumer_id = 'e2222222-2222-4222-8222-222222222222'),
+  200, 'pair G at business 1 cached_balance recorded correctly');
+select is(
+  (select ledger_sum from public.balance_check_findings
+    where business_id = current_setting('test.biz')::uuid
+      and consumer_id = 'e2222222-2222-4222-8222-222222222222'),
+  200, 'pair G at business 1 ledger_sum is scoped to business 1 alone (200), NOT the cross-business total (500)');
+select ok(
+  not (select drifted from public.balance_check_findings
+        where business_id = current_setting('test.biz')::uuid
+          and consumer_id = 'e2222222-2222-4222-8222-222222222222'),
+  'pair G at business 1 is NOT flagged as drifted');
+
+select is(
+  (select cached_balance from public.balance_check_findings
+    where business_id = current_setting('test.biz2')::uuid
+      and consumer_id = 'e2222222-2222-4222-8222-222222222222'),
+  300, 'pair G at business 2 cached_balance recorded correctly');
+select is(
+  (select ledger_sum from public.balance_check_findings
+    where business_id = current_setting('test.biz2')::uuid
+      and consumer_id = 'e2222222-2222-4222-8222-222222222222'),
+  300, 'pair G at business 2 ledger_sum is scoped to business 2 alone (300), NOT the cross-business total (500)');
+select ok(
+  not (select drifted from public.balance_check_findings
+        where business_id = current_setting('test.biz2')::uuid
+          and consumer_id = 'e2222222-2222-4222-8222-222222222222'),
+  'pair G at business 2 is NOT flagged as drifted');
+
+-- ============================================================================
+-- I4: the read side. checked_count matches the exact candidate count the
+-- first big run consumed (same dynamic value, not a hardcoded literal);
+-- drifted_count is exactly 1 (pair B alone) at this point in the script -
+-- nothing checked so far besides A/B/F/G-biz1/G-biz2 is drifted.
+-- ============================================================================
+select set_config('test.summary_checked', (select checked_count::text from public.balance_check_summary()), true);
+select set_config('test.summary_drifted', (select drifted_count::text from public.balance_check_summary()), true);
+
+select is(
+  current_setting('test.summary_checked'),
+  current_setting('test.bc_total_before_check1'),
+  'balance_check_summary().checked_count matches the exact number of pairs the first run checked');
+select is(
+  current_setting('test.summary_drifted'),
+  '1',
+  'balance_check_summary().drifted_count is exactly 1 - only pair B is genuinely drifted so far');
+select ok(
+  (select oldest_checked_at from public.balance_check_summary()) is not null,
+  'balance_check_summary().oldest_checked_at is populated once at least one pair has been checked');
+
+-- ============================================================================
+-- I1: single statement, one snapshot - the STRUCTURAL proof (review fix,
+-- replacing pair F's retired "concurrency proxy" framing). Pins that there
+-- is no statement boundary (no `;`) between the candidate scan reading
+-- business_customers and the `returning` clause of the upsert into
+-- balance_check_findings, and that both public.business_customers and
+-- public.points_transactions are read somewhere inside that same unbroken
+-- span. A future refactor that split the read into two separate statements
+-- - reintroducing the exact torn-read window the migration header argues
+-- against - would break this assertion rather than ship silently.
+-- ============================================================================
+select set_config('test.balchk_def', pg_get_functiondef('public.balance_check(integer)'::regprocedure), true);
+select set_config('test.balchk_span',
+  substring(current_setting('test.balchk_def')
+    from position('with candidates as (' in current_setting('test.balchk_def'))
+    for (position('returning drifted' in current_setting('test.balchk_def'))
+         - position('with candidates as (' in current_setting('test.balchk_def'))
+         + length('returning drifted'))),
+  true);
+
+select ok(
+  position(';' in current_setting('test.balchk_span')) = 0,
+  'no semicolon (no statement boundary) between "with candidates as (" and "returning drifted" - the candidate read and the upsert are structurally ONE statement');
+select ok(
+  current_setting('test.balchk_span') ~ 'from public\.business_customers'
+  and current_setting('test.balchk_span') ~ 'from public\.points_transactions',
+  'both public.business_customers and public.points_transactions are read inside that same unbroken span');
+
+-- ============================================================================
+-- M5: LIMIT NULL is unbounded in Postgres. Structural pin that p_limit is
+-- clamped before it ever reaches a `limit` clause, plus the behavioral
+-- sanity check that a null call does not error.
+-- ============================================================================
+select ok(
+  current_setting('test.balchk_def') ~ 'greatest\(coalesce\(p_limit,\s*500\),\s*0\)',
+  'p_limit is clamped via greatest(coalesce(p_limit, 500), 0) before reaching any limit clause - null cannot become unbounded');
+
+select lives_ok(
+  $$ select public.balance_check(null) $$,
+  'balance_check(null) does not error - it degrades to the clamped default rather than an unbounded pass');
 
 -- ------------------------------------------------------------ p_limit=0 edge case
 select is(
@@ -251,12 +416,12 @@ select is(
 -- ROTATION: genuine self-clearing under a TIGHT p_limit, proven by naming the
 -- EXACT pair each call touches (deterministic consumer-id ordering - see file
 -- header). Three fresh, never-checked pairs (C, D, E) are added AFTER the
--- first run above, so at this point A/B/F already carry a real checked_at and
--- C/D/E carry none (null sorts first). This is the same shape rpc_points_
--- expiry_smoke.sql and rpc_campaigns_sweep_smoke.sql use for their own I2/I1
--- self-clearing proofs: a p_limit=200/8-fixture "second run is 0" cannot tell
--- "rotated" from "stuck"; a p_limit=1 run that reaches a LATER pair only once
--- EARLIER ones have had their turn can.
+-- runs above, so at this point A/B/F/G-biz1/G-biz2 already carry a real
+-- checked_at and C/D/E carry none (null sorts first). This is the same shape
+-- rpc_points_expiry_smoke.sql and rpc_campaigns_sweep_smoke.sql use for
+-- their own I2/I1 self-clearing proofs: a p_limit=200/8-fixture "second run
+-- is 0" cannot tell "rotated" from "stuck"; a p_limit=1 run that reaches a
+-- LATER pair only once EARLIER ones have had their turn can.
 -- ============================================================================
 insert into public.business_customers (business_id, consumer_id, points_balance)
 values
@@ -269,8 +434,6 @@ values
   (current_setting('test.biz')::uuid, 'f6666666-6666-4666-8666-666666666666', 'earn', 100, 100),
   (current_setting('test.biz')::uuid, 'f7777777-7777-4777-8777-777777777777', 'earn', 100, 100);
 
--- 22. call 1/4, p_limit=1: only C/D/E are unchecked (null sorts first); the
--- smallest consumer_id among them is f5... (C)
 select is(public.balance_check(1)::text, '1', 'rotation call 1 processes exactly one pair');
 select is(
   (select count(*)::int from public.balance_check_findings
@@ -284,7 +447,6 @@ select is(
                            'f7777777-7777-4777-8777-777777777777')),
   0, 'rotation call 1 did NOT touch D or E - the whole budget went to one pair, not spread or repeated');
 
--- 25. call 2/4: D (f6...) is next - E is also still null but sorts after D
 select is(public.balance_check(1)::text, '1', 'rotation call 2 processes exactly one pair');
 select is(
   (select count(*)::int from public.balance_check_findings
@@ -292,7 +454,6 @@ select is(
       and consumer_id = 'f6666666-6666-4666-8666-666666666666'),
   1, 'rotation call 2 touched pair D (f6...), NOT re-selecting C');
 
--- 27. call 3/4: E (f7...) is the last never-checked pair
 select is(public.balance_check(1)::text, '1', 'rotation call 3 processes exactly one pair');
 select is(
   (select count(*)::int from public.balance_check_findings
@@ -300,7 +461,6 @@ select is(
       and consumer_id = 'f7777777-7777-4777-8777-777777777777'),
   1, 'rotation call 3 touched pair E (f7...), NOT re-selecting C or D');
 
--- 29. all of C, D, E have now been checked exactly once
 select is(
   (select count(*)::int from public.balance_check_findings
     where business_id = current_setting('test.biz')::uuid
@@ -309,15 +469,13 @@ select is(
                            'f7777777-7777-4777-8777-777777777777')),
   3, 'C, D and E all now have exactly one finding each - coverage genuinely advanced');
 
--- 30-31. call 4/4: C/D/E are now the MOST recently checked pairs in the whole
--- table (their checked_at is strictly newer than every other candidate's,
--- including A/B/F AND any unrelated live row this suite did not create), so
--- the cursor MUST rotate to something outside {C, D, E} next - proving
--- rotation is not limited to the fixtures added most recently, it cycles the
--- WHOLE candidate set. Which specific older pair it lands on is not asserted
--- (this is a live, shared project - some other pre-existing row could sort
--- first); what matters, and is fully determined regardless of what else is
--- live, is that it is NOT one of the three just-rotated pairs.
+-- call 4/4: C/D/E are now the MOST recently checked pairs in the whole
+-- table, so the cursor MUST rotate to something outside {C, D, E} next -
+-- proving rotation cycles the WHOLE candidate set. Which specific older pair
+-- it lands on is not asserted (a live, shared project - some other pre-
+-- existing row could sort first); what matters, and is fully determined
+-- regardless of what else is live, is that it is NOT one of the three
+-- just-rotated pairs.
 select is(public.balance_check(1)::text, '1', 'rotation call 4 processes exactly one pair');
 select ok(
   not exists (
@@ -329,6 +487,128 @@ select ok(
                               'f7777777-7777-4777-8777-777777777777')
   ),
   'call 4''s freshest checked_at belongs to a pair OUTSIDE {C, D, E} - the cursor rotated back into the older candidate pool rather than re-selecting one of the trio it just finished');
+
+-- ============================================================================
+-- I3a: the coverage-days tripwire primitive. By this point in the script the
+-- live business_customers table holds at least 9 candidate pairs (A, B, F,
+-- G-biz1, G-biz2, C, D, E, plus any unrelated pre-existing live row) that
+-- this suite either created or found already checked. With p_limit=1 a full
+-- rotation would need at least 9 days - past the 7-day bound doc 39's
+-- removed weekly full pass used to guarantee - so the primitive must report
+-- exactly that.
+-- ============================================================================
+select set_config('test.bc_total_now', (select count(*)::text from public.business_customers), true);
+
+select ok(
+  private.balance_check_coverage_days(1) > 7,
+  'private.balance_check_coverage_days(1) exceeds the 7-day bound given the live candidate count - the tripwire condition public.balance_check checks is genuinely true here');
+select is(
+  private.balance_check_coverage_days(1)::text,
+  current_setting('test.bc_total_now'),
+  'private.balance_check_coverage_days(1) equals the exact live pair count (ceil(n/1) = n)');
+select ok(
+  private.balance_check_coverage_days(500) <= 7,
+  'private.balance_check_coverage_days(500) stays within the 7-day bound at the documented default p_limit, given today''s (tiny) pair count');
+
+-- ============================================================================
+-- I3b: doc 39's "every pair touched by clawback/expire in the last 24h"
+-- priority. Pair A was already checked in the first big run above, so under
+-- plain oldest-checked-first it is nowhere near due; a brand-new never-
+-- checked pair (H) would normally win any p_limit=1 race against it. A
+-- fresh clawback lands on A AFTER that first check, simulating "a reversal
+-- happened tonight, after the nightly check already ran" - A must now win
+-- priority over H anyway, because a pair this job just watched a reversal
+-- touch is higher-risk than one that has simply never been looked at.
+--
+-- created_at is stamped explicitly with clock_timestamp(), not left to the
+-- column's own `default now()`: `now()` is transaction_timestamp(), frozen
+-- for this whole pgTAP script (see 0056's header on exactly this trap), so
+-- every points_transactions row this suite has inserted anywhere carries the
+-- SAME created_at - always earlier, in real terms, than a checked_at already
+-- recorded via clock_timestamp() by an earlier statement in this same
+-- transaction. That is purely an artifact of testing everything inside one
+-- rolled-back transaction: in production each writer runs in its OWN,
+-- separate transaction, so `now()` there genuinely reflects that write's
+-- real wall-clock moment. Stamping clock_timestamp() here reproduces that
+-- real ordering for this one fixture without changing anything about how
+-- award_receipt_points/clawback_receipt_points/etc. actually write the
+-- column in production.
+insert into public.points_transactions (business_id, consumer_id, type, points, balance_after, created_at)
+values (current_setting('test.biz')::uuid, 'f2222222-2222-4222-8222-222222222222', 'clawback', -50, 450, clock_timestamp());
+update public.business_customers
+   set points_balance = 450
+ where business_id = current_setting('test.biz')::uuid
+   and consumer_id = 'f2222222-2222-4222-8222-222222222222';
+
+insert into public.business_customers (business_id, consumer_id, points_balance)
+values (current_setting('test.biz')::uuid, 'e3333333-3333-4333-8333-333333333333', 100);
+insert into public.points_transactions (business_id, consumer_id, type, points, balance_after)
+values (current_setting('test.biz')::uuid, 'e3333333-3333-4333-8333-333333333333', 'earn', 100, 100);
+
+select set_config('test.a_checked_before_priority',
+  (select checked_at::text from public.balance_check_findings
+    where business_id = current_setting('test.biz')::uuid
+      and consumer_id = 'f2222222-2222-4222-8222-222222222222'), true);
+
+select is(public.balance_check(1)::text, '1', 'priority call processes exactly one pair');
+
+select ok(
+  (select checked_at from public.balance_check_findings
+    where business_id = current_setting('test.biz')::uuid
+      and consumer_id = 'f2222222-2222-4222-8222-222222222222')::text
+  <> current_setting('test.a_checked_before_priority'),
+  'pair A (fresh clawback, already checked once, would NOT be next under plain rotation) was re-verified by the priority call');
+select is(
+  (select cached_balance from public.balance_check_findings
+    where business_id = current_setting('test.biz')::uuid
+      and consumer_id = 'f2222222-2222-4222-8222-222222222222'),
+  450, 'pair A''s re-verified cached_balance reflects the post-clawback value');
+select is(
+  (select ledger_sum from public.balance_check_findings
+    where business_id = current_setting('test.biz')::uuid
+      and consumer_id = 'f2222222-2222-4222-8222-222222222222'),
+  450, 'pair A''s re-verified ledger_sum includes the fresh clawback (500 - 50)');
+select ok(
+  not exists (
+    select 1 from public.balance_check_findings
+     where business_id = current_setting('test.biz')::uuid
+       and consumer_id = 'e3333333-3333-4333-8333-333333333333'
+  ),
+  'pair H (never checked, no clawback/expire activity) was NOT touched - priority genuinely outranked a never-checked pair, it was not a coincidence of ordinary rotation order');
+
+-- ============================================================================
+-- M2: pair-level cascade. A finding for a pair whose underlying
+-- business_customers row is deleted (without the business or consumer
+-- itself being deleted) must not survive as an unclearable stale row.
+-- ============================================================================
+insert into public.business_customers (business_id, consumer_id, points_balance)
+values (current_setting('test.biz')::uuid, 'e4444444-4444-4444-8444-444444444444', 150);
+insert into public.points_transactions (business_id, consumer_id, type, points, balance_after)
+values (current_setting('test.biz')::uuid, 'e4444444-4444-4444-8444-444444444444', 'earn', 150, 150);
+
+-- generous p_limit so this run also mops up pair H from the block above,
+-- regardless of exact rotation order - this section only cares about K
+select public.balance_check(100);
+
+select ok(
+  exists (
+    select 1 from public.balance_check_findings
+     where business_id = current_setting('test.biz')::uuid
+       and consumer_id = 'e4444444-4444-4444-8444-444444444444'
+  ),
+  'pair K has a finding row before its business_customers row is removed');
+
+delete from public.business_customers
+ where business_id = current_setting('test.biz')::uuid
+   and consumer_id = 'e4444444-4444-4444-8444-444444444444';
+
+select ok(
+  not exists (
+    select 1 from public.balance_check_findings
+     where business_id = current_setting('test.biz')::uuid
+       and consumer_id = 'e4444444-4444-4444-8444-444444444444'
+  ),
+  'deleting the business_customers row cascades to balance_check_findings - no stale, unclearable finding survives it (review fix M2)');
 
 -- ------------------------------------------------------------ the schedule
 select is(
