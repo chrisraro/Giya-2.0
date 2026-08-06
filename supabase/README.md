@@ -129,7 +129,7 @@ Twenty-four suites, one per domain (review fix, task 2.1: the prior count of "Ni
 | `rpc_campaign_budget_guard_smoke.sql` | the campaign budget race guard in `award_receipt_points` (0040/0041, task 1.2 + review fix C1), 34 assertions: CORRECT PER-CAMPAIGN ATTRIBUTION from each earn row's own `rule_snapshot` entries - never a naive `sum(points) where campaign_id = X`, which is wrong in both directions the moment a campaign stacks as a non-primary contributor (review C1); `max_total_points` as a running cap shared across every consumer, closed race-safely by locking the campaigns row before re-checking the total (the same cross-consumer race 0015 hardened for `claim_reward`); `per_customer_limit` armed at award time on its own, not only when `max_total_points` is also set (review I1); a budget with room for exactly one more contribution and two sequential awards - the second raises `CAMPAIGN_BUDGET_RACE`, and a corrected retry (the value `award.ts`'s own recovery sends) succeeds; a clawed-back contribution stops counting against the budget; a vanished/unknown campaign id in the array is skipped, not fatal; and omitting `p_campaign_budget_checks` entirely (every caller before task 1.2) enforces nothing, byte-identical to 0038's prior behaviour |
 | `rpc_points_expiry_smoke.sql` | Task 1.3 points expiry enforcement (0042-0048, both review-fix passes), 67 assertions: doc 35 section 7's FIFO remainder formula ordered by EXPIRY not creation (I1) - a partially-consumed lot, a later untouched lot, a lot fully drained to 0, a clawback-only consumption, and the counter-example where a never-expiring `adjust` must be drained LAST rather than first (a null expiry sorting as `+∞`, not first); the aggregate at two `asof` values and the public wrapper agreeing with it; `public.points_next_expiry` correctly excluding an already-past-due lot; `public.expire_points` (the sweep) - SELF-CLEARING proven with a small `p_limit` (I2: a third pair is reached only once the first two clear a slot, not starved forever), the right `expire` row with the restored `x_expired_sum`/`d_drained_sum` audit fields (I5), the cached balance equal to the ledger sum, nothing for a zero-balance pair, a backfilled-already-past-due lot swept correctly (M5), and idempotency across every pair including the self-clearing trio; `public.points_expiry_warn` (the warn job) using the PROJECTED remainder at both horizons rather than the soonest lot (original I3: a shadowed larger lot fires its own combined total on the first run), ordered by URGENCY - soonest in-window expiry, not UUID - so a p_limit of 1 notifies a 2-days-out pair over a UUID-earlier 25-days-out one (re-review N2), deduped on the WINDOW-STABLE soonest-lot date rather than the moving projected figure, proven by literally aging the ledger between runs to simulate a day passing: a growing aggregate (300->500) produces no duplicate, only a genuine change of the soonest lot does (re-review N3), the restored date in both the copy ("expire by...") and the `data.expires_on` payload (re-review N4), the in_app/email channel split, a backfilled-already-past-due lot never warned (M5), and idempotency; both `cron.job` rows with their exact schedule and command; the append-only fence's one permanent exception (now correctly homed in 0047, not rewriting 0042's history) proven both ways (I4: the null-to-value transition succeeds and lands, every other column and every other `expires_at` transition and DELETE still raise), with its column allowlist pinned exactly (re-review N7); and the full I-A grant matrix including `public.points_expirable_remainder`, missed by the first pass (C1) |
 | `rpc_campaigns_sweep_smoke.sql` | Task 2.1 `campaigns.sweep` (0053, review-fixed twice by 0054 and 0055), 33 assertions: doc 34's T3 (`scheduled -> active` at `starts_at`) and T7 (`active|paused -> ended` at `ends_at`) as ONE `public.sweep_campaigns` function with two independent candidate scans; a due scheduled campaign on an ACTIVE business activates with a `campaign.activated` audit row (`actor_kind='system'`, `after.trigger='sweep'` - the app's own vocabulary from `src/features/campaigns/server/audit.ts`, never a parallel verb); a not-yet-due scheduled campaign and both an already-`ended` and an already-`archived` campaign are left completely untouched with no audit row; an `active` campaign AND a `paused` campaign both past `ends_at` are ended with `campaign.ended` recording the correct source status in `before`, PROVEN AGAIN on a business the T3 skip case has already made suspended (T7 is unconditional and a fixture now pins that rather than leaving it asserted only by construction); G1 (business standing) gates T3 alone - a due scheduled campaign on a SUSPENDED business is SKIPPED (stays `scheduled`, no audit row, no error) and then genuinely activates once the business is set back to `active`, proving the skip re-checks live standing rather than caching a verdict; GENUINE SELF-CLEARING under a TIGHT `p_limit=1` (0054 review fix I1/I2, the actual 0045-shaped bug 0053 shipped with: a `p_limit=200`/8-fixture "second run is 0" check cannot distinguish "left candidacy" from "still occupying a slot doing no work" the way a small-limit starvation probe can - a permanently-ineligible `'closed'`-business campaign sorted first by `starts_at` no longer starves a later, gate-passing one out of the budget); `private.campaigns_sweep_ineligible_count()` (0055 review fix I1: 0054's own I1+I3 interaction silently dropped skip visibility to zero for the ordinary case) returning exactly the one due-but-ineligible campaign in play, fully revoked from every role including `service_role`; the widened `campaigns_active_window_idx` (now covering `paused`, which 0012's original predicate excluded); the `cron.job` row's exact schedule (`*/5 * * * *`) and command; no `points_transactions` row written by any of it; and the service_role-only grant |
-| `rpc_balance_check_smoke.sql` | Task 2.2 `integrity.balance_check` (0056, review-fixed by 0057), 62 assertions: the three-layer fence on `balance_check_findings` including its pair-level cascade FK (0057 review fix M2); the I-A grant matrix across `public.balance_check`, `public.balance_check_summary` and `private.balance_check_coverage_days`; a genuinely drifted pair (a cached balance set to 650 against a 500 ledger sum, constructed directly since no real writer produces this) correctly flagged `drifted=true` with both numbers recorded, alongside clean pairs including a SIX-type ledger (review fix M3 added `reversal`) and a consumer with real activity at TWO businesses (review fix I2 - the ledger-sum business-scoping fixture 0056 shipped without, red-verified live against a reintroduced business_id-less mutant); the drifted pair's cached balance and the ledger's row count both UNCHANGED after the check (detection only, never auto-corrected); a STRUCTURAL pin (via `pg_get_functiondef`) that the candidate read and the upsert are one unbroken statement with no `;` between them (review fix I1, replacing 0056's mislabeled "concurrency proxy" fixture) and that `p_limit` is clamped before reaching any `limit` clause (review fix M5, `balance_check(null)` no longer unbounded); `p_limit=0` and `p_limit=null` as no-ops; GENUINE ROTATION under a TIGHT `p_limit=1` across four successive calls - three fresh pairs are checked one at a time in their deterministic consumer-id order with zero repeats, then the fourth call is proven to land on a pair OUTSIDE that trio; the `private.balance_check_coverage_days` tripwire primitive's exact value against the live candidate count (review fix I3a); a fresh clawback out-ranking a never-checked bystander pair for the next `p_limit=1` slot (review fix I3b, doc 39's "every pair touched by clawback/expire in the last 24h" priority); a pair-level cascade proof (delete `business_customers`, the finding disappears with it); and the `cron.job` row's exact schedule (`40 18 * * *`) and command |
+| `rpc_balance_check_smoke.sql` | Task 2.2 `integrity.balance_check` (0056, review-fixed twice by 0057 and 0058), 68 assertions: the three-layer fence on `balance_check_findings` including its pair-level cleanup (0058 replaced 0057's composite FK with an `after delete` trigger - review fix I7, the FK's implicit `FOR KEY SHARE` lock conflicted with every money-path writer's `FOR UPDATE`); the I-A grant matrix across `public.balance_check`, `public.balance_check_summary`, `private.balance_check_coverage_days` and `private.balance_check_priority_count`; a genuinely drifted pair (a cached balance set to 650 against a 500 ledger sum, constructed directly since no real writer produces this) correctly flagged `drifted=true` with both numbers recorded, alongside clean pairs including a SIX-type ledger (review fix M3 added `reversal`) and a consumer with real activity at TWO businesses (review fix I2 - the ledger-sum business-scoping fixture 0056 shipped without, red-verified live against a reintroduced business_id-less mutant); the drifted pair's cached balance and the ledger's row count both UNCHANGED after the check (detection only, never auto-corrected); a STRUCTURAL pin (via `pg_get_functiondef`, comments stripped before checking for a statement-boundary `;` - review fix C1) that the candidate read and the upsert are one unbroken statement, that `p_limit` is clamped before reaching any `limit` clause (review fix M5), AND - the 0058 "defense" - that the live body actually contains the word "tier" and calls both `balance_check_priority_count` and `balance_check_coverage_days` by name, a pin proven live to fail against a comment-stripped mutant (the exact class of drift 0057 shipped with undetected); `p_limit=0` and `p_limit=null` as no-ops; GENUINE ROTATION under a TIGHT `p_limit=1` across four successive calls; the `private.balance_check_coverage_days` tripwire primitive proven budget-corrected (review fix I5 - at `p_limit=200`, exactly `points.expiry_sweep`'s own live cron limit, the effective rotation budget collapses to a floor of 1, so `coverage_days` equals the full pair count rather than the naive `ceil(n/200)`); a fresh clawback out-ranking a never-checked bystander pair for the next `p_limit=1` slot, with `private.balance_check_priority_count` asserted directly both before (1) and after (0) that run resolves it (review fix I3b/I6); `balance_check_summary().drifted_count` asserted as a baseline-plus-one delta rather than a hardcoded literal (review fix I8); a pair-level cleanup proof (delete `business_customers`, the finding disappears with it); and the `cron.job` row's exact schedule (`40 18 * * *`) and command |
 
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
@@ -433,7 +433,7 @@ only a comment" is how the 0047 incident below began. No revert was needed
 0053 or 0054 from here on goes in a companion migration - 0055 is that
 migration for 0054's own I1/I3 interaction.
 
-### Balance check (0056-0057, task 2.2 + review-fix pass)
+### Balance check (0056-0058, task 2.2 + two review-fix passes)
 
 `public.balance_check(p_limit integer default 500)` proves the invariant six
 SECURITY DEFINER writers (`award_receipt_points`, `claim_reward`,
@@ -444,6 +444,43 @@ each maintain in their own transaction but that nothing had ever CHECKED:
 name this job; only `0029_jobs.sql`'s header mentioned it before now, in
 passing.
 
+**0058: 0057 was recorded applied while its function change was not
+deployed as committed.** A live `pg_proc` query found `public.balance_
+check`'s deployed body did not match 0057's file - every OTHER object 0057
+creates (`private.balance_check_coverage_days`, `public.balance_check_
+summary`, the FK, the index) deployed correctly and the migration ledger
+carried a row for 0057, but the one `create or replace function` that
+changes this job's actual behaviour did not carry the committed text. Root
+cause: the tool calls made during that review-fix session submitted a
+condensed, comment-stripped version of the function body (for call-payload
+brevity while iterating quickly) rather than the file's own text, and
+nothing checked the deployed body against the file afterward - an
+`apply_migration` "success" response was treated as proof the exact
+committed SQL was now live, which it is not; only a post-hoc read-back
+(`pg_get_functiondef` compared against the file) proves that. Ground truth
+was re-established directly against `pg_proc`/`pg_constraint`/`pg_indexes`
+for every object 0057 claims (not assumed to be `balance_check` alone), and
+found a third state - not 0056's original body, not 0057's committed file -
+the same stripped-comment text the tool calls actually sent, which
+functionally included the priority tier and the tripwire call, so this
+never manufactured a false result on a real drift, but the deployed BYTES
+never matched the file, which is the property that must never be false
+regardless of whether behaviour happens to end up equivalent. `0057`'s
+ledger row is left exactly as it is (never edited in place); this section
+and 0058's own migration header are the correction of record for what that
+row does not guarantee about its content. Every `create or replace
+function` 0058 deploys was followed, in the same session, by a direct
+`md5(prosrc)` comparison against the committed file before moving on - see
+that migration's own header for the byte-for-byte verification method, and
+the "DEFENSE" section of `rpc_balance_check_smoke.sql` for the permanent
+version of the same check, proven live to fail against a reintroduced
+comment-stripped mutant before being run against the corrected function.
+Same class of incident as 0042 (a migration's recorded history diverging
+from what actually ran), worse in one respect: 0042's divergence was in the
+ledger's narrative about its own past; this one was in behaviour - an
+integrity job policing the money path was, for a time, recorded as running
+a body it was not actually running.
+
 **Persistence.** A table, `public.balance_check_findings`, one row per
 `(business_id, consumer_id)` pair, upserted - not an append-only log, by
 deliberate analogy to `business_customers` itself, since the useful fact is
@@ -453,13 +490,38 @@ like `jobs` (0029): RLS enabled with zero policies, every client privilege
 revoked, and `service_role` left SELECT-only - even the service role cannot
 write a finding directly, only `public.balance_check` can (SECURITY DEFINER,
 owned by the table owner, which bypasses that exact revoke). A no-truncate
-statement trigger is the third fence, matching `audit_logs`/`jobs`. Its
-foreign key targets `business_customers (business_id, consumer_id)` directly
-(0057, review fix M2 - originally two single-column FKs to `businesses`/
-`consumers`, which left a stale finding behind forever if the pair row alone
-was ever deleted without its business or consumer going with it; DELETE stays
-revoked from every role, so a pair-level cascade was the only way to make
-such a row clearable at all).
+statement trigger is the third fence, matching `audit_logs`/`jobs`.
+Pair-level cleanup (0057, review fix M2 - the original two single-column FKs
+to `businesses`/`consumers` alone left a stale finding behind forever if the
+pair row was ever deleted without its business or consumer going with it;
+DELETE stays revoked from every role, so SOME mechanism was needed to make
+such a row clearable) is now an `after delete` TRIGGER on `business_
+customers` (0058, review fix I7), not the composite foreign key 0057
+originally added. That FK looked right but cost something real: Postgres
+enforces a foreign key by taking `FOR KEY SHARE` on the referenced parent row
+for every first-time INSERT, and `FOR KEY SHARE` conflicts with the `FOR
+UPDATE` every money-path writer takes on that same `business_customers` row -
+bounded (only first sightings; `ON CONFLICT DO UPDATE` skips the RI recheck
+when the FK columns are unchanged) but real, and it contradicted both this
+task's binding "read-only against the money path" constraint and this
+section's own "zero false positives" paragraph below. The trigger achieves
+the identical cleanup outcome - `after delete on business_customers` removes
+the matching finding - while taking no referential-integrity lock at all,
+because a trigger is not a constraint. The original two single-column FKs
+(0056) are restored alongside it; `businesses`/`consumers` are never locked
+`FOR UPDATE` by any writer, so their own first-sighting locks were never part
+of the problem.
+
+Noted, not further mitigated (M10): the trigger still means a `drifted=true`
+finding can be erased by deleting the `business_customers` row it describes,
+which service-role code can do even though `balance_check_findings`'
+own DELETE stays revoked from every role - that revoke only ever protected
+this table directly, never the parent row. Accepted: nothing in this
+codebase currently deletes a `business_customers` row at all (0012 creates
+it "on first interaction" and nothing removes it), so this is a defence
+against a hypothetical future path, and the finding surviving "no matter
+what" was never M2's actual guarantee - only "survives as long as the pair
+it describes still exists."
 
 **Detection only.** The function never writes `points_transactions` or
 `business_customers` - an automatic "fix" would destroy the evidence a human
@@ -513,6 +575,30 @@ since pgTAP cannot capture the RAISE text itself") makes it a real, live
 tripwire: `public.balance_check` calls it every run and `raise warning`s
 when it exceeds 7.
 
+**The tripwire's own arithmetic was wrong (0058, review fix I5).** It treated
+the ENTIRE `p_limit` as rotation budget, but the priority tier above competes
+with rotation for the same slots, and so does `points.expiry_sweep`: that
+sweep runs at `10 18 * * *`, thirty minutes before `balance_check`'s own
+`40 18 * * *` slot, with its own `p_limit` of 200, and every pair it touches
+writes an `expire` row - exactly this job's own tier-0 trigger. On a mature
+platform up to 200 of a run's slots can go to tier 0 before rotation gets any
+at all, so the unadjusted formula silently understated true coverage latency.
+`private.balance_check_coverage_days` now subtracts that reservation from the
+denominator, reading `points.expiry_sweep`'s own limit LIVE out of its
+`cron.job` command (a regex extraction of the number inside
+`expire_points(...)`, falling back to 200 only if that schedule is ever
+missing or unparseable) rather than a second hand-maintained constant that
+could silently drift from 0028's actual schedule.
+
+**The mitigation could not observe the risk it was offered for (0058, review
+fix I6).** `coverage_days` is a pure function of pair count and `p_limit`; a
+clawback flood changes neither, so it could never detect the exact scenario
+I5 describes. The honest metric - how many of THIS run's candidate slots are
+tier 0 - is now computed by `private.balance_check_priority_count(p_limit)`
+(the same testable-primitive shape as `coverage_days`) and reported via
+`raise warning` whenever it consumes at least half the budget, instead of
+being silently discarded after deciding sort order.
+
 **Zero false positives by construction.** Every writer above inserts its
 `points_transactions` row(s) and updates `business_customers.points_balance`
 in ONE transaction, so under READ COMMITTED a concurrent writer's commit is
@@ -533,6 +619,29 @@ read relative to each other. Pair F is kept (now six rows, `reversal`
 included per review fix M3) as what it actually tests: summation breadth
 over a heterogeneous ledger.
 
+**The structural assertion itself was wrong in principle (0058, review fix
+C1).** It checked for a literal `;` in the source span without stripping
+`--` line comments first, so a comment merely DESCRIBING the guarantee could
+trip it - not hypothetically: 0057's own prose called it "unbroken by any
+`;`", a comment containing the exact character it was warning about, which
+would have failed this assertion the moment a fully-commented body (rather
+than the accidentally-stripped one 0057 actually shipped) ever reached the
+database. The suite now strips line comments
+(`regexp_replace(span, '--[^\n]*', '', 'g')`) before checking, and every
+comment in the deployed function bodies is worded to avoid the character
+regardless ("no statement boundary" rather than "unbroken by any `;`") -
+defence in depth, not either/or.
+
+`pt_clawback_expire_recent_idx` (0057) is gone (0058, review fix M11): it
+indexed `points_transactions (created_at) where type in (...)` globally, but
+the I3b `exists()` check above is CORRELATED per candidate row on
+`(business_id, consumer_id, ...)`, and the pre-existing `pt_consumer_biz_idx`
+(0012, `(consumer_id, business_id, created_at desc)`) already matches that
+correlation exactly - the planner had no reason to prefer a global,
+uncorrelated index for a per-row correlated lookup, and 0057's rationale
+claiming otherwise was wrong. It was dead weight on every `points_
+transactions` insert for no query it actually served; dropped.
+
 **Schedule.** One daily job (`40 18 * * *`, 02:40 Manila, doc 39's own
 sample-cadence slot) replaces doc 39's separate nightly-sample/weekly-full
 split, with the I3a tripwire above standing in for the coverage guarantee the
@@ -551,26 +660,34 @@ status and, on failure, its error string; a drifted-but-successful run
 leaves no trace there at all - 0057 review fix M1, correcting 0056's header
 claim to the contrary) was the only in-band signal a drift finding produced.
 
-Covered by `rpc_balance_check_smoke.sql`, 62 assertions (0056's original 35
-plus 27 from the review-fix pass): the table's fence including the pair-level
-cascade; the I-A grant matrix across all three new callables (`public.
-balance_check`, `public.balance_check_summary`, `private.balance_check_
-coverage_days`); a genuinely drifted pair detected and clean pairs correctly
+Covered by `rpc_balance_check_smoke.sql`, 68 assertions (0056's original 35,
+27 from the first review-fix pass, 6 net new from the second): the table's
+fence including the pair-level cleanup trigger; the I-A grant matrix across
+all four new callables (`public.balance_check`, `public.balance_check_
+summary`, `private.balance_check_coverage_days`, `private.balance_check_
+priority_count`); a genuinely drifted pair detected and clean pairs correctly
 left clean, including a consumer with real activity at TWO businesses (review
 fix I2 - the ledger-sum-scoping fixture 0056 shipped without, red-verified
 live against a reintroduced business_id-less mutant before being run against
 the real function) and a six-type ledger pair; the drifted pair's cached
 balance and the ledger row count both unchanged after the run; the structural
-single-statement pin and the p_limit-clamp pin; `p_limit=0` and
-`p_limit=null` as no-ops; the four-call rotation proof; the coverage-days
-primitive's exact value; the priority tier out-ranking a never-checked
-bystander; and the pair-level cascade. Verified live on 2026-08-06 against a
-SHARED, already-populated `business_customers` table: assertions read the
+single-statement pin (comments stripped first, review fix C1) and the
+p_limit-clamp pin; the "DEFENSE" markers proving the live body actually
+carries 0058's own logic, RED-verified live against a reintroduced
+comment-stripped mutant of `balance_check` before being run against the
+corrected function; `p_limit=0` and `p_limit=null` as no-ops; the four-call
+rotation proof; the coverage-days primitive's budget-corrected value (review
+fix I5); the priority-count primitive asserted directly on both sides of the
+run that resolves it (review fix I6); a fresh clawback out-ranking a
+never-checked bystander; `balance_check_summary().drifted_count` as a
+baseline-plus-one delta rather than a hardcoded literal (review fix I8); and
+the pair-level cleanup proof. Verified live on 2026-08-06 against a SHARED,
+already-populated `business_customers` table: assertions read the
 pre-existing candidate count dynamically rather than asserting a hardcoded
 literal, and the rotation proof only asserts "outside the just-rotated
 trio", not a specific pair - both were review findings against the first
 draft of this suite, caught by running it against real live data rather than
-an assumed-empty table. A separate, unrelated bug was caught the same way
+an assumed-empty table. Two separate, unrelated bugs were caught the same way
 mid-review-fix-pass: `points_transactions.created_at`'s own `default now()`
 is transaction-frozen exactly like `checked_at` would have been under
 `statement_timestamp()`, so a fixture simulating "a clawback landed after the
@@ -578,7 +695,10 @@ first check" needed its `created_at` stamped explicitly with
 `clock_timestamp()` to be genuinely later in wall-clock terms than an
 already-recorded `checked_at` - a testing-only wrinkle (production writers
 each run in their own separate transaction, where `now()` already means what
-it should) rather than anything wrong with the schema or the function.
+it should) rather than anything wrong with the schema or the function; and,
+in the second pass, the deployment incident this section opens with, caught
+only by a direct `pg_proc` query rather than by this suite itself running
+green.
 
 ### What the receipts sweep does and does not do
 
@@ -829,6 +949,21 @@ outcome is visible; the push is owed to the notifications slice.
   `SECURITY DEFINER`) and revoked from every role including `service_role`,
   so it never appears there either. `public.balance_check` keeps its
   `service_role`-only grant across the `create or replace`.
+- Migration 0058 (task 2.2 second review-fix pass: corrects 0057's deployment
+  gap - see this file's "Balance check" section above for the incident -
+  drops the composite FK in favour of an `after delete` trigger on `business_
+  customers`, drops `pt_clawback_expire_recent_idx`, adds `private.balance_
+  check_priority_count`, and re-creates `private.balance_check_coverage_days`
+  and `public.balance_check` with the budget-corrected tripwire and the
+  priority-tier body verified byte-for-byte against the committed file via
+  `md5(btrim(prosrc, E'\n'))`) added no new advisor of any level beyond
+  0056's own already-accepted INFO lint. Verified live on 2026-08-06: still 0
+  ERROR, same WARN set. `private.balance_check_priority_count` is plain (not
+  `SECURITY DEFINER`) and revoked from every role including `service_role`,
+  so it never appears in the definer-callable warnings; `public.balance_
+  check` keeps its `service_role`-only grant across the `create or replace`,
+  now with a body confirmed identical to the file rather than merely
+  behaviourally similar.
 
 ### `cancel_claim` (0050-0051, task 1.4 + review-fix pass)
 
@@ -952,6 +1087,7 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0055_campaigns_sweep_skip_visibility.sql | 20260806093311 | 0055_campaigns_sweep_skip_visibility |
 | 0056_balance_check.sql | 20260806095729 | 0056_balance_check |
 | 0057_balance_check_review_fixes.sql | 20260806104108 | 0057_balance_check_review_fixes |
+| 0058_balance_check_deployment_correction.sql | 20260806111225 | 0058_balance_check_deployment_correction |
 
 **Rows 0001-0035 are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`; rows 0036-0049 were applied later, and 0042-0049 on 2026-08-06.** The
 sentence below describes the replay only. It does NOT describe 0042-0049: one
@@ -967,6 +1103,20 @@ is still the source of truth and the ordering is unaffected. 0034 and 0035 were 
 happened.
 
 Notes:
+- **Migration number 0058 is currently claimed twice on the live database.**
+  This file (`0058_balance_check_deployment_correction`, live version
+  `20260806111225`) and a different task's `0058_job_health_alerts` (live
+  version `20260806110554`, applied moments earlier, not yet present in this
+  checkout as of this commit) both landed against `zlfxfzlnklqhajacngxf`
+  under the same numeric prefix - two concurrent tasks against a shared live
+  project, not a collision either one caused by itself. `supabase_migrations.
+  schema_migrations` keys on the live TIMESTAMP, not the name, so both rows
+  coexist with no functional conflict; this is a file-naming ambiguity for
+  whoever merges both branches, not a database-state problem. Not resolved
+  here - this task's own instruction was explicit ("land the missing change
+  as 0058"), and renumbering now would mean redoing this migration's own
+  live byte-for-byte verification for a purely cosmetic concern. Flag at the
+  next wave boundary.
 - **0020 makes `receipts` a Realtime table.** Before it, the `supabase_realtime`
   publication contained only `reward_claims` (added by 0014), so
   `postgres_changes` subscriptions on `receipts` subscribed cleanly and then

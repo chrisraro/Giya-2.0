@@ -158,11 +158,18 @@ export type Database = {
         }
         Relationships: [
           {
-            foreignKeyName: "balance_check_findings_pair_fkey"
-            columns: ["business_id", "consumer_id"]
-            isOneToOne: true
-            referencedRelation: "business_customers"
-            referencedColumns: ["business_id", "consumer_id"]
+            foreignKeyName: "balance_check_findings_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "balance_check_findings_consumer_id_fkey"
+            columns: ["consumer_id"]
+            isOneToOne: false
+            referencedRelation: "consumers"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -913,6 +920,30 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      job_alert_state: {
+        Row: {
+          jobname: string
+          last_alerted_at: string
+          last_detail: string | null
+          since: string
+          updated_at: string
+        }
+        Insert: {
+          jobname: string
+          last_alerted_at: string
+          last_detail?: string | null
+          since: string
+          updated_at?: string
+        }
+        Update: {
+          jobname?: string
+          last_alerted_at?: string
+          last_detail?: string | null
+          since?: string
+          updated_at?: string
+        }
+        Relationships: []
       }
       jobs: {
         Row: {

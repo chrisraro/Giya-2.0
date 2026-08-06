@@ -1,10 +1,11 @@
 -- ============================================================================
 -- rpc_balance_check_smoke.sql (pgTAP)
--- Smoke tests for 0056/0057: public.balance_check, public.balance_check_
+-- Smoke tests for 0056-0058: public.balance_check, public.balance_check_
 -- findings, public.balance_check_summary, private.balance_check_coverage_
--- days, task 2.2 + review-fix pass. Runs entirely inside one transaction and
--- rolls back. Execute as a privileged role (postgres) against a database
--- with migrations 0001-0057 applied.
+-- days, private.balance_check_priority_count, task 2.2 + two review-fix
+-- passes. Runs entirely inside one transaction and rolls back. Execute as a
+-- privileged role (postgres) against a database with migrations 0001-0058
+-- applied.
 --
 -- Fixture strategy: mirror rpc_campaigns_sweep_smoke.sql / rpc_points_expiry_
 -- smoke.sql. Two businesses (owners register via register_business under
@@ -40,13 +41,30 @@
 -- table the same query is reading would pin an implementation accident, not
 -- the documented contract. Pair F stays, relabeled: it is a genuine test of
 -- summation breadth over a heterogeneous, six-type ledger.
+--
+-- ON THE "DEFENSE" SECTION (0058, second review-fix pass). 0057 was recorded
+-- applied while `public.balance_check`'s deployed body silently diverged
+-- from what the committed file described - every supporting object (the new
+-- table's FK, the new index, both new functions) deployed correctly, but the
+-- one `create or replace function` that actually changes this job's
+-- behaviour did not carry the committed text, and nothing in this suite (or
+-- anywhere else) checked that the live body matched the file rather than
+-- merely behaving plausibly. `pg_get_functiondef` is already read into
+-- `test.balchk_def` below for the I1/M5 structural pins; the same value is
+-- now ALSO checked for the markers 0058's own logic must be built from - the
+-- word "tier" (present only in the priority-tier comment, so its absence is
+-- exactly what a comment-stripped deploy like the one that actually shipped
+-- would produce) and calls to both `balance_check_priority_count` and
+-- `balance_check_coverage_days`. A migration that recreates a function is
+-- only as trustworthy as the thing that checks it landed; this is that
+-- check, permanently.
 -- ============================================================================
 
 begin;
 
 set local search_path = public, extensions;
 
-select plan(62);
+select plan(68);
 
 -- ---------------------------------------------------------------- fixtures
 insert into auth.users (id, aud, role, email, raw_user_meta_data)
@@ -209,6 +227,12 @@ select ok(
   and not has_function_privilege('service_role', 'private.balance_check_coverage_days(integer)', 'EXECUTE'),
   'private.balance_check_coverage_days is reachable by no client or service role');
 
+select ok(
+  not has_function_privilege('anon', 'private.balance_check_priority_count(integer)', 'EXECUTE')
+  and not has_function_privilege('authenticated', 'private.balance_check_priority_count(integer)', 'EXECUTE')
+  and not has_function_privilege('service_role', 'private.balance_check_priority_count(integer)', 'EXECUTE'),
+  'private.balance_check_priority_count is reachable by no client or service role');
+
 -- ------------------------------------------------------------ never touches the money path
 select set_config('test.pt_count_before',
   (select count(*)::text from public.points_transactions), true);
@@ -226,6 +250,15 @@ select set_config('test.bc_balance_before',
 -- data is already live.
 select set_config('test.bc_total_before_check1',
   (select count(*)::text from public.business_customers), true);
+
+-- Review fix I8: drifted_count is captured as a BASELINE here, before this
+-- run, rather than the run's result being asserted as a hardcoded '1'. A
+-- shared live database can already carry drifted findings from real data or
+-- an earlier suite run; the only thing this suite can honestly assert is
+-- "one MORE pair (pair B) is now drifted than before", not "exactly one
+-- pair in the whole table is drifted".
+select set_config('test.drifted_before_check1',
+  (select count(*) filter (where drifted) from public.balance_check_findings)::text, true);
 
 -- ------------------------------------------------------------ the check: A, B, F, G x2 (+ whatever else is live)
 select set_config('test.processed_1', public.balance_check(10000)::text, true);
@@ -347,8 +380,9 @@ select ok(
 -- ============================================================================
 -- I4: the read side. checked_count matches the exact candidate count the
 -- first big run consumed (same dynamic value, not a hardcoded literal);
--- drifted_count is exactly 1 (pair B alone) at this point in the script -
--- nothing checked so far besides A/B/F/G-biz1/G-biz2 is drifted.
+-- drifted_count is exactly ONE MORE than the baseline captured before the
+-- run (review fix I8 - pair B alone is the new drift this run introduces,
+-- but a shared live database may already carry others).
 -- ============================================================================
 select set_config('test.summary_checked', (select checked_count::text from public.balance_check_summary()), true);
 select set_config('test.summary_drifted', (select drifted_count::text from public.balance_check_summary()), true);
@@ -359,8 +393,8 @@ select is(
   'balance_check_summary().checked_count matches the exact number of pairs the first run checked');
 select is(
   current_setting('test.summary_drifted'),
-  '1',
-  'balance_check_summary().drifted_count is exactly 1 - only pair B is genuinely drifted so far');
+  (current_setting('test.drifted_before_check1')::int + 1)::text,
+  'balance_check_summary().drifted_count is exactly one more than the pre-run baseline - pair B is the one new drift this run introduces');
 select ok(
   (select oldest_checked_at from public.balance_check_summary()) is not null,
   'balance_check_summary().oldest_checked_at is populated once at least one pair has been checked');
@@ -375,6 +409,18 @@ select ok(
 -- span. A future refactor that split the read into two separate statements
 -- - reintroducing the exact torn-read window the migration header argues
 -- against - would break this assertion rather than ship silently.
+--
+-- Review fix C1: the semicolon check strips `--` line comments FIRST
+-- (regexp_replace(span, '--[^\n]*', '', 'g')). The original version checked
+-- the raw span, which is wrong in principle - a `;` inside a comment is not
+-- a statement boundary - and it was not hypothetical: 0057's own prose
+-- described the guarantee as "unbroken by any `;`", a comment that itself
+-- contains the character it was warning about, which would have failed this
+-- exact assertion the moment a fully-commented body (rather than the
+-- accidentally-stripped one 0057 actually shipped) ever reached the
+-- database. Every comment in the function bodies this migration deploys is
+-- now worded to avoid the character regardless, in addition to the fix
+-- below - defence in depth, not either/or.
 -- ============================================================================
 select set_config('test.balchk_def', pg_get_functiondef('public.balance_check(integer)'::regprocedure), true);
 select set_config('test.balchk_span',
@@ -384,14 +430,32 @@ select set_config('test.balchk_span',
          - position('with candidates as (' in current_setting('test.balchk_def'))
          + length('returning drifted'))),
   true);
+select set_config('test.balchk_span_no_comments',
+  regexp_replace(current_setting('test.balchk_span'), '--[^\n]*', '', 'g'),
+  true);
 
 select ok(
-  position(';' in current_setting('test.balchk_span')) = 0,
-  'no semicolon (no statement boundary) between "with candidates as (" and "returning drifted" - the candidate read and the upsert are structurally ONE statement');
+  position(';' in current_setting('test.balchk_span_no_comments')) = 0,
+  'no semicolon (no statement boundary) between "with candidates as (" and "returning drifted", once line comments are stripped - the candidate read and the upsert are structurally ONE statement');
 select ok(
   current_setting('test.balchk_span') ~ 'from public\.business_customers'
   and current_setting('test.balchk_span') ~ 'from public\.points_transactions',
   'both public.business_customers and public.points_transactions are read inside that same unbroken span');
+
+-- ============================================================================
+-- DEFENSE (0058): the live body must carry the markers this migration's own
+-- logic is built from, not merely behave as if it does. See the file header
+-- for exactly what this catches - it is the check that would have caught
+-- 0057's divergence immediately instead of leaving it for a live pg_proc
+-- query in a later review.
+-- ============================================================================
+select ok(
+  current_setting('test.balchk_def') ~* 'tier',
+  'the live balance_check body contains "tier" - proof the deployed function carries the priority-tier logic''s own documentation, not just a behaviourally-similar but differently-sourced body (this exact gap - a green migration whose deployed function silently lacked this - is what 0058 exists to correct)');
+select ok(
+  current_setting('test.balchk_def') ~ 'balance_check_priority_count\('
+  and current_setting('test.balchk_def') ~ 'balance_check_coverage_days\(',
+  'the live balance_check body calls both private.balance_check_priority_count and private.balance_check_coverage_days by name - not merely words that could appear in an unrelated comment');
 
 -- ============================================================================
 -- M5: LIMIT NULL is unbounded in Postgres. Structural pin that p_limit is
@@ -489,13 +553,10 @@ select ok(
   'call 4''s freshest checked_at belongs to a pair OUTSIDE {C, D, E} - the cursor rotated back into the older candidate pool rather than re-selecting one of the trio it just finished');
 
 -- ============================================================================
--- I3a: the coverage-days tripwire primitive. By this point in the script the
--- live business_customers table holds at least 9 candidate pairs (A, B, F,
--- G-biz1, G-biz2, C, D, E, plus any unrelated pre-existing live row) that
--- this suite either created or found already checked. With p_limit=1 a full
--- rotation would need at least 9 days - past the 7-day bound doc 39's
--- removed weekly full pass used to guarantee - so the primitive must report
--- exactly that.
+-- I3a/I5: the coverage-days tripwire primitive, now budget-corrected. By
+-- this point in the script the live business_customers table holds at least
+-- 9 candidate pairs (A, B, F, G-biz1, G-biz2, C, D, E, plus any unrelated
+-- pre-existing live row).
 -- ============================================================================
 select set_config('test.bc_total_now', (select count(*)::text from public.business_customers), true);
 
@@ -505,20 +566,25 @@ select ok(
 select is(
   private.balance_check_coverage_days(1)::text,
   current_setting('test.bc_total_now'),
-  'private.balance_check_coverage_days(1) equals the exact live pair count (ceil(n/1) = n)');
+  'private.balance_check_coverage_days(1) equals the exact live pair count (ceil(n/1) = n) - p_limit=1 is already below the 200-slot reservation floor, so the I5 budget correction does not change this one');
+select is(
+  private.balance_check_coverage_days(200)::text,
+  current_setting('test.bc_total_now'),
+  'review fix I5: at p_limit=200 - exactly points.expiry_sweep''s own live cron limit - the effective rotation budget collapses to the floor of 1, so coverage_days equals the full pair count rather than the naive ceil(n/200); this is the discriminating case that proves the budget correction is real, not just present in the source');
 select ok(
   private.balance_check_coverage_days(500) <= 7,
-  'private.balance_check_coverage_days(500) stays within the 7-day bound at the documented default p_limit, given today''s (tiny) pair count');
+  'private.balance_check_coverage_days(500) stays within the 7-day bound at the documented default p_limit (effective budget 500-200=300), given today''s (tiny) pair count');
 
 -- ============================================================================
--- I3b: doc 39's "every pair touched by clawback/expire in the last 24h"
--- priority. Pair A was already checked in the first big run above, so under
--- plain oldest-checked-first it is nowhere near due; a brand-new never-
--- checked pair (H) would normally win any p_limit=1 race against it. A
--- fresh clawback lands on A AFTER that first check, simulating "a reversal
--- happened tonight, after the nightly check already ran" - A must now win
--- priority over H anyway, because a pair this job just watched a reversal
--- touch is higher-risk than one that has simply never been looked at.
+-- I3b/I6: doc 39's "every pair touched by clawback/expire in the last 24h"
+-- priority, and the tier-0 occupancy primitive that reports it. Pair A was
+-- already checked in the first big run above, so under plain oldest-checked-
+-- first it is nowhere near due; a brand-new never-checked pair (H) would
+-- normally win any p_limit=1 race against it. A fresh clawback lands on A
+-- AFTER that first check, simulating "a reversal happened tonight, after the
+-- nightly check already ran" - A must now win priority over H anyway,
+-- because a pair this job just watched a reversal touch is higher-risk than
+-- one that has simply never been looked at.
 --
 -- created_at is stamped explicitly with clock_timestamp(), not left to the
 -- column's own `default now()`: `now()` is transaction_timestamp(), frozen
@@ -533,6 +599,7 @@ select ok(
 -- real ordering for this one fixture without changing anything about how
 -- award_receipt_points/clawback_receipt_points/etc. actually write the
 -- column in production.
+-- ============================================================================
 insert into public.points_transactions (business_id, consumer_id, type, points, balance_after, created_at)
 values (current_setting('test.biz')::uuid, 'f2222222-2222-4222-8222-222222222222', 'clawback', -50, 450, clock_timestamp());
 update public.business_customers
@@ -549,6 +616,13 @@ select set_config('test.a_checked_before_priority',
   (select checked_at::text from public.balance_check_findings
     where business_id = current_setting('test.biz')::uuid
       and consumer_id = 'f2222222-2222-4222-8222-222222222222'), true);
+
+-- I6: the primitive, called directly, BEFORE the run that resolves it -
+-- exactly the one priority candidate (pair A) is visible to it right now.
+select is(
+  private.balance_check_priority_count(1)::text,
+  '1',
+  'review fix I6: private.balance_check_priority_count(1) correctly identifies pair A as the one priority candidate before the run that re-verifies it');
 
 select is(public.balance_check(1)::text, '1', 'priority call processes exactly one pair');
 
@@ -576,10 +650,23 @@ select ok(
   ),
   'pair H (never checked, no clawback/expire activity) was NOT touched - priority genuinely outranked a never-checked pair, it was not a coincidence of ordinary rotation order');
 
+-- I6, again: the primitive now reports 0 - pair A was just resolved and
+-- nothing else in the priority tier remains, matching what the run above
+-- actually did rather than a second, independent count.
+select is(
+  private.balance_check_priority_count(1)::text,
+  '0',
+  'review fix I6: private.balance_check_priority_count(1) is 0 immediately after the one priority pair was resolved');
+
 -- ============================================================================
--- M2: pair-level cascade. A finding for a pair whose underlying
+-- M2/I7: pair-level cleanup. A finding for a pair whose underlying
 -- business_customers row is deleted (without the business or consumer
--- itself being deleted) must not survive as an unclearable stale row.
+-- itself being deleted) must not survive as an unclearable stale row. As of
+-- 0058 this is an AFTER DELETE trigger, not a foreign key (the composite FK
+-- 0057 used took an implicit FOR KEY SHARE lock on business_customers that
+-- conflicts with every money-path writer's FOR UPDATE - see 0058's header,
+-- review fix I7); the observable outcome this assertion checks is identical
+-- either way.
 -- ============================================================================
 insert into public.business_customers (business_id, consumer_id, points_balance)
 values (current_setting('test.biz')::uuid, 'e4444444-4444-4444-8444-444444444444', 150);
@@ -608,7 +695,7 @@ select ok(
      where business_id = current_setting('test.biz')::uuid
        and consumer_id = 'e4444444-4444-4444-8444-444444444444'
   ),
-  'deleting the business_customers row cascades to balance_check_findings - no stale, unclearable finding survives it (review fix M2)');
+  'deleting the business_customers row cleans up balance_check_findings via the AFTER DELETE trigger - no stale, unclearable finding survives it (review fix M2, mechanism changed by I7)');
 
 -- ------------------------------------------------------------ the schedule
 select is(
