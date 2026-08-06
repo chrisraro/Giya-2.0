@@ -23,3 +23,12 @@ export type CampaignSummary = CampaignRow & {
 export type ActionResult<T = undefined> =
   | { ok: true; data?: T }
   | { ok: false; message: string; code?: string };
+
+/** The staff member driving a lifecycle transition (activate/pause/resume/
+ * end/archive), resolved server-side from the session by actions.ts and
+ * threaded through service.ts so the resulting `audit_logs` row carries a
+ * real actor_id/actor_role rather than a null "system" one. */
+export interface LifecycleActor {
+  userId: string;
+  role: string;
+}

@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { createClient } from "@/lib/supabase/server";
+import { BUSINESS_ROLES, resolveStaffContext } from "@/features/businesses/server/resolve-owner-business";
 
 import {
   baseRuleSchema,
@@ -12,7 +13,6 @@ import {
   createRewardCampaignSchema,
   idSchema,
 } from "./schemas";
-import * as repo from "./server/repo";
 import * as service from "./server/service";
 import type { ActionResult, CampaignRow, PointsRuleRow } from "./server/types";
 
@@ -47,9 +47,18 @@ function firstIssueMessage(error: z.ZodError): string {
  * calls this first; the business id it returns is the only one used in
  * subsequent repo/service calls. Same pattern as
  * src/features/menu/actions.ts's requireOwnerBusiness.
+ *
+ * ALSO returns `actor` (the caller's profile id + business_staff.role), via
+ * `resolveStaffContext` with the full `BUSINESS_ROLES` list - i.e. still "any
+ * active member", identical gating to the old `resolveOwnerBusiness` call
+ * this replaces, just with the role read out at the same time. The lifecycle
+ * actions (activate/pause/resume/end/archive) need it to write a real
+ * actor_id/actor_role on their `audit_logs` row (task 1.7) instead of a null
+ * "system" one; every other action ignores the field.
  */
 async function requireOwnerBusiness(): Promise<
-  { ok: true; businessId: string } | { ok: false; result: ActionResult<never> }
+  | { ok: true; businessId: string; actor: { userId: string; role: string } }
+  | { ok: false; result: ActionResult<never> }
 > {
   const supabase = await createClient();
   const {
@@ -60,12 +69,12 @@ async function requireOwnerBusiness(): Promise<
     return { ok: false, result: NOT_SIGNED_IN };
   }
 
-  const business = await repo.resolveOwnerBusiness();
-  if (!business) {
+  const staff = await resolveStaffContext(BUSINESS_ROLES);
+  if (!staff) {
     return { ok: false, result: NO_BUSINESS };
   }
 
-  return { ok: true, businessId: business.id };
+  return { ok: true, businessId: staff.businessId, actor: { userId: staff.userId, role: staff.role } };
 }
 
 const campaignIdInputSchema = z.object({ campaignId: idSchema });
@@ -123,7 +132,7 @@ export async function activateCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.activateCampaign(auth.businessId, parsed.data.campaignId);
+  const result = await service.activateCampaign(auth.businessId, parsed.data.campaignId, auth.actor);
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
@@ -137,7 +146,7 @@ export async function pauseCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.pauseCampaign(auth.businessId, parsed.data.campaignId);
+  const result = await service.pauseCampaign(auth.businessId, parsed.data.campaignId, auth.actor);
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
@@ -151,7 +160,7 @@ export async function archiveCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.archiveCampaign(auth.businessId, parsed.data.campaignId);
+  const result = await service.archiveCampaign(auth.businessId, parsed.data.campaignId, auth.actor);
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
@@ -165,7 +174,7 @@ export async function resumeCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.resumeCampaign(auth.businessId, parsed.data.campaignId);
+  const result = await service.resumeCampaign(auth.businessId, parsed.data.campaignId, auth.actor);
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
@@ -179,7 +188,7 @@ export async function endCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.endCampaign(auth.businessId, parsed.data.campaignId);
+  const result = await service.endCampaign(auth.businessId, parsed.data.campaignId, auth.actor);
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }

@@ -10,8 +10,14 @@ import type {
   CreatePromotionCampaignInput,
   CreateRewardCampaignInput,
 } from "../schemas";
-import type { ActionResult, CampaignRow, PointsRuleRow } from "./types";
+import type { ActionResult, CampaignRow, LifecycleActor, PointsRuleRow } from "./types";
 import * as repo from "./repo";
+import {
+  CAMPAIGN_LIFECYCLE_ACTIONS,
+  writeCampaignLifecycleAuditRow,
+  type CampaignLifecycleTransition,
+} from "./audit";
+import { createServiceRoleClient } from "@/lib/supabase/service";
 
 // Thin orchestration over repo.ts: translate the repo's { data, error }
 // shape into the { ok } | { ok: false, message, code? } contract actions.ts
@@ -94,6 +100,54 @@ function toEngineCampaign(row: CampaignRow, evaluatedStatus: CampaignStatus): Ca
 }
 
 /**
+ * Writes the `audit_logs` row for a staff-initiated lifecycle transition
+ * (task 1.7; doc 34 section 10's `campaign.<transition>` registry). Resolves
+ * its own service-role client - 0022 revokes `audit_logs` INSERT from every
+ * client role, and repo.ts's session-scoped client (the one every other
+ * function in this file reads/writes campaigns through) cannot write it -
+ * exactly the way src/features/customers/server/audit.ts's
+ * recordSegmentChange resolves its own.
+ *
+ * BEST-EFFORT, NOT A GATE: called only AFTER repo.setCampaignStatus has
+ * already returned success, and never rolls that transition back or turns
+ * the caller's ActionResult into a failure if the write itself fails
+ * (missing service-role key, or a genuine insert error) - audit is evidence
+ * of a transition that happened, not a precondition for letting it happen.
+ * Both failure modes are logged loudly so a missing/incomplete trail is
+ * never silent. Same contract as ./exhaustion.ts's system-actor pause, which
+ * shares ./audit.ts's row writer with this function so the two paths can
+ * never drift into different shapes for the same `campaign.paused` verb.
+ */
+async function writeLifecycleAuditRow(
+  businessId: string,
+  campaignId: string,
+  transition: CampaignLifecycleTransition,
+  actor: LifecycleActor,
+  fromStatus: CampaignStatus,
+  toStatus: CampaignStatus,
+): Promise<void> {
+  const supabase = createServiceRoleClient();
+  if (supabase === null) {
+    console.warn(
+      `[campaigns] no service-role key: campaign ${campaignId}'s ${transition} was applied but not audited`,
+    );
+    return;
+  }
+
+  await writeCampaignLifecycleAuditRow(supabase, {
+    businessId,
+    campaignId,
+    action: CAMPAIGN_LIFECYCLE_ACTIONS[transition],
+    actorKind: "user",
+    actorId: actor.userId,
+    actorRole: actor.role,
+    before: { status: fromStatus },
+    after: { status: toStatus },
+    reason: null,
+  });
+}
+
+/**
  * Activates a campaign (draft -> active or scheduled -> active; doc 34 T2/T3).
  *
  * CALLER-CONTRACT for activationGates (per review): G3's "a scheduled
@@ -111,6 +165,7 @@ function toEngineCampaign(row: CampaignRow, evaluatedStatus: CampaignStatus): Ca
 export async function activateCampaign(
   businessId: string,
   campaignId: string,
+  actor: LifecycleActor,
 ): Promise<ActionResult<CampaignRow>> {
   const row = await repo.getCampaignRow(businessId, campaignId);
   if (!row) return { ok: false, message: "Campaign not found." };
@@ -128,9 +183,10 @@ export async function activateCampaign(
     return failResult("Campaign is not ready to activate.");
   }
 
+  const fromStatus = row.status as CampaignStatus;
   let target: CampaignStatus;
   try {
-    target = nextStatus({ status: row.status as CampaignStatus }, "activate");
+    target = nextStatus({ status: fromStatus }, "activate");
   } catch (err) {
     if (err instanceof CampaignTransitionError) {
       return failResult(err.message, err.code);
@@ -143,14 +199,10 @@ export async function activateCampaign(
     patch.starts_at = new Date().toISOString();
   }
 
-  const { data, error } = await repo.setCampaignStatus(
-    businessId,
-    campaignId,
-    row.status as CampaignStatus,
-    patch,
-  );
+  const { data, error } = await repo.setCampaignStatus(businessId, campaignId, fromStatus, patch);
   if (error) return failResult(error.message, error.code);
 
+  await writeLifecycleAuditRow(businessId, campaignId, "activate", actor, fromStatus, target);
   emitLifecycleEvent(businessId, campaignId, "activate");
   return okResult(data);
 }
@@ -158,7 +210,8 @@ export async function activateCampaign(
 async function transitionCampaign(
   businessId: string,
   campaignId: string,
-  action: "pause" | "resume" | "end" | "archive",
+  action: "pause" | "end" | "archive",
+  actor: LifecycleActor,
 ): Promise<ActionResult<CampaignRow>> {
   const row = await repo.getCampaignRow(businessId, campaignId);
   if (!row) return { ok: false, message: "Campaign not found." };
@@ -183,6 +236,7 @@ async function transitionCampaign(
   const { data, error } = await repo.setCampaignStatus(businessId, campaignId, expectedFrom, patch);
   if (error) return failResult(error.message, error.code);
 
+  await writeLifecycleAuditRow(businessId, campaignId, action, actor, expectedFrom, target);
   emitLifecycleEvent(businessId, campaignId, action);
   return okResult(data);
 }
@@ -190,29 +244,78 @@ async function transitionCampaign(
 export async function pauseCampaign(
   businessId: string,
   campaignId: string,
+  actor: LifecycleActor,
 ): Promise<ActionResult<CampaignRow>> {
-  return transitionCampaign(businessId, campaignId, "pause");
+  return transitionCampaign(businessId, campaignId, "pause", actor);
 }
 
 export async function archiveCampaign(
   businessId: string,
   campaignId: string,
+  actor: LifecycleActor,
 ): Promise<ActionResult<CampaignRow>> {
-  return transitionCampaign(businessId, campaignId, "archive");
+  return transitionCampaign(businessId, campaignId, "archive", actor);
 }
 
 /**
- * Resumes a paused campaign (paused -> active; doc 34 T6). This is just the
- * inverse of pauseCampaign - a previously-validated campaign that already
- * cleared activationGates once does not need to clear them again to resume,
- * so this deliberately does not re-run activationGates the way
- * activateCampaign does.
+ * Resumes a paused campaign (paused -> active; doc 34 T6).
+ *
+ * Review fix (task 1.7, doc 34 T6): a previously-validated campaign does NOT
+ * skip activationGates on resume. The original reasoning ("it already
+ * cleared the gates once to activate") ignored that time passes while a
+ * campaign sits paused - its business can lose active status, and its
+ * `ends_at` can pass - so re-running G1-G4 here is what stops a paused
+ * campaign from resuming into a live state it could never reach via
+ * activateCampaign. Same CALLER-CONTRACT as activateCampaign: this action's
+ * only target is 'active', so the Campaign shape passed to the gate always
+ * carries `status: 'active'`, never the row's actual 'paused'.
+ *
+ * ORDER: the transition-validity check (nextStatus) runs BEFORE the gates,
+ * not after as in activateCampaign. A campaign that isn't even paused isn't
+ * "resuming" at all, so there is no reason to load its business/payload just
+ * to report a gate failure instead of the more useful CAMPAIGN_INVALID_STATE.
  */
 export async function resumeCampaign(
   businessId: string,
   campaignId: string,
+  actor: LifecycleActor,
 ): Promise<ActionResult<CampaignRow>> {
-  return transitionCampaign(businessId, campaignId, "resume");
+  const row = await repo.getCampaignRow(businessId, campaignId);
+  if (!row) return { ok: false, message: "Campaign not found." };
+
+  const expectedFrom = row.status as CampaignStatus;
+
+  let target: CampaignStatus;
+  try {
+    target = nextStatus({ status: expectedFrom }, "resume");
+  } catch (err) {
+    if (err instanceof CampaignTransitionError) {
+      return failResult(err.message, err.code);
+    }
+    throw err;
+  }
+
+  const business = await repo.getBusinessStatus(businessId);
+  if (!business) return { ok: false, message: "Business not found." };
+
+  const presence = await repo.getCampaignPayloadPresence(businessId, campaignId);
+  const evaluatedCampaign = toEngineCampaign(row, "active");
+
+  const gateResult = activationGates(evaluatedCampaign, presence, business, new Date());
+  if (!gateResult.ok) {
+    const first = gateResult.failures[0];
+    if (first) return failResult(first.message, first.code);
+    return failResult("Campaign is not ready to resume.");
+  }
+
+  const { data, error } = await repo.setCampaignStatus(businessId, campaignId, expectedFrom, {
+    status: target,
+  });
+  if (error) return failResult(error.message, error.code);
+
+  await writeLifecycleAuditRow(businessId, campaignId, "resume", actor, expectedFrom, target);
+  emitLifecycleEvent(businessId, campaignId, "resume");
+  return okResult(data);
 }
 
 /**
@@ -227,8 +330,9 @@ export async function resumeCampaign(
 export async function endCampaign(
   businessId: string,
   campaignId: string,
+  actor: LifecycleActor,
 ): Promise<ActionResult<CampaignRow>> {
-  return transitionCampaign(businessId, campaignId, "end");
+  return transitionCampaign(businessId, campaignId, "end", actor);
 }
 
 export async function upsertBaseRule(

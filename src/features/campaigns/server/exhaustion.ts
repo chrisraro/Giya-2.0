@@ -5,6 +5,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { raiseNotification } from "@/features/notifications/server/raise";
 import type { Database } from "@/lib/supabase/types";
 
+import { CAMPAIGN_LIFECYCLE_ACTIONS, writeCampaignLifecycleAuditRow } from "./audit";
+
 // ===========================================================================
 // Doc 34 section 5's "On exhaustion" clause (task 1.2): once a campaign's
 // `max_total_points` budget is fully spent, the campaign transitions
@@ -25,9 +27,6 @@ import type { Database } from "@/lib/supabase/types";
 // caller (`award.ts`) only ever passes campaign ids that carry a
 // `max_total_points` cap.
 // ===========================================================================
-
-const AUDIT_ACTION_PAUSED = "campaign.paused";
-const AUDIT_ENTITY_TYPE = "campaign";
 
 export interface ExhaustionDeps {
   /** SERVICE ROLE, matching the award path's own client (`AwardDeps`):
@@ -174,27 +173,22 @@ async function pauseOneIfExhausted(deps: ExhaustionDeps, campaignId: string): Pr
  *
  * Best-effort: the pause itself already committed by the time this runs, and
  * an unaudited pause (logged loudly) is a smaller loss than pretending the
- * pause never happened.
+ * pause never happened. Delegates to ./audit.ts's shared writer so this
+ * system-actor pause and every staff-initiated transition in ./service.ts
+ * write through the exact same row shape and verb vocabulary.
  */
 async function writeAuditRow(deps: ExhaustionDeps, campaign: CampaignRow): Promise<void> {
-  const { error } = await deps.supabase.from("audit_logs").insert({
-    actor_id: null,
-    actor_kind: "system",
-    business_id: campaign.business_id,
-    action: AUDIT_ACTION_PAUSED,
-    entity_type: AUDIT_ENTITY_TYPE,
-    entity_id: campaign.id,
+  await writeCampaignLifecycleAuditRow(deps.supabase, {
+    businessId: campaign.business_id,
+    campaignId: campaign.id,
+    action: CAMPAIGN_LIFECYCLE_ACTIONS.pause,
+    actorKind: "system",
+    actorId: null,
+    actorRole: null,
     before: { status: "active" },
     after: { status: "paused", reason: "budget_exhausted" },
     reason: "Campaign auto-paused: its max_total_points budget is fully spent.",
   });
-
-  if (error !== null) {
-    console.error(
-      `[campaigns/exhaustion] could not write the audit row for campaign ${campaign.id}'s auto-pause`,
-      error,
-    );
-  }
 }
 
 /**
