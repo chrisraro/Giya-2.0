@@ -94,4 +94,16 @@ describe("affordability", () => {
 
     expect(result.progress).toEqual({ rewardId: "r1", rewardName: "Free Kape", current: 0, target: 1500 });
   });
+
+  it("breaks a tie between two equally-priced unaffordable rewards by first-seen order", () => {
+    // Not pinned before this review pass: `<` (strict) rather than `<=` in
+    // the scan is what makes the FIRST of two equal-cost rewards win, not
+    // whichever happens to iterate last.
+    const result = affordability(100, [
+      reward("first", "Iced tea", 900),
+      reward("second", "Milk tea", 900),
+    ]);
+
+    expect(result.progress?.rewardId).toBe("first");
+  });
 });

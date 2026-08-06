@@ -43,7 +43,12 @@ export default async function RewardsPage() {
           <div className="mt-3 flex flex-col gap-6">
             {groups.map((group) => (
               <div key={group.businessId}>
-                <h3 className="text-title-s text-on-surface">{group.businessName}</h3>
+                {/* Omitted, not an empty heading, when the businesses lookup
+                    missed (mirrors RewardCard's analogous slug-empty guard):
+                    a heading with no accessible name is worse than none. */}
+                {group.businessName ? (
+                  <h3 className="text-title-s text-on-surface">{group.businessName}</h3>
+                ) : null}
                 {group.progress ? (
                   <RewardProgress
                     current={group.progress.current}

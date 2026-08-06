@@ -15,8 +15,17 @@ import { PublicMenu } from "@/features/menu/components/public-menu";
 import { createClient } from "@/lib/supabase/server";
 import { formatHoursSummary } from "@/lib/hours";
 
-// Public menu data changes at merchant pace, not per-request - a 60s ISR
-// window keeps the page fast without needing manual revalidation wiring.
+// Public menu data changes at merchant pace, not per-request, which is the
+// intent behind this 60s revalidate window - but note it is NOT actually
+// serving from a static/ISR cache today. Every `public-repo.ts` read already
+// calls the shared `createClient()`, which reads `cookies()` (for the anon
+// Supabase session) - a dynamic API that opts the whole route into per-
+// request rendering regardless of this export. This task adds a SECOND
+// per-user cookie read (the viewer's own session, for the balance lookup
+// below), which only deepens that: there is no version of this page a
+// signed-in viewer's balance can safely be ISR-cached across, so removing
+// this export entirely would be more honest than fixing the number - kept as
+// a "this is the intended cost, not a bug" marker rather than removed outright.
 export const revalidate = 60;
 
 type PageParams = { slug: string };
@@ -64,19 +73,27 @@ export default async function PublicBusinessPage({
   const [menuGroups, rewards, balance] = await Promise.all([
     getPublicMenu(business.id),
     getPublicRewards(business.id),
-    user ? getMyBalanceForBusiness(business.id) : Promise.resolve(null),
+    // getMyBalanceForBusiness is filtered on the VIEWER's own consumer id, not
+    // business_id alone (task-5 review I1): business_customers_staff_select
+    // grants owner/manager/marketing staff SELECT over every customer row at
+    // their own business, so business_id alone could return a stranger's
+    // balance to a staff member browsing their own /b/[slug].
+    user ? getMyBalanceForBusiness(business.id, user.id) : Promise.resolve(null),
   ]);
-  // null from getMyBalanceForBusiness means "no business_customers row yet",
-  // which for a signed-in viewer reads as 0 points here (never earned at
-  // this business), not "no balance context" - that distinction is what
-  // `hasBalanceContext` below actually carries.
-  const hasBalanceContext = user !== null;
-  const rewardAffordability = hasBalanceContext
-    ? affordability(
-        balance ?? 0,
-        rewards.map((reward) => ({ rewardId: reward.id, name: reward.name, pointsCost: reward.pointsCost })),
-      )
-    : null;
+  // null means either "signed out" or "signed in but no business_customers
+  // row here yet" (never earned at this business) - both read as "no
+  // affordability fact to render" (product call, task-5 review): a brand-new
+  // visitor's whole catalogue should look like the signed-out view, not a
+  // wall of unaffordable grey. A REAL row holding exactly 0 points is a
+  // different, later state (`balance === 0`, not `null`) and still gets the
+  // full treatment below.
+  const rewardAffordability =
+    balance !== null
+      ? affordability(
+          balance,
+          rewards.map((reward) => ({ rewardId: reward.id, name: reward.name, pointsCost: reward.pointsCost })),
+        )
+      : null;
   const affordabilityByRewardId = rewardAffordability
     ? new Map(rewardAffordability.rewards.map((r) => [r.rewardId, r]))
     : null;
@@ -143,8 +160,13 @@ export default async function PublicBusinessPage({
                 <li key={reward.id} className="rounded-md3-md border border-outline-variant bg-surface p-4">
                   {/* aria-disabled lives on this wrapper, not the <li>: "listitem"
                       is an implicit ARIA role that does not support aria-disabled
-                      per spec (jsx-a11y/role-supports-aria-props), but a plain
-                      div has no implicit role and can carry it. */}
+                      per spec (jsx-a11y/role-supports-aria-props), but a plain div
+                      has no implicit role and can carry it. It has no live effect
+                      on assistive tech either way (role=generic) - present because
+                      the brief asks for it, not because it announces anything on
+                      its own; the visible shortfall text is the real signal here
+                      (there is no button to disable on this read-only catalogue
+                      view). */}
                   <div aria-disabled={!affordable}>
                     <div className="flex items-start justify-between gap-3">
                       <p className={cn("text-title-m", affordable ? "text-on-surface" : "text-on-surface-variant")}>
@@ -153,7 +175,7 @@ export default async function PublicBusinessPage({
                       <Badge
                         className={cn(
                           "shrink-0",
-                          !affordable && "bg-surface-container-high text-on-surface-variant",
+                          !affordable && "bg-surface-variant text-on-surface-variant",
                         )}
                       >
                         {reward.pointsCost} pts

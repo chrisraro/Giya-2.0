@@ -21,13 +21,18 @@ export interface RewardProgressProps {
  * from the `value` prop at first paint (an inline style, not a class flipped
  * after mount), so the bar never ships empty to a headless render or a
  * hidden tab - doc 16's binding rule for this task.
+ *
+ * The visible sentence is `aria-hidden`: `LinearProgress`'s own `aria-label`
+ * already carries an equivalent ("X of Y points toward Z"), and a
+ * screen-reader user hearing both back to back is a duplicate announcement,
+ * not two pieces of information.
  */
 export function RewardProgress({ current, target, rewardName, className }: RewardProgressProps) {
   const fraction = target > 0 ? Math.min(1, Math.max(0, current / target)) : 0;
 
   return (
     <div className={className}>
-      <p className="text-label-m text-on-surface-variant">
+      <p aria-hidden className="text-label-m text-on-surface-variant">
         <span className="font-mono text-on-surface">{current.toLocaleString()}</span>
         {" / "}
         <span className="font-mono text-on-surface">{target.toLocaleString()}</span>

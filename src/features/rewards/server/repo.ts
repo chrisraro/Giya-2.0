@@ -208,29 +208,52 @@ export async function getMyBalances(): Promise<BalanceDTO[]> {
 
 /**
  * The caller's points balance at ONE business, or null when they have no
- * `business_customers` row there (never earned/visited) - which the caller
- * should treat as "0 points", not "no balance context at all". Scoped to a
- * single business_id rather than reusing getMyBalances(): `/b/[slug]` is a
- * public page a signed-out visitor can load too, so this only ever costs one
- * narrow query for one business's worth of use, never a wallet-wide read.
+ * `business_customers` row there (never earned/visited). Scoped to a single
+ * business_id rather than reusing getMyBalances(): `/b/[slug]` is a public
+ * page a signed-out visitor can load too, so this only ever costs one narrow
+ * query for one business's worth of use, never a wallet-wide read.
  *
- * Callers on a page a signed-out visitor can reach (like `/b/[slug]`) MUST
- * only call this when a user is actually signed in - RLS scopes
- * business_customers_consumer_select to `authenticated`, so an anon caller
- * gets no row back either way, but skipping the call entirely for a
- * signed-out visitor avoids a query that can only ever answer null.
+ * `consumerId` MUST be passed and filtered on explicitly - RLS alone is not
+ * enough here. `business_customers_staff_select` (0011:57) grants
+ * owner/manager/marketing staff SELECT over EVERY customer row at their own
+ * business, not just their own; without this filter, an owner viewing their
+ * own `/b/[slug]` with exactly one customer row would get THAT CUSTOMER's
+ * balance back as if it were their own (and `.maybeSingle()` would error
+ * outright with several rows). Same defense-in-depth convention documented at
+ * the top of `public-repo.ts`: RLS is the real gate, this filter is not the
+ * only one.
+ *
+ * Throws on a genuine query failure rather than returning null for it - null
+ * means "no relationship row" (a common, real state), not "something went
+ * wrong". Conflating the two would render a transient DB error as a
+ * confidently wrong "0 points" to a consumer who may have thousands. Same
+ * split as `getClaim` above.
+ *
+ * Callers on a page a signed-out visitor can reach (like `/b/[slug]`) should
+ * still only call this when a user is actually signed in: skipping the call
+ * entirely for a signed-out visitor avoids a query that could only ever
+ * answer null (RLS scopes business_customers_consumer_select to
+ * `authenticated`).
  */
-export async function getMyBalanceForBusiness(businessId: string): Promise<number | null> {
+export async function getMyBalanceForBusiness(
+  businessId: string,
+  consumerId: string,
+): Promise<number | null> {
   const supabase = await createClient();
 
   const { data, error } = await supabase
     .from("business_customers")
     .select("points_balance")
     .eq("business_id", businessId)
+    .eq("consumer_id", consumerId)
     .maybeSingle();
 
-  if (error || !data) return null;
-  return data.points_balance;
+  if (error) {
+    throw new Error(
+      `getMyBalanceForBusiness: failed to load balance for business ${businessId}: ${error.message}`,
+    );
+  }
+  return data ? data.points_balance : null;
 }
 
 /**

@@ -199,6 +199,22 @@ describe("shape matches the loaded counterpart", () => {
     expect(container.querySelector(".grid-cols-2")).not.toBeNull();
   });
 
+  it("consumer /rewards reserves one heading + progress rail per business group (task 5)", () => {
+    // page.tsx renders one <h3> business heading and an optional
+    // RewardProgress (a 4px `h-1 rounded-full` bar) per group, ABOVE that
+    // group's own two-column grid - not one flat grid for the whole
+    // catalogue. A skeleton that still drew the old flat shape would reserve
+    // the wrong amount of vertical space per business and cause a jump.
+    const { container } = render(<RewardsLoading />);
+    const grids = container.querySelectorAll(".grid-cols-2");
+    const rails = container.querySelectorAll(".h-1.rounded-full");
+
+    expect(grids.length).toBeGreaterThan(0);
+    // Every reserved grid must have its own rail reserved above it, not one
+    // rail shared across every group.
+    expect(rails.length).toBe(grids.length);
+  });
+
   it("consumer /receipts draws the five status filter chips", () => {
     // All / Processing / In review / Approved / Not accepted. Five is fixed by
     // receipt-history-list.tsx, not by taste.
@@ -301,6 +317,14 @@ describe("shape matches the loaded counterpart", () => {
     expect(container.querySelector(".h-40")).not.toBeNull();
     expect(container.querySelector(".-mt-10")).not.toBeNull();
     expect(container.querySelector(".size-20.rounded-full")).not.toBeNull();
+  });
+
+  it("consumer /b/[slug] reserves the reward progress rail above the reward list (task 5)", () => {
+    // page.tsx renders an optional RewardProgress (a 4px `h-1 rounded-full`
+    // bar) above the reward <ul>, for a signed-in viewer with a balance here.
+    const { container } = render(<ShopLoading />);
+
+    expect(container.querySelector(".h-1.rounded-full")).not.toBeNull();
   });
 
   it("no portal skeleton reproduces the topbar or sidebar", () => {

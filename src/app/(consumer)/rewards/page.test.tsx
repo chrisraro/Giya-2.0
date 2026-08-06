@@ -94,15 +94,47 @@ describe("RewardsPage affordability wiring", () => {
     expect(screen.getByRole("button", { name: "Claim" })).not.toBeDisabled();
   });
 
-  it("defaults an unrelated business's balance to 0 rather than crashing or affording it", async () => {
+  it("shows a business the caller has never earned at as plain catalogue - no grey, no shortfall, no progress", async () => {
+    // Product call from the task-5 review: listClaimableRewards() is the
+    // WHOLE public catalogue, so without this a brand-new consumer with zero
+    // business_customers rows would see every business on the platform
+    // rendered as an unaffordable wall of grey. There is no balance row here
+    // at all (not even a 0 one), so this business gets no affordability
+    // treatment whatsoever - the same as before this task existed.
     mocks.listClaimableRewards.mockResolvedValue([reward({ businessId: "biz-2", pointsCost: 500 })]);
-    // No business_customers row for biz-2 at all.
     mocks.getMyBalances.mockResolvedValue([]);
 
     render(await RewardsPage());
 
+    expect(screen.getByText("Free latte")).toHaveClass("text-on-surface");
+    expect(screen.queryByText(/points to go/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Claim" })).not.toBeDisabled();
+  });
+
+  it("still greys a reward at a business where the caller's real balance is exactly 0 (spent it all, not never visited)", async () => {
+    mocks.listClaimableRewards.mockResolvedValue([reward({ pointsCost: 500 })]);
+    mocks.getMyBalances.mockResolvedValue([balance({ pointsBalance: 0 })]);
+
+    render(await RewardsPage());
+
     expect(screen.getByText("Free latte")).toHaveClass("text-on-surface-variant");
+    expect(
+      screen.getByText(
+        (_content, element) =>
+          element?.tagName.toLowerCase() === "p" && element.textContent === "500 points to go",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Claim" })).toBeDisabled();
+  });
+
+  it("omits the business heading rather than rendering an empty one when the business name did not resolve", async () => {
+    mocks.listClaimableRewards.mockResolvedValue([reward({ businessName: "" })]);
+    mocks.getMyBalances.mockResolvedValue([balance({ pointsBalance: 1000 })]);
+
+    render(await RewardsPage());
+
+    expect(screen.queryByRole("heading", { level: 3 })).not.toBeInTheDocument();
   });
 
   it("anchors the progress indicator to the cheapest unaffordable reward at that business, not the maximum", async () => {

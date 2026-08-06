@@ -5,6 +5,10 @@ export interface RewardShortfallProps {
    * only render this for an unaffordable reward. */
   readonly shortfall: number;
   readonly className?: string | undefined;
+  /** Lets a caller (RewardCard) point its disabled Claim button's
+   * `aria-describedby` at this text, so a screen-reader user landing on the
+   * dimmed control hears WHY, not just that it is disabled. */
+  readonly id?: string | undefined;
 }
 
 /**
@@ -18,9 +22,9 @@ export interface RewardShortfallProps {
  * convention. Muted-gray-on-tinted is the most common contrast failure there
  * is, and this number is the single most important text on the card.
  */
-export function RewardShortfall({ shortfall, className }: RewardShortfallProps) {
+export function RewardShortfall({ shortfall, className, id }: RewardShortfallProps) {
   return (
-    <p className={cn("text-label-s text-on-surface-variant", className)}>
+    <p id={id} className={cn("text-label-s text-on-surface-variant", className)}>
       <span className="font-mono text-on-surface">{shortfall.toLocaleString()}</span> points to go
     </p>
   );

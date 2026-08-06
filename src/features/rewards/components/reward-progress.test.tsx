@@ -45,4 +45,11 @@ describe("RewardProgress", () => {
 
     expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "100");
   });
+
+  it("does not announce the anchor sentence twice: the visible line is aria-hidden since the progressbar already carries an equivalent label", () => {
+    render(<RewardProgress current={850} target={1500} rewardName="Free Kape" />);
+
+    expect(fullLine()).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getByRole("progressbar")).toHaveAttribute("aria-label");
+  });
 });

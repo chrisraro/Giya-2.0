@@ -48,6 +48,7 @@ export function RewardCard({ reward, affordability }: RewardCardProps) {
   // Omitted entirely (no balance context wired) renders as affordable, same
   // as before this prop existed.
   const affordable = affordability?.affordable ?? true;
+  const shortfallId = `reward-shortfall-${reward.rewardId}`;
 
   async function handleClaim() {
     setPending(true);
@@ -62,11 +63,12 @@ export function RewardCard({ reward, affordability }: RewardCardProps) {
   }
 
   return (
-    // aria-disabled (not the native `disabled` attribute - this is a div, not
-    // a control) so assistive tech does not read an unaffordable card as
-    // "tappable" even though its Claim button below is the thing that is
-    // actually inert. Doc 16's binding rule: grey via `on-surface-variant`,
-    // never hide, and never grow a shadow (the `filled` variant has none).
+    // aria-disabled per the brief's design contract, though on a bare div
+    // (role=generic) it has no live effect on assistive tech - the actual
+    // signal a screen-reader user gets is the disabled Claim button below
+    // plus its aria-describedby-linked shortfall text. Doc 16's binding rule:
+    // grey via `on-surface-variant`, never hide, and never grow a shadow (the
+    // `filled` variant has none).
     <Card variant="filled" className="flex flex-col gap-2 p-4" aria-disabled={!affordable}>
       <p className={cn("text-title-s", affordable ? "text-on-surface" : "text-on-surface-variant")}>
         {reward.name}
@@ -87,7 +89,7 @@ export function RewardCard({ reward, affordability }: RewardCardProps) {
       ) : (
         <p className="text-body-s text-on-surface-variant">{reward.businessName}</p>
       )}
-      <Badge className={cn("w-fit", !affordable && "bg-surface-container-high text-on-surface-variant")}>
+      <Badge className={cn("w-fit", !affordable && "bg-surface-variant text-on-surface-variant")}>
         {reward.pointsCost} pts
       </Badge>
       {reward.remaining !== null ? (
@@ -95,7 +97,9 @@ export function RewardCard({ reward, affordability }: RewardCardProps) {
           {outOfStock ? "None left" : `${reward.remaining} left`}
         </p>
       ) : null}
-      {!affordable && affordability ? <RewardShortfall shortfall={affordability.shortfall} /> : null}
+      {!affordable && affordability ? (
+        <RewardShortfall id={shortfallId} shortfall={affordability.shortfall} />
+      ) : null}
       {/* Spending points is a money path: the button must show it was tapped,
           refuse a second tap, and not resize while it does either. PendingButton
           handles all three -- it renders "Claim" and "Claiming" in the same grid
@@ -103,7 +107,10 @@ export function RewardCard({ reward, affordability }: RewardCardProps) {
           paint and the card below it never moves.
           Unaffordable is folded into the same `disabled` the out-of-stock case
           already used: real `disabled`, not just a greyed style, so a tap can
-          never reach `claimReward` and fail with POINTS_INSUFFICIENT. */}
+          never reach `claimReward` and fail with POINTS_INSUFFICIENT.
+          aria-describedby only when unaffordable, pointing at the shortfall
+          text above: a screen-reader user landing on the dimmed control
+          should hear WHY, not just that it is disabled. */}
       <PendingButton
         type="button"
         variant="tonal"
@@ -111,6 +118,7 @@ export function RewardCard({ reward, affordability }: RewardCardProps) {
         pending={pending}
         pendingLabel="Claiming"
         disabled={claimed || outOfStock || !affordable}
+        {...(!affordable && affordability ? { "aria-describedby": shortfallId } : {})}
         onClick={handleClaim}
         className="mt-1 w-full"
       >
