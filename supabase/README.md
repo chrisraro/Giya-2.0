@@ -123,6 +123,7 @@ Fifteen suites, one per domain:
 | `rpc_activation_smoke.sql` | merchant activation (0033), 52 assertions: THE COLUMN FENCE ON `businesses` asserted both ways (an owner's session with a real `biz` claim gets 42501 writing `status`, `verified_at` or `plan`, and the same session still edits `name` and the edit lands, so the refusals are about COLUMNS and not about a policy that missed), `private.has_usable_base_rule` including the half-filled `amount_rate` row with a null rate that passes every table constraint and awards nothing, the service_role-only grant on all three RPCs, `submit_business_for_review` (owner-only by table truth, refused for a tenant with no usable rule, opens a `business_verifications` round, writes an `actor_kind='user'` audit row, and refuses a second submission), `activate_business` (mandatory reason, `support` refused, the tenant's own owner refused, ACTIVATION_NO_EARNING_RULE when the rule is deleted between submission and decision with nothing written by the refusal, then success stamping `verified_at`, closing the round as approved with `decided_by`, and writing an `actor_kind='admin'` audit row carrying the reason), `reject_business_verification` (back to draft, round closed as rejected, and the merchant reading `decision_reason` UNDER THEIR OWN SESSION), and 0033's two admin SELECT policies as a pair |
 | `rls_integration_connections_smoke.sql` | `integration_connections` (0032): THE TOKEN COLUMN FENCE, asserted as the pair that matters (an owner reading their OWN tenant row gets 42501 on `access_token_encrypted` and `refresh_token_encrypted`, and on `select *`, while every allowlisted column reads cleanly), the owner/manager role list and the marketing narrowing, cross-tenant denial, the consumer and anon matrix rows, no client write path of any kind, the service_role split (insert/update/delete stay, TRUNCATE goes), the no-truncate statement trigger, and the four check constraints: the plaintext envelope fence (a raw `EAAG...` token is refused because its first byte is not the envelope version), the error/status pairing in both directions, and the provider and status vocabularies, plus the account uniqueness rule that reconnect upserts onto |
 | `rpc_routing_breakdown_smoke.sql` | `receipt_routing_breakdown` (0035, decision D10), 14 assertions over two tenants: the four outcome buckets with queued/processing collapsing to `pending`, attribution counted once per receipt including a receipt that tripped two rules (so the reason counts exceed the review count, which is correct rather than a rounding error), D7's `ocr_operator_failure` attributed like any other reason, BACKFILL HONESTY (a review whose `parse_meta` predates `review_reasons` counts as `unattributed` and never inflates a real rule), TENANCY asserted as the pair that matters (one tenant's breakdown never carries the other's reason, and the platform-scoped `p_business_id null` call does see both), the `p_days` window filter and its clamp, and the service_role-only grant that keeps an aggregate from routing around 0017's `parse_meta` column fence |
+| `rpc_points_expiry_smoke.sql` | Task 1.3 points expiry enforcement (0042-0044), 37 assertions: doc 35 section 7's FIFO remainder formula at two granularities (`private.points_lot_remainders` per-lot, `private.points_expirable_remainder` aggregate) - a partially-consumed lot, a later untouched lot, a lot fully drained to 0, and a clawback-only consumption (no redeem) all matching hand-computed vectors; `public.points_next_expiry` (the wallet's shared read) correctly excluding an already-past-due lot; `public.expire_points` (the sweep) writing the right `expire` row, keeping the cached balance equal to the ledger sum, touching nothing for a zero-balance pair, and a second run expiring nothing more (idempotent); `public.points_expiry_warn` (the warn job) firing the 30d horizon alone for a 20-day-out lot, both the 30d AND 7d horizons in one run for a 5-day-out lot, the in_app/email channel split (`sent`/`pending`), and a second run raising nothing new (dedupe, keyed on lot `expires_at` cast back to `timestamptz` rather than compared as text - see 0044's header on why a text comparison against jsonb's ISO-8601 serialization never matches); both `cron.job` rows with their exact schedule and command; and the full I-A grant matrix (service_role only on every new `public.` surface, not even service_role on either `private.` helper) |
 
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
@@ -210,11 +211,45 @@ raised.
 |---|---|---|---|
 | `claims.expiry_sweep` | `7 * * * *` | `public.expire_claims(200)` | Doc 39's registered offset for this queue. `rewards.claim_expiry_days` is 1 to 365 (default 30), so the shortest TTL the schema permits is 24h; hourly holds a lapsed claim's inventory and points for at most 1/24 of that, and about 1/720 of the default. More often multiplies scans for a sub-hour gain; daily would, on a 1-day TTL, lock inventory for as long again as the claim was valid. |
 | `receipts.stuck_sweep` | `50 * * * *` | `public.sweep_stuck_receipts(200)` | :50 is doc 39's hourly jobs-reconciler slot, which is what this is. Against a 24h threshold, 23 runs in 24 find nothing and each empty run is one partial-index probe. The payoff is bounded discovery latency: a receipt reaches the operator's queue within the hour of crossing the threshold rather than within a day. |
+| `points.expiry_sweep` | `10 18 * * *` | `public.expire_points(200)` | Doc 39's registered slot (02:10 Manila), right after the daily rollup (01:40). Points expire on a flat 12-month clock (0042), so a day's latency on the sweep is negligible against that TTL - daily is the doc-registered cadence and there is no tighter invariant to protect the way claims' sub-day TTL argues for hourly. |
+| `points.expiry_warn` | `25 18 * * *` | `public.points_expiry_warn(200)` | Doc 39's registered slot (02:25 Manila), immediately after the expiry sweep itself, so a lot the sweep just expired can never also be warned about in the same run. |
 
-Both jobs run as `postgres`, which owns both functions and so retains EXECUTE
-independently of the `service_role`-only grants. Both functions are idempotent
-and take `for update skip locked`, so an overlapping run or a concurrent
-application write is safe.
+All four jobs run as `postgres`, which owns every function and so retains
+EXECUTE independently of the `service_role`-only grants. All four functions
+are idempotent (`points.expiry_sweep`/`points.expiry_warn` by recomputing the
+same FIFO formula from the ledger each run - see `rpc_points_expiry_smoke.sql`
+- the other two via `for update skip locked`), so an overlapping run or a
+concurrent application write is safe.
+
+### Points expiry (0042-0044, task 1.3)
+
+The 12-month rolling expiry published in the consumer terms and on the
+wallet is enforced by three pieces, all sharing ONE FIFO formula
+(`private.points_lot_remainders`, doc 35 section 7):
+
+- **Stamping** (0042): `award_receipt_points` now stamps every positive earn
+  row `expires_at = now() + interval '12 months'` itself (a caller-supplied
+  `p_expires_at` still overrides it, but no caller sends one today) - the
+  single earn-writer chokepoint, so no future writer can forget it. The
+  migration also backfills the earn row(s) that predate it, which required
+  briefly disabling `points_transactions`' append-only trigger for exactly
+  one `UPDATE` statement (see the migration header for why that is a
+  deliberate, reviewed exception and not a precedent).
+- **The sweep** (`public.expire_points`, 0043): writes one `expire` ledger row
+  per (business, consumer) pair whose past-due lots still have a positive
+  FIFO remainder, floored at 0, never driving the balance negative.
+- **The warn job** (`public.points_expiry_warn`, 0044): raises
+  `kind='points_expiring'` at the 30-day and 7-day horizons before a lot
+  expires, deduped per (pair, lot, horizon) via the notification's own `data`
+  payload. It writes directly into `public.notifications` rather than calling
+  `src/features/notifications/server/raise.ts`, because pg_cron cannot reach
+  TypeScript - the `in_app` row is a complete delivery, the `email` row is
+  durable but unsent (nothing enqueues a `notify.email` job for it yet; see
+  0044's header for the honest accounting of that gap).
+
+The wallet's own "what expires when" line (`public.points_next_expiry`) reads
+the identical formula, so the number a consumer sees is the number the sweep
+will eventually take.
 
 ### What the receipts sweep does and does not do
 
@@ -310,6 +345,7 @@ outcome is visible; the push is owed to the notifications slice.
 - Policy deviation vs doc 21 (record in doc 26 next docs pass): `business_verifications` / `business_documents` are staff READ-only with service-role writes (doc 21 said owner insert/read); tightened deliberately for TIN-adjacent data.
 - **`audit_logs` reads are OWNER-only; a manager cannot read them at all.** This will surprise someone, because every neighbouring table in the receipts domain (`receipts`, `fraud_signals`, `ai_usage_events`) settled on `array['owner','manager']`, and a manager is precisely the person who decides the receipts this table records. That is the reason, not an oversight: doc 01's permission matrix has "View audit logs (own tenant)" as the one row in the Platform block where owner is ticked and manager is not, and an audience that can read the file kept on itself is doc 15's threat-model item 6 (insider abuse). Owner is the only business role accountable for the tenant. Asserted in `rls_audit_logs_smoke.sql`, so widening it fails the suite rather than passing quietly. Two related consequences of the same policy: rows with a null `business_id` (admin and system actions) are visible to NO tenant and are read through the service role until the token hook lands, and `ip` / `user_agent` are revoked from `authenticated` entirely, so `select *` on `audit_logs` raises 42501 and client reads must name their columns.
 - No admin policy on `audit_logs`, against doc 25's "select admin; select owner where business_id matches". Same call 0017 made for `receipts` and `fraud_signals`: every admin predicate reads the platform-admin claim and the custom access token hook is not enabled on this project, so a claim-based admin policy would evaluate null for every session and silently deny. Admin audit surfaces read via the service role until the hook is enabled.
+- **`points.expiry_warn`'s email row is durable but unsent (0044, task 1.3).** The `in_app` row it writes lands in the recipient's inbox immediately, same as `raise.ts` would produce, but the `email` row it also writes (`status='pending'`) has nothing enqueuing a `notify.email` job for it: pg_cron can only invoke SQL, and a raw `INSERT` into `public.jobs` from plpgsql would bypass `src/lib/queue/enqueue.ts`, the one enqueue path doc 39 names. This mirrors `expire_claims`'s own precedent (0016 shipped the sweep without doc 35's `notify kind='reward_claim_expired'` half at all) but is a narrower gap: the guaranteed channel does land. Follow-up: a worker or reconciler scanning `notifications` rows `channel='email' and status='pending' and kind='points_expiring'` and calling `enqueue()` for them.
 - **`award_receipt_points`'s `p_verify_no_prior_fixed_visit_earn` invariant (0037/0038, task 1.1 review I1) is caller-opt-in, unlike every other guard in that function.** Every OTHER ledger invariant in this schema is enforced unconditionally behind the three-layer fence (privilege revocation + row-level lock + explicit guard the RPC always runs). This one cannot be: the RPC has no way to know a receipt's WINNING base rule is `fixed_per_visit` - that resolution (which `points_rules` row wins, campaign stacking, conditions) lives entirely in the pure TypeScript engine (doc 35 section 11's "one implementation of the rule math"), so enforcing it unconditionally in SQL would mean either duplicating rule resolution there or blocking every other rule_type's award on an irrelevant check. The invariant therefore lives in TypeScript (`src/features/receipts/server/award.ts`'s `priceReceipt` decides whether the dedupe applies at all, via the advisory `public.fixed_per_visit_already_paid` read), with `award_receipt_points`'s own re-check under the `business_customers` lock (`private.fixed_per_visit_already_paid`, keyed on VISIT DAY - `manila_day(coalesce(receipts.receipt_date, points_transactions.created_at))`, not processing time) as the race-safe backstop for the one case TypeScript alone cannot close: a concurrent request committing between the precheck and the lock. When that backstop fires (`FIXED_PER_VISIT_RACE`), `awardPoints` recovers in TypeScript by replaying the precomputed deduped total rather than leaving the receipt refused - see the same file's `awardAfterFixedPerVisitRace`. Covered by `rpc_award_smoke.sql`'s fixed_per_visit section (visit-day keying, the review-lag and backdated-upload cases, and the two I3 cases where a prior earn that was NOT itself a paid fixed_per_visit base must not suppress a later one).
 
 ## Advisor acceptances (2026-07-25)
@@ -399,6 +435,15 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0033_business_activation.sql | 20260731233249 | 0033_business_activation |
 | 0034_business_merchant_aliases.sql | 20260801005736 | business_merchant_aliases |
 | 0035_receipt_routing_visibility.sql | 20260801015558 | receipt_routing_visibility |
+| 0036_receipt_escalation.sql | 20260801022854 | receipt_escalation |
+| 0037_fixed_per_visit_dedup.sql | 20260806010927 | 0037_fixed_per_visit_dedup |
+| 0038_fixed_per_visit_visit_day.sql | 20260806014838 | 0038_fixed_per_visit_visit_day |
+| 0039_fixed_per_visit_excludes_clawback.sql | 20260806021026 | 0039_fixed_per_visit_excludes_clawback |
+| 0040_campaign_budget_award_guard.sql | 20260806023604 | 0040_campaign_budget_award_guard |
+| 0041_campaign_budget_attribution.sql | 20260806031837 | 0041_campaign_budget_attribution |
+| 0042_points_expiry_stamping.sql | 20260806041646 | 0042_points_expiry_stamping |
+| 0043_points_expiry_engine.sql | 20260806041706 | 0043_points_expiry_engine |
+| 0044_points_expiry_warn.sql | 20260806041731 | 0044_points_expiry_warn |
 
 **These versions are from the 2026-07-26 replay onto `zlfxfzlnklqhajacngxf`.**
 Every migration was applied in file order in a single pass, so unlike the

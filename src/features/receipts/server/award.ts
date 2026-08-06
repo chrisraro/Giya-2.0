@@ -777,10 +777,18 @@ export async function priceReceipt(input: {
       budgetDropped,
     }),
     campaignId,
-    // Doc 35 section 3 sets expires_at from "the base rule's expiry setting",
-    // which lives under that doc's "Schema deltas proposed" and has no column
-    // on `points_rules` (0012). Until that column exists there is no policy to
-    // read, and null is the documented "never expires".
+    // Task 1.3 (0042): the platform's 12-month rolling expiry (doc 35 section
+    // 7, published in the consumer terms and on the wallet) is a FLAT policy
+    // with no per-rule variation today - doc 35's "Schema deltas proposed"
+    // per-rule `expires_after_days` column was never actually migrated (see
+    // 0012), so there is nothing here for TypeScript to read yet. Rather than
+    // duplicate "now + 12 months" arithmetic on this side of the wire, that
+    // computation is now authoritative INSIDE `award_receipt_points` itself
+    // (0042's header explains the choice: one earn writer, one place the
+    // stamp can never be forgotten). `null` here is therefore a deliberate
+    // "defer to the RPC's platform default", not "never expires" - the RPC
+    // only takes this value literally as an OVERRIDE, which no caller sends
+    // today.
     expiresAt: null,
     verifyNoPriorFixedPerVisitEarn,
     dedupedFallback,

@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   getMyBalances: vi.fn(),
   listMyLedger: vi.fn(),
   listMyReceipts: vi.fn(),
+  getNextPointsExpiryByBusiness: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -24,6 +25,10 @@ vi.mock("@/lib/supabase/server", () => ({
 vi.mock("@/features/rewards/server/repo", () => ({
   getMyBalances: mocks.getMyBalances,
   listMyLedger: mocks.listMyLedger,
+}));
+
+vi.mock("@/features/points/server/expiry", () => ({
+  getNextPointsExpiryByBusiness: mocks.getNextPointsExpiryByBusiness,
 }));
 
 vi.mock("@/features/receipts/server/repo", () => ({
@@ -56,6 +61,7 @@ beforeEach(() => {
   mocks.listMyLedger.mockResolvedValue([]);
   mocks.listMyReceipts.mockResolvedValue({ rows: [] });
   mocks.getMyBalances.mockResolvedValue([balance()]);
+  mocks.getNextPointsExpiryByBusiness.mockResolvedValue(new Map());
 });
 
 describe("wallet balance rows", () => {
@@ -84,5 +90,44 @@ describe("wallet balance rows", () => {
     render(await WalletPage());
 
     expect(screen.getByText("No balances yet")).toBeInTheDocument();
+  });
+});
+
+describe("wallet per-lot expiry line (task 1.3, doc 35 section 7)", () => {
+  it("CRITICAL: renders the soonest-expiring lot from the shared FIFO source, not a second computation", async () => {
+    // getNextPointsExpiryByBusiness is the ONLY source this line reads from -
+    // src/features/points/server/expiry.ts, itself a thin wrapper over
+    // public.points_next_expiry (0043), the same SQL public.expire_points
+    // (the sweep) uses. This test pins that the component renders exactly
+    // what that source answers, with no independent date/points math of its
+    // own.
+    mocks.getNextPointsExpiryByBusiness.mockResolvedValue(
+      new Map([["biz-1", { points: 500, expiresAt: "2027-03-03T00:00:00.000Z" }]]),
+    );
+
+    render(await WalletPage());
+
+    expect(mocks.getNextPointsExpiryByBusiness).toHaveBeenCalledWith("user-1", ["biz-1"]);
+    const row = screen.getByRole("link", { name: /Kape Diaria/ });
+    expect(row).toHaveTextContent("500");
+    expect(row).toHaveTextContent(/expire/);
+    expect(row).toHaveTextContent("Mar 3, 2027");
+  });
+
+  it("renders no second line for a business with nothing left to expire", async () => {
+    mocks.getNextPointsExpiryByBusiness.mockResolvedValue(new Map());
+
+    render(await WalletPage());
+
+    const row = screen.getByRole("link", { name: /Kape Diaria/ });
+    expect(row).not.toHaveTextContent(/expire/);
+  });
+
+  it("does not call the expiry read for a signed-out request", async () => {
+    mocks.getUser.mockResolvedValue({ data: { user: null } });
+
+    render(await WalletPage());
+
+    expect(mocks.getNextPointsExpiryByBusiness).not.toHaveBeenCalled();
   });
 });

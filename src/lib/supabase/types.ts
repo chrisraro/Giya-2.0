@@ -1,4 +1,4 @@
-// GENERATED FILE: Supabase types for the LIVE project zlfxfzlnklqhajacngxf.
+﻿// GENERATED FILE: Supabase types for the LIVE project zlfxfzlnklqhajacngxf.
 // NOT dcnpuvtbftpbcjcvfnlt, which is retired but still exists and still
 // answers its keys. See supabase/README.md "Project history".
 // Regenerate after migrations (MCP generate_typescript_types). Do not edit by hand.
@@ -2580,6 +2580,7 @@ export type Database = {
         Returns: Json
       }
       expire_claims: { Args: { p_limit?: number }; Returns: number }
+      expire_points: { Args: { p_limit?: number }; Returns: number }
       fixed_per_visit_already_paid: {
         Args: {
           p_business_id: string
@@ -2587,6 +2588,18 @@ export type Database = {
           p_visit_day: string
         }
         Returns: boolean
+      }
+      points_expirable_remainder: {
+        Args: { p_asof?: string; p_business_id: string; p_consumer_id: string }
+        Returns: number
+      }
+      points_expiry_warn: { Args: { p_limit?: number }; Returns: number }
+      points_next_expiry: {
+        Args: { p_business_id: string; p_consumer_id: string }
+        Returns: {
+          expires_at: string
+          points: number
+        }[]
       }
       receipt_routing_breakdown: {
         Args: { p_business_id?: string; p_days?: number }

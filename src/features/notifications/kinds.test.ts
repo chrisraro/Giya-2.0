@@ -18,10 +18,11 @@ import type { NotificationKind } from "./kinds";
 /**
  * The exact value list in the database's `notifications_kind_check`
  * constraint, transcribed: the five 0026_notifications.sql originally shipped
- * plus `campaign_budget_exhausted`, added by 0040 (task 1.2). The migration is
- * the enforcement and this array is the alarm: a kind added to one and not the
- * other means either a 23514 on a real event or a dead constant, and both are
- * silent until someone scans a receipt or a campaign runs out of budget.
+ * plus `campaign_budget_exhausted` (0040, task 1.2) and `points_expiring`
+ * (0044, task 1.3). The migration is the enforcement and this array is the
+ * alarm: a kind added to one and not the other means either a 23514 on a real
+ * event or a dead constant, and both are silent until someone scans a receipt,
+ * a campaign runs out of budget, or a consumer's points near expiry.
  */
 const DATABASE_KINDS = [
   "points_awarded",
@@ -30,6 +31,7 @@ const DATABASE_KINDS = [
   "reward_claimed",
   "reward_expiring",
   "campaign_budget_exhausted",
+  "points_expiring",
 ];
 
 describe("the kind list matches the database", () => {
@@ -73,6 +75,7 @@ describe("Mango is rewards language (doc 16)", () => {
       "receipt_in_review",
       "reward_expiring",
       "campaign_budget_exhausted",
+      "points_expiring",
     ];
     for (const kind of notRewards) {
       expect(
@@ -119,9 +122,13 @@ describe("channels", () => {
     }
   });
 
-  it("emails exactly two kinds: the rejection the consumer must act on, and the budget alert the owner must act on", () => {
+  it("emails exactly three kinds: the rejection the consumer must act on, the budget alert the owner must act on, and the expiry warning the consumer must act on before its deadline", () => {
     const emailing = NOTIFICATION_KINDS.filter((kind) => kindEmails(kind));
-    expect([...emailing].sort()).toEqual(["campaign_budget_exhausted", "receipt_rejected"]);
+    expect([...emailing].sort()).toEqual([
+      "campaign_budget_exhausted",
+      "points_expiring",
+      "receipt_rejected",
+    ]);
   });
 
   it("does not email the good news, which the consumer opens the app for anyway", () => {

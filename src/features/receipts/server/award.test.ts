@@ -365,8 +365,11 @@ describe("priceReceipt", () => {
 
     expect(result.points).toBe(190);
     expect(result.campaignId).toBeNull();
-    // Doc 35 section 3: no expiry column exists on points_rules yet, so the
-    // documented "never expires" is the only honest value.
+    // Task 1.3 (0042): null means "defer to award_receipt_points's platform
+    // default" (now + 12 months, stamped inside the RPC), not "never
+    // expires" - there is no per-rule expiry policy for priceReceipt to read
+    // yet, so it never computes this value itself. See award.ts's own
+    // updated comment on this field.
     expect(result.expiresAt).toBeNull();
   });
 

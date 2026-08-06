@@ -2,6 +2,8 @@ import Link from "next/link";
 
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/consumer/empty-state";
+import { getNextPointsExpiryByBusiness } from "@/features/points/server/expiry";
+import type { NextExpiryDTO } from "@/features/points/server/expiry";
 import {
   WalletReceiptActivity,
   WALLET_RECEIPT_LIMIT,
@@ -43,10 +45,39 @@ const TRANSACTION_ICON: Record<string, string> = {
  * chevron included. A link to `/b/` is a link to nowhere, and a dead chevron
  * for one unlucky row is better than a 404 for it.
  */
-function BalanceRow({ balance }: { balance: BalanceDTO }) {
+/**
+ * "500 pts expire Mar 3, 2027" - the soonest-expiring lot for this business,
+ * per doc 35 section 7's FIFO formula (task 1.3). Computed by the SAME SQL
+ * the sweep uses (`public.expire_points`, via `public.points_next_expiry`,
+ * `src/features/points/server/expiry.ts`), so this number is the number the
+ * sweep will eventually take - never a second, independently-computed
+ * estimate. Absent when there is nothing left to expire for this pair
+ * (rendered as no second line at all, matching the balance row's own
+ * "nothing to show" posture elsewhere on this page).
+ */
+function NextExpiryLine({ nextExpiry }: { nextExpiry: NextExpiryDTO | null }) {
+  if (nextExpiry === null) return null;
+  return (
+    <p className="truncate text-body-s text-on-surface-variant">
+      <span className="font-mono">{nextExpiry.points.toLocaleString()}</span> pts expire{" "}
+      {formatExpiryDate(nextExpiry.expiresAt)}
+    </p>
+  );
+}
+
+function BalanceRow({
+  balance,
+  nextExpiry,
+}: {
+  balance: BalanceDTO;
+  nextExpiry: NextExpiryDTO | null;
+}) {
   const body = (
     <>
-      <p className="min-w-0 flex-1 truncate text-title-m text-on-surface">{balance.businessName}</p>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-title-m text-on-surface">{balance.businessName}</p>
+        <NextExpiryLine nextExpiry={nextExpiry} />
+      </div>
       <div className="flex shrink-0 items-center gap-2">
         <p className="font-mono text-title-m text-on-surface">
           {balance.pointsBalance.toLocaleString()} pts
@@ -90,6 +121,17 @@ function formatTxnDate(iso: string): string {
   }).format(new Date(iso));
 }
 
+/** Day-level, no time-of-day: an expiry date is a calendar day (doc 35's own
+ * "12 months after the day you earn them"), not an instant. */
+function formatExpiryDate(iso: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Manila",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(iso));
+}
+
 export default async function WalletPage() {
   const supabase = await createClient();
   const {
@@ -114,6 +156,17 @@ export default async function WalletPage() {
   // for the display name without a second per-row lookup.
   const businessNameById = new Map(balances.map((balance) => [balance.businessId, balance.businessName]));
 
+  // Task 1.3: the soonest-expiring lot per business (doc 35 section 7),
+  // fetched only once the business ids are known - see
+  // src/features/points/server/expiry.ts for why this is a service-role RPC
+  // rather than a plain table read.
+  const expiryByBusiness = user
+    ? await getNextPointsExpiryByBusiness(
+        user.id,
+        balances.map((balance) => balance.businessId),
+      )
+    : new Map<string, NextExpiryDTO>();
+
   return (
     <main className="mx-auto max-w-md px-4 pt-6 pb-8">
       <h1 className="text-headline-m text-on-surface">Wallet</h1>
@@ -126,7 +179,13 @@ export default async function WalletPage() {
             body="Earn points at a business to see your balance here."
           />
         ) : (
-          balances.map((balance) => <BalanceRow key={balance.businessId} balance={balance} />)
+          balances.map((balance) => (
+            <BalanceRow
+              key={balance.businessId}
+              balance={balance}
+              nextExpiry={expiryByBusiness.get(balance.businessId) ?? null}
+            />
+          ))
         )}
 
         {/* The expiry rule is stated where the balance is read, not only in the

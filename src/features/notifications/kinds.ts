@@ -43,6 +43,13 @@ export const NOTIFICATION_KINDS = [
   // why this one kind is addressed to a business owner rather than a
   // consumer.
   "campaign_budget_exhausted",
+  // Doc 35 section 7's expiry warning, raised for the first time by task 1.3
+  // (0044): a consumer has a positive, FIFO-derived points remainder inside
+  // 30 or 7 days of its `expires_at`. Raised by `public.points_expiry_warn`
+  // (pg_cron, daily) directly against `notifications`, not through
+  // `raise.ts` - see that migration's header for why (pg_cron cannot reach
+  // TypeScript).
+  "points_expiring",
 ] as const;
 
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
@@ -167,6 +174,19 @@ export const NOTIFICATION_KIND_REGISTRY: Record<NotificationKind, NotificationKi
   // channel most kinds here deliberately do not get.
   campaign_budget_exhausted: {
     icon: "warning",
+    tone: "muted",
+    transactional: true,
+    channels: ["in_app", "email"],
+  },
+  // "muted": an expiry warning is a plain fact, never a celebration and never
+  // an accusation - the same tone the wallet's own expiry copy takes ("Points
+  // expire 12 months after you earn them"). Emails because, like
+  // `campaign_budget_exhausted`, this is a message with a deadline: the
+  // consumer can still act (spend before the date) only if they see it in
+  // time, and an inbox message they may not open for days is the wrong
+  // channel for that alone.
+  points_expiring: {
+    icon: "schedule",
     tone: "muted",
     transactional: true,
     channels: ["in_app", "email"],
