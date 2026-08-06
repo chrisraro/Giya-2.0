@@ -130,8 +130,20 @@ export const POST = defineHandler<ForgotPasswordResponse, ForgotPasswordBody>({
     try {
       await withMinDelay(
         () =>
+          // `redirectTo` here is best-effort, not authoritative: the actual
+          // link a recipient clicks is built entirely by the Recovery email
+          // template configured in the Supabase Dashboard (not a file in
+          // this repo), and that template must use
+          // `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=recovery`
+          // (Supabase's token_hash + verifyOtp pattern - see
+          // src/app/auth/confirm/route.ts) rather than the default
+          // `{{ .ConfirmationURL }}`, which is a PKCE code link this app no
+          // longer handles for recovery. `/auth/confirm` here matches that
+          // intended destination in case the template ever references
+          // `{{ .RedirectTo }}`, but making the email actually link there
+          // is a dashboard change, not something this file can guarantee.
           supabase.auth.resetPasswordForEmail(body.email, {
-            redirectTo: `${request.nextUrl.origin}/auth/callback?next=/reset-password`,
+            redirectTo: `${request.nextUrl.origin}/auth/confirm`,
             ...(body.captchaToken ? { captchaToken: body.captchaToken } : {}),
           }),
         MIN_RESPONSE_DELAY_MS,

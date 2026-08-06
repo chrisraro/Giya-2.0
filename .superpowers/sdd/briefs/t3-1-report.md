@@ -2,7 +2,145 @@
 
 Status: COMPLETE.
 
-## Round 2: review response (read this section first)
+## Round 3: a new Critical, fixed by removing the guess entirely (read this first)
+
+Round 2's I4 fix gated `/reset-password` on the session's `amr` claim
+equaling `"recovery"`. The coordinator checked this against the actually
+installed SDK (`node_modules/@supabase/auth-js/dist/module/lib/types.d.ts`)
+and found `"recovery"` is not a member of `AMRMethod` at all - it only
+exists as an `EmailOtpType` (the type of the email *link*) and a
+`GenerateLinkType`, never as an authentication *method*. Every email-OTP
+flow - recovery, invite, signup confirmation, magic-link sign-in - records
+identically as `amr: "otp"`. So the round-2 gate would have matched
+`"recovery" === "otp"`, which is always false: every real user clicking a
+genuine, valid recovery link would have landed on "That link expired or
+was already used," requested another, and failed identically - a
+permanent loop, made worse by the round-2 rate limit (3 requests/15min per
+address) actively locking them out faster. Nothing in round 2's own setup
+caught this: `AMRMethod` is widened with `| (string & {})` so `tsc`
+accepts any string literal there, and `page.test.tsx` fabricated
+`{ method: "recovery" }` directly, so the suite was asserting my own wrong
+assumption back to itself rather than checking it against anything real.
+
+**Fix: removed the inference entirely rather than widening it.** The
+recovery flow now uses Supabase's documented `token_hash` + `verifyOtp({
+type: "recovery", token_hash })` pattern instead of PKCE code exchange for
+this one flow specifically. This makes the recovery type EXPLICIT at
+verification time - it is the literal `type=recovery` query parameter
+`/auth/confirm` received, not something read back off a claim afterward -
+and it makes the link **device-independent**, since `verifyOtp` needs only
+the token_hash from the URL, not a PKCE code_verifier that PKCE requires
+to have been written to the *initiating* browser's own storage.
+
+New pieces:
+
+- **`src/lib/auth/recovery-cookie.ts`** - the shared `RECOVERY_COOKIE_NAME`
+  / `RECOVERY_COOKIE_MAX_AGE_SECONDS` (600s) constants.
+- **`GET /auth/confirm`** (`src/app/auth/confirm/route.ts`, 4 tests) -
+  replaces `/auth/callback` for recovery specifically (callback is
+  untouched and keeps handling signup confirmation and OAuth exactly as
+  before). Accepts `token_hash` + `type` from the query string; calls
+  `verifyOtp({ type: "recovery", token_hash })` **only when `type ===
+  "recovery"` literally** - any other `EmailOtpType` (`signup`, `invite`,
+  `magiclink`, `email_change`) is refused without even attempting
+  verification. On success, sets the recovery cookie (httpOnly, secure,
+  `sameSite: lax`, 10min TTL) and redirects to `/reset-password`; on any
+  failure, redirects to the same `/login?error=confirm` notice
+  `/auth/callback` already uses for its own dead-exchange case.
+- **`GET /auth/recovery-status`** (`src/app/auth/recovery-status/route.ts`,
+  4 tests) - the bridge `reset-password/page.tsx` (a Client Component,
+  which cannot read an httpOnly cookie itself) needs. Reads the cookie
+  server-side, answers `{ data: { verified: boolean } }` and nothing else
+  - never the cookie's raw value. `Cache-Control: private, no-store`
+  (the answer is per-caller and time-sensitive).
+- **`reset-password/page.tsx`** - the entire `getClaims()`/`amr`/
+  `onAuthStateChange` mechanism is gone. On mount it now just asks `GET
+  /auth/recovery-status`: `verified: true` -> the form; anything else
+  (`false`, or the fetch rejecting outright) -> the same "link expired,
+  request a new one" state. This is strictly simpler than round 2's
+  version, not just corrected - there was never a good reason to guess
+  from claims once an explicit, server-verified signal was available.
+- **`forgot-password/route.ts`** - `resetPasswordForEmail`'s `redirectTo`
+  now points at `/auth/confirm` instead of `/auth/callback?next=/reset-password`
+  (best-effort - see the deployment dependency below).
+
+TDD red-first throughout (each new test file failed for the right reason
+against no implementation or the old one before the fix). Named mutant per
+new/changed assertion, including the one the coordinator specifically
+asked for:
+
+- **C2's required mutant**: widened `/auth/confirm`'s admission gate from
+  `type === "recovery"` to accepting any truthy `type` -> the "does NOT
+  verify... for any type other than recovery (e.g. a magic-link sign-in)"
+  test failed, exactly as it must.
+- `/auth/confirm`: cookie set even when `verifyOtp` returns an error ->
+  caught by the "without setting the cookie when verifyOtp fails" test.
+  `httpOnly` dropped from the cookie -> caught by the happy-path test's
+  `HttpOnly` regex check.
+- `/auth/recovery-status`: any truthy cookie value trusted instead of
+  strictly `"1"` -> caught by the "never trust the value blindly" test.
+  `no-store` header dropped -> caught by the caching test.
+- `reset-password/page.tsx`: admits on ANY recovery-status answer
+  regardless of `verified` -> caught by the `verified: false` test
+  (this is I4's property, re-verified at the page layer against the new
+  mechanism). `.catch()` removed -> reproduces I5's stuck-on-"checking"
+  screen as an unhandled rejection, caught by the "does not stay stuck"
+  test.
+- Minors: the empty-string captcha branch (`body.captchaToken ? {...} :
+  {}` widened to `!== undefined`) -> caught by the new dedicated test,
+  reproducing the coordinator's exact named mutant. `route.test.ts`'s
+  "checks the caller's IP" assertion tightened from `stringContaining("ip")`
+  to `stringContaining(":ip:")`, matching the clamp test's own strictness.
+
+**DEPLOYMENT DEPENDENCY - this is a hard blocker for the feature actually
+working, not a nice-to-have**: this repo has no `supabase/config.toml` and
+no `supabase/templates/` directory at all (checked directly - `find
+supabase -iname "*template*" -o -iname config.toml` returns nothing), so
+the Recovery email template is managed entirely in the Supabase Dashboard,
+outside any file this sandboxed environment can read or write. Right now
+that template almost certainly still uses the default `{{ .ConfirmationURL }}`
+(a PKCE code link), which `/auth/callback` would still technically accept
+- but `/auth/confirm`, the route this design actually needs traffic to
+reach, only understands `token_hash` + `type=recovery`. **Someone with
+Supabase Dashboard access must change the Recovery email template** (Auth
+> Email Templates > Reset Password) to link to
+`{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=recovery`
+before this flow will work for a single real user. Until that happens,
+clicking a real recovery email link will 404 or hit whatever `/auth/callback`
+does with a `type=recovery`-shaped code it was never meant to receive.
+I have no dashboard access from this sandbox to make that change myself.
+
+**On cross-device, two corrections to round 2's report, both from the
+coordinator and both right:**
+
+1. Cross-device breakage is not something moving the call server-side
+   introduced - PKCE binds the code_verifier to the initiating browser
+   regardless of which side (client or server) calls `exchangeCodeForSession`.
+   It is inherent to PKCE itself, not a consequence of round 1's
+   architecture choice.
+2. "Open the link on this device" (the copy `forgot-password`'s
+   confirmation screen already shows) does not cover the dominant real
+   case: an email opened inside Gmail/Outlook/Facebook's in-app browser is
+   a *different storage context on the same physical device*, so a user
+   who follows that instruction literally - same phone, same device -
+   still fails and is told the link expired.
+
+`token_hash` moots both: since the fix no longer depends on any
+browser-local secret at all, it doesn't matter which device or which
+in-app browser opens the link.
+
+**Brief requirement 3 status, stated precisely per the coordinator's
+instruction, not glossed as fully satisfied:** the channels this feature
+owns outright - response body, HTTP status, and headers - are closed and
+mutation-proven (see round 2). The 800ms timing floor narrows the timing
+channel but does not close it: it is unmeasured against this project's
+real GoTrue latency, and the coordinator's own risk stands - a synchronous
+SMTP handoff on the known-address path can routinely exceed 800ms. "Timing
+does not differ measurably" is not something this submission has proven;
+it is an assumption, with a named experiment attached (below) that nobody
+has run.
+
+## Round 2: review response
 
 The coordinator's review found one Critical (C1) and several Importants
 (I2-I6) against the round-1 submission below. All are fixed, TDD red-first

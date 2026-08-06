@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import Link from "next/link";
-import type { AMREntry } from "@supabase/supabase-js";
 import { AuthCard } from "@/components/auth/auth-card";
 import { PasswordField } from "@/components/auth/password-field";
 import { Button } from "@/components/ui/button";
@@ -10,19 +9,6 @@ import { createClient } from "@/lib/supabase/client";
 import { toErrorMessage } from "@/lib/auth/error-message";
 
 type Status = "checking" | "no-session" | "ready" | "done";
-
-// The JWT's `amr` claim is typed as EITHER AMREntry[] (the detailed
-// {method, timestamp} shape GoTrue emits by default, ordered most-recent
-// first) OR string[] (the plainer RFC-8176-compliant shape a custom access
-// token hook could produce instead) - never a mixed array of both. Reading
-// amr[0] straight off a union of two array types does not narrow to
-// `AMREntry | string`; this normalizes either shape down to the one string
-// this page actually needs to compare against "recovery".
-function mostRecentAuthMethod(amr: AMREntry[] | string[] | undefined): string | undefined {
-  if (!amr || amr.length === 0) return undefined;
-  const first = amr[0];
-  return typeof first === "string" ? first : first?.method;
-}
 
 export default function ResetPasswordPage() {
   const [status, setStatus] = React.useState<Status>("checking");
@@ -58,59 +44,29 @@ export default function ResetPasswordPage() {
 
   React.useEffect(() => {
     let cancelled = false;
-    let admitted = false;
-    const supabase = createClient();
 
-    function admit() {
-      admitted = true;
-      if (!cancelled) setStatus("ready");
-    }
-
-    // supabase-js's own, documented signal that the CURRENT session came
-    // from a recovery link:
-    // https://supabase.com/docs/reference/javascript/auth-onauthstatechange.
-    // Kept as a first-class admission path, not just a fallback - it is the
-    // standard mechanism for this exact gate, even though (see the comment
-    // below) it may never fire in THIS app's specific architecture.
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((event) => {
-      if (event === "PASSWORD_RECOVERY") admit();
-    });
-
-    // The mechanism that actually makes this gate work here: /auth/callback
-    // exchanges a recovery link's code for a session SERVER-SIDE (see that
-    // route), so THIS browser client never itself processes a recovery
-    // URL - which is exactly the code path that normally fires the
-    // PASSWORD_RECOVERY event above. What GoTrue always stamps, regardless
-    // of where the exchange happened, is the `amr` (Authentication Methods
-    // Reference) claim on the issued JWT: entries are ordered most-recent
-    // first, and the most recent one names "recovery" exactly when the
-    // session's last authentication was this flow - see
-    // https://supabase.com/docs/guides/auth/jwt-fields. A plain, ordinary
-    // signed-in session (or an anonymous caller with no session at all)
-    // never carries that, so this is what actually keeps "any session"
-    // from being enough to reach the form below: reaching it requires
-    // proof of a recovery flow specifically, not merely being logged in.
-    supabase.auth
-      .getClaims()
-      .then(({ data }) => {
-        if (cancelled || admitted) return;
-        if (mostRecentAuthMethod(data?.claims?.amr) === "recovery") {
-          admit();
-        } else {
-          setStatus("no-session");
-        }
+    // The gate lives entirely server-side now: /auth/confirm sets an
+    // httpOnly cookie ONLY after successfully verifying THIS link's
+    // token_hash as an explicit type: "recovery" OTP - never inferred
+    // after the fact from a session's claims (a session's `amr` claim
+    // cannot make that distinction: recovery, invite, signup and
+    // magic-link all record identically as `amr: "otp"`). This page is a
+    // Client Component and cannot read that httpOnly cookie itself, so it
+    // asks GET /auth/recovery-status, the one thing that can.
+    fetch("/auth/recovery-status")
+      .then((response) => response.json())
+      .then((json: { data?: { verified?: boolean } }) => {
+        if (cancelled) return;
+        setStatus(json?.data?.verified ? "ready" : "no-session");
       })
       .catch(() => {
         // A failed check is treated the same as no session: an actionable
         // "request a new link" message, never a permanently blank screen.
-        if (!cancelled && !admitted) setStatus("no-session");
+        if (!cancelled) setStatus("no-session");
       });
 
     return () => {
       cancelled = true;
-      subscription.unsubscribe();
     };
   }, []);
 

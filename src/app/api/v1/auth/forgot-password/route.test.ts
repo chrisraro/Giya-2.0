@@ -79,7 +79,7 @@ beforeEach(() => {
 });
 
 describe("POST /api/v1/auth/forgot-password", () => {
-  it("calls resetPasswordForEmail with the entered address and the reset-password callback redirect", async () => {
+  it("calls resetPasswordForEmail with the entered address and the token_hash confirm endpoint", async () => {
     const response = await callRoute({ email: "a@b.com" });
     const json = (await response.json()) as { data: { message: string } };
 
@@ -87,7 +87,7 @@ describe("POST /api/v1/auth/forgot-password", () => {
     expect(mocks.resetPasswordForEmail).toHaveBeenCalledWith(
       "a@b.com",
       expect.objectContaining({
-        redirectTo: expect.stringContaining("/auth/callback?next=/reset-password"),
+        redirectTo: expect.stringContaining("/auth/confirm"),
       }),
     );
     expect(json.data.message).toBeTruthy();
@@ -171,6 +171,13 @@ describe("POST /api/v1/auth/forgot-password", () => {
     const [, options] = mocks.resetPasswordForEmail.mock.calls[0] as [string, Record<string, unknown>];
     expect(options).not.toHaveProperty("captchaToken");
   });
+
+  it("also omits captchaToken from options when the caller sent an empty string, not just when the field is absent", async () => {
+    await callRoute({ email: "a@b.com", captchaToken: "" });
+
+    const [, options] = mocks.resetPasswordForEmail.mock.calls[0] as [string, Record<string, unknown>];
+    expect(options).not.toHaveProperty("captchaToken");
+  });
 });
 
 describe("rate limiting - per caller IP", () => {
@@ -178,7 +185,7 @@ describe("rate limiting - per caller IP", () => {
     await callRoute({ email: "a@b.com" });
 
     expect(mocks.checkRateLimit).toHaveBeenCalledWith(
-      expect.objectContaining({ key: expect.stringContaining("ip"), limit: 10, windowSeconds: 600 }),
+      expect.objectContaining({ key: expect.stringContaining(":ip:"), limit: 10, windowSeconds: 600 }),
     );
   });
 
