@@ -1,9 +1,17 @@
 -- ============================================================================
 -- FILE NUMBER vs LEDGER NAME - read this before trusting either.
 --
+-- FINAL STATE: this file is 0060. The live ledger row is named
+-- `0058_job_health_alerts` (version 20260806110554). It was renamed twice -
+-- 0058 -> 0059 -> 0060 - because two concurrent tasks claimed each number in
+-- turn. Only the FILENAME ever moved; the body is byte-identical to what ran,
+-- and Supabase keys on the version timestamp, so the database was never
+-- ambiguous. The churn was a coordination failure in how the work was split,
+-- not a schema problem.
+--
 -- This file was authored as `0058_job_health_alerts.sql` and APPLIED LIVE
 -- under that name: `supabase_migrations.schema_migrations` carries
--- `20260806110554 | 0058_job_health_alerts`. It was renamed to 0059 on merge
+-- `20260806110554 | 0058_job_health_alerts`. It was renamed to 0060 on merge (via an intermediate 0059, which task 2.2 then also claimed)
 -- because task 2.2's deployment correction was authored concurrently in a
 -- separate checkout and also took 0058 (`20260806111225 |
 -- 0058_balance_check_deployment_correction`), and a file set with two 0058s
