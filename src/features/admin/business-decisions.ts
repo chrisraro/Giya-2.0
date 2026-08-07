@@ -280,12 +280,22 @@ export async function purgeBusiness(
     return { ok: true };
   }
 
+  const { error: forceError } = await (deps.supabase.rpc as any)("force_delete_business", {
+    p_business_id: input.businessId,
+  });
+
+  if (forceError === null) {
+    return { ok: true };
+  }
+
   try {
     const bId = input.businessId;
     const from = deps.supabase.from.bind(deps.supabase) as any;
-    await from("points_transactions").delete().eq("business_id", bId);
+    await from("reward_claims").update({ points_txn_id: null }).eq("business_id", bId);
+    await from("points_transactions").update({ claim_id: null }).eq("business_id", bId);
     await from("redemptions").delete().eq("business_id", bId);
     await from("reward_claims").delete().eq("business_id", bId);
+    await from("points_transactions").delete().eq("business_id", bId);
     await from("rewards").delete().eq("business_id", bId);
     await from("loyalty_cards").delete().eq("business_id", bId);
     await from("loyalty_programs").delete().eq("business_id", bId);
@@ -337,9 +347,11 @@ export async function purgeAllBusinesses(
 
   try {
     const from = deps.supabase.from.bind(deps.supabase) as any;
-    await from("points_transactions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("reward_claims").update({ points_txn_id: null }).neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("points_transactions").update({ claim_id: null }).neq("id", "00000000-0000-0000-0000-000000000000");
     await from("redemptions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
     await from("reward_claims").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("points_transactions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
     await from("rewards").delete().neq("id", "00000000-0000-0000-0000-000000000000");
     await from("loyalty_cards").delete().neq("id", "00000000-0000-0000-0000-000000000000");
     await from("loyalty_programs").delete().neq("id", "00000000-0000-0000-0000-000000000000");

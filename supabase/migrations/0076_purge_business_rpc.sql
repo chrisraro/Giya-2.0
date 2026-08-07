@@ -29,10 +29,14 @@ begin
   alter table public.fraud_signals disable trigger fraud_signals_no_truncate;
   alter table public.fraud_signals disable trigger fraud_signals_immutable;
 
+  -- Break circular FK dependencies between reward_claims and points_transactions
+  update public.reward_claims set points_txn_id = null where business_id = p_business_id;
+  update public.points_transactions set claim_id = null where business_id = p_business_id;
+
   -- Delete all child data for this business
-  delete from public.points_transactions where business_id = p_business_id;
-  delete from public.reward_redemptions where business_id = p_business_id;
+  delete from public.redemptions where business_id = p_business_id;
   delete from public.reward_claims where business_id = p_business_id;
+  delete from public.points_transactions where business_id = p_business_id;
   delete from public.rewards where business_id = p_business_id;
   delete from public.loyalty_cards where business_id = p_business_id;
   delete from public.loyalty_programs where business_id = p_business_id;
@@ -90,7 +94,29 @@ begin
   alter table public.fraud_signals disable trigger fraud_signals_no_truncate;
   alter table public.fraud_signals disable trigger fraud_signals_immutable;
 
-  truncate table public.businesses cascade;
+  update public.reward_claims set points_txn_id = null;
+  update public.points_transactions set claim_id = null;
+
+  delete from public.redemptions;
+  delete from public.reward_claims;
+  delete from public.points_transactions;
+  delete from public.rewards;
+  delete from public.loyalty_cards;
+  delete from public.loyalty_programs;
+  delete from public.campaigns;
+  delete from public.promotions;
+  delete from public.points_rules;
+  delete from public.receipt_line_items;
+  delete from public.ocr_results;
+  delete from public.fraud_signals;
+  delete from public.receipts;
+  delete from public.products;
+  delete from public.business_verifications;
+  delete from public.business_food_types;
+  delete from public.business_integrations;
+  delete from public.business_merchant_aliases;
+  delete from public.business_staff;
+  delete from public.businesses;
 
   alter table public.points_transactions enable trigger points_transactions_no_truncate;
   alter table public.points_transactions enable trigger points_transactions_append_only;
