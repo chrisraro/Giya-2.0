@@ -28,6 +28,8 @@ begin
   alter table public.ocr_results disable trigger ocr_results_immutable;
   alter table public.fraud_signals disable trigger fraud_signals_no_truncate;
   alter table public.fraud_signals disable trigger fraud_signals_immutable;
+  alter table public.audit_logs disable trigger audit_logs_no_truncate;
+  alter table public.audit_logs disable trigger audit_logs_append_only;
 
   -- Break circular FK dependencies between reward_claims and points_transactions
   update public.reward_claims set points_txn_id = null where business_id = p_business_id;
@@ -71,6 +73,8 @@ begin
   alter table public.ocr_results enable trigger ocr_results_immutable;
   alter table public.fraud_signals enable trigger fraud_signals_no_truncate;
   alter table public.fraud_signals enable trigger fraud_signals_immutable;
+  alter table public.audit_logs enable trigger audit_logs_no_truncate;
+  alter table public.audit_logs enable trigger audit_logs_append_only;
 
   -- Audit log entry
   insert into public.audit_logs (actor_id, actor_kind, actor_role, business_id, action, entity_type, entity_id, reason)
@@ -100,6 +104,8 @@ begin
   alter table public.ocr_results disable trigger ocr_results_immutable;
   alter table public.fraud_signals disable trigger fraud_signals_no_truncate;
   alter table public.fraud_signals disable trigger fraud_signals_immutable;
+  alter table public.audit_logs disable trigger audit_logs_no_truncate;
+  alter table public.audit_logs disable trigger audit_logs_append_only;
 
   update public.reward_claims set points_txn_id = null;
   update public.points_transactions set claim_id = null;
@@ -140,6 +146,8 @@ begin
   alter table public.ocr_results enable trigger ocr_results_immutable;
   alter table public.fraud_signals enable trigger fraud_signals_no_truncate;
   alter table public.fraud_signals enable trigger fraud_signals_immutable;
+  alter table public.audit_logs enable trigger audit_logs_no_truncate;
+  alter table public.audit_logs enable trigger audit_logs_append_only;
 
   insert into public.audit_logs (actor_id, actor_kind, actor_role, action, entity_type, reason)
   values (p_actor_id, 'admin', 'platform_admin', 'business.purge_all', 'businesses', p_reason);

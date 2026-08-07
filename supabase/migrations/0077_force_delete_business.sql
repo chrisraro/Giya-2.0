@@ -1,7 +1,7 @@
 -- ============================================================================
 -- 0077_force_delete_business.sql
 -- Helper SQL script and function to force delete any business (or all businesses)
--- despite points_transactions append-only triggers and circular FK dependencies.
+-- despite immutability triggers and circular FK dependencies.
 -- ============================================================================
 
 -- 1. Create force_delete_business RPC function
@@ -21,6 +21,8 @@ begin
   alter table public.ocr_results disable trigger ocr_results_immutable;
   alter table public.fraud_signals disable trigger fraud_signals_no_truncate;
   alter table public.fraud_signals disable trigger fraud_signals_immutable;
+  alter table public.audit_logs disable trigger audit_logs_no_truncate;
+  alter table public.audit_logs disable trigger audit_logs_append_only;
 
   -- Break circular FK dependencies between reward_claims and points_transactions
   update public.reward_claims set points_txn_id = null where business_id = p_business_id;
@@ -67,6 +69,8 @@ begin
   alter table public.ocr_results enable trigger ocr_results_immutable;
   alter table public.fraud_signals enable trigger fraud_signals_no_truncate;
   alter table public.fraud_signals enable trigger fraud_signals_immutable;
+  alter table public.audit_logs enable trigger audit_logs_no_truncate;
+  alter table public.audit_logs enable trigger audit_logs_append_only;
 end;
 $$;
 
@@ -81,6 +85,8 @@ alter table public.ocr_results disable trigger ocr_results_no_truncate;
 alter table public.ocr_results disable trigger ocr_results_immutable;
 alter table public.fraud_signals disable trigger fraud_signals_no_truncate;
 alter table public.fraud_signals disable trigger fraud_signals_immutable;
+alter table public.audit_logs disable trigger audit_logs_no_truncate;
+alter table public.audit_logs disable trigger audit_logs_append_only;
 
 update public.reward_claims set points_txn_id = null;
 update public.points_transactions set claim_id = null;
@@ -122,3 +128,5 @@ alter table public.ocr_results enable trigger ocr_results_no_truncate;
 alter table public.ocr_results enable trigger ocr_results_immutable;
 alter table public.fraud_signals enable trigger fraud_signals_no_truncate;
 alter table public.fraud_signals enable trigger fraud_signals_immutable;
+alter table public.audit_logs enable trigger audit_logs_no_truncate;
+alter table public.audit_logs enable trigger audit_logs_append_only;
