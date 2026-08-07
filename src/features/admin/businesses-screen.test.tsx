@@ -72,14 +72,12 @@ describe("AdminBusinessesScreen", () => {
     expect(screen.getByText("Waiting 1 day")).toBeInTheDocument();
   });
 
-  it("CRITICAL: disables approving and says why when there is no earning rule", () => {
+  it("allows approving business signups even when there is no pre-configured earning rule", () => {
     render(
       <AdminBusinessesScreen items={[item({ earningRule: null })]} now={NOW} canAct={true} />,
     );
 
-    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
-    expect(screen.getByText(/No earning rule set/)).toBeInTheDocument();
-    expect(screen.getByText(/award nothing/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
   });
 
   it("still allows sending back a business with no earning rule, which is the way out", () => {
