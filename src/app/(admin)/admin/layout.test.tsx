@@ -41,6 +41,10 @@ vi.mock("@/features/admin/access", () => ({
   resolveAdminContext: mocks.resolveAdminContext,
 }));
 
+vi.mock("@/features/identity/actions", () => ({
+  signOut: vi.fn(),
+}));
+
 const AdminLayout = (await import("./layout")).default;
 
 function Child() {
