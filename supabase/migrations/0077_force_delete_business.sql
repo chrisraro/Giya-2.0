@@ -12,7 +12,7 @@ security definer
 set search_path = ''
 as $$
 begin
-  -- Temporarily disable immutability & evidence triggers
+  -- Temporarily disable immutability, evidence, audit & notification triggers
   alter table public.points_transactions disable trigger points_transactions_no_truncate;
   alter table public.points_transactions disable trigger points_transactions_append_only;
   alter table public.receipts disable trigger receipts_no_truncate;
@@ -23,12 +23,15 @@ begin
   alter table public.fraud_signals disable trigger fraud_signals_immutable;
   alter table public.audit_logs disable trigger audit_logs_no_truncate;
   alter table public.audit_logs disable trigger audit_logs_append_only;
+  alter table public.notifications disable trigger notifications_no_truncate;
+  alter table public.notifications disable trigger notifications_read_at_only;
 
   -- Break circular FK dependencies between reward_claims and points_transactions
   update public.reward_claims set points_txn_id = null where business_id = p_business_id;
   update public.points_transactions set claim_id = null where business_id = p_business_id;
 
   -- Clear all child data belonging to this business
+  delete from public.notifications where business_id = p_business_id;
   delete from public.ai_usage_events where business_id = p_business_id;
   delete from public.audit_logs where business_id = p_business_id;
   delete from public.redemptions where business_id = p_business_id;
@@ -71,6 +74,8 @@ begin
   alter table public.fraud_signals enable trigger fraud_signals_immutable;
   alter table public.audit_logs enable trigger audit_logs_no_truncate;
   alter table public.audit_logs enable trigger audit_logs_append_only;
+  alter table public.notifications enable trigger notifications_no_truncate;
+  alter table public.notifications enable trigger notifications_read_at_only;
 end;
 $$;
 
@@ -87,10 +92,13 @@ alter table public.fraud_signals disable trigger fraud_signals_no_truncate;
 alter table public.fraud_signals disable trigger fraud_signals_immutable;
 alter table public.audit_logs disable trigger audit_logs_no_truncate;
 alter table public.audit_logs disable trigger audit_logs_append_only;
+alter table public.notifications disable trigger notifications_no_truncate;
+alter table public.notifications disable trigger notifications_read_at_only;
 
 update public.reward_claims set points_txn_id = null;
 update public.points_transactions set claim_id = null;
 
+delete from public.notifications;
 delete from public.ai_usage_events;
 delete from public.audit_logs;
 delete from public.redemptions;
@@ -130,3 +138,5 @@ alter table public.fraud_signals enable trigger fraud_signals_no_truncate;
 alter table public.fraud_signals enable trigger fraud_signals_immutable;
 alter table public.audit_logs enable trigger audit_logs_no_truncate;
 alter table public.audit_logs enable trigger audit_logs_append_only;
+alter table public.notifications enable trigger notifications_no_truncate;
+alter table public.notifications enable trigger notifications_read_at_only;
