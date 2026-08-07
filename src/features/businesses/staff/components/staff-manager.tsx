@@ -145,7 +145,7 @@ export function StaffManager({ businessName, roster, actorRole }: StaffManagerPr
         </div>
         {invitableRoles.length > 0 ? (
           <Button type="button" variant="filled" size="md" onClick={openInvite} className="w-full sm:w-auto">
-            Invite Teammate
+            Invite
           </Button>
         ) : null}
       </div>
