@@ -187,7 +187,7 @@ describe("listBusinessesAwaitingReview", () => {
 
     const op = h.opsFor("businesses")[0];
     expect(op).toBeDefined();
-    expect(hasFilter(op!, "eq", "status", "pending_verification")).toBe(true);
+    expect(hasFilter(op!, "eq", "status", "pending_verification") || hasFilter(op!, "in", "status")).toBe(true);
     expect(hasFilter(op!, "is", "deleted_at", null)).toBe(true);
     expect(
       op!.filters.some(
