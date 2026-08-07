@@ -270,7 +270,7 @@ export async function purgeBusiness(
   const reason = checkReason(input.reason);
   if (!reason.ok) return fail("REASON_REQUIRED", reason.message);
 
-  const { error: rpcError } = await deps.supabase.rpc("purge_business", {
+  const { error: rpcError } = await (deps.supabase.rpc as any)("purge_business", {
     p_business_id: input.businessId,
     p_actor_id: input.actorId,
     p_reason: reason.reason,
@@ -325,7 +325,7 @@ export async function purgeAllBusinesses(
   const reason = checkReason(input.reason);
   if (!reason.ok) return fail("REASON_REQUIRED", reason.message);
 
-  const { error: rpcError } = await deps.supabase.rpc("purge_all_businesses", {
+  const { error: rpcError } = await (deps.supabase.rpc as any)("purge_all_businesses", {
     p_actor_id: input.actorId,
     p_reason: reason.reason,
   });
