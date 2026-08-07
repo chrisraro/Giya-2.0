@@ -249,8 +249,8 @@ export function OverviewScreen({
         {overview.recentBlocks.length === 0 ? (
           <EmptyState
             icon="verified_user"
-            title="No recent security blocks"
-            body="All platform security checks are clear. No duplicate receipts or high-risk signals recorded in the last 7 days."
+            title="Nothing was blocked recently"
+            body="A blocking signal is a deterministic one: a byte-identical image, a live duplicate receipt number, a near-identical photo. None have fired in the last week."
             className="border border-outline-variant bg-surface-container-lowest"
           />
         ) : (

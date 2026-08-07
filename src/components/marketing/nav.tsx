@@ -8,8 +8,8 @@ import { cn } from "@/lib/utils";
 
 const LINKS = [
   { href: "/#how-it-works", label: "How it works" },
-  { href: "/business", label: "For businesses" },
-  { href: "/#faq", label: "FAQ" },
+  { href: "/business/signup", label: "For businesses" },
+  { href: "/business/login", label: "Merchant Portal" },
 ] as const;
 
 export function MarketingNav() {
@@ -20,7 +20,7 @@ export function MarketingNav() {
         <Link href="/" aria-label="Giya home" className="text-primary outline-none focus-visible:ring-2 focus-visible:ring-primary">
           <Logo variant="lockup" />
         </Link>
-        <div className="hidden items-center gap-6 md:flex">
+        <div className="hidden items-center gap-4 md:flex">
           {LINKS.map((l) => (
             <Link key={l.href} href={l.href} className="text-label-l text-on-surface-variant transition-colors hover:text-on-surface">
               {l.label}

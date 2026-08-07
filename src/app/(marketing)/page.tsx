@@ -34,7 +34,7 @@ export default function LandingPage() {
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
               <Link href="/home" className={buttonVariants({ variant: "filled", size: "touch" })}>Open Giya</Link>
-              <Link href="/business" className={buttonVariants({ variant: "outlined", size: "touch" })}>For businesses</Link>
+              <Link href="/business/signup" className={buttonVariants({ variant: "outlined", size: "touch" })}>For businesses</Link>
             </div>
           </div>
         </Reveal>
@@ -102,7 +102,7 @@ export default function LandingPage() {
             </div>
           </Reveal>
           <Reveal delay={0.1} className="md:justify-self-end">
-            <Link href="/business" className={buttonVariants({ variant: "elevated", size: "touch" })}>For businesses</Link>
+            <Link href="/business/signup" className={buttonVariants({ variant: "elevated", size: "touch" })}>For businesses</Link>
           </Reveal>
         </div>
       </section>

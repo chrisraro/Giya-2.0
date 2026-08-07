@@ -2,7 +2,15 @@ import Link from "next/link";
 import { Logo } from "@/components/brand/logo";
 
 const COLUMNS = [
-  { title: "Product", links: [{ href: "/home", label: "Open Giya" }, { href: "/consumers", label: "For consumers" }, { href: "/business", label: "For businesses" }] },
+  {
+    title: "Product",
+    links: [
+      { href: "/home", label: "Open Giya" },
+      { href: "/business/signup", label: "Merchant Register" },
+      { href: "/business/login", label: "Merchant Sign In" },
+      { href: "/admin/login", label: "Platform Admin" },
+    ],
+  },
   { title: "Legal", links: [{ href: "/privacy", label: "Privacy policy" }, { href: "/terms", label: "Terms of service" }] },
 ] as const;
 
