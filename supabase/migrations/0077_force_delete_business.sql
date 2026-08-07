@@ -27,6 +27,8 @@ begin
   update public.points_transactions set claim_id = null where business_id = p_business_id;
 
   -- Clear all child data belonging to this business
+  delete from public.ai_usage_events where business_id = p_business_id;
+  delete from public.audit_logs where business_id = p_business_id;
   delete from public.redemptions where business_id = p_business_id;
   delete from public.reward_claims where business_id = p_business_id;
   delete from public.points_transactions where business_id = p_business_id;
@@ -83,6 +85,8 @@ alter table public.fraud_signals disable trigger fraud_signals_immutable;
 update public.reward_claims set points_txn_id = null;
 update public.points_transactions set claim_id = null;
 
+delete from public.ai_usage_events;
+delete from public.audit_logs;
 delete from public.redemptions;
 delete from public.reward_claims;
 delete from public.points_transactions;

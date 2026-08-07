@@ -34,6 +34,7 @@ begin
   update public.points_transactions set claim_id = null where business_id = p_business_id;
 
   -- Delete all child data for this business
+  delete from public.ai_usage_events where business_id = p_business_id;
   delete from public.redemptions where business_id = p_business_id;
   delete from public.reward_claims where business_id = p_business_id;
   delete from public.points_transactions where business_id = p_business_id;
@@ -103,6 +104,7 @@ begin
   update public.reward_claims set points_txn_id = null;
   update public.points_transactions set claim_id = null;
 
+  delete from public.ai_usage_events;
   delete from public.redemptions;
   delete from public.reward_claims;
   delete from public.points_transactions;
