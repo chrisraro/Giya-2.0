@@ -136,16 +136,16 @@ export function StaffManager({ businessName, roster, actorRole }: StaffManagerPr
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-headline-s text-on-surface">Staff</h1>
+          <h1 className="text-headline-s font-bold text-on-surface">Staff</h1>
           <p className="text-body-s text-on-surface-variant">
             Who can sign in to {businessName}&apos;s Giya portal, and what they can do.
           </p>
         </div>
         {invitableRoles.length > 0 ? (
-          <Button type="button" variant="filled" size="md" onClick={openInvite}>
-            Invite
+          <Button type="button" variant="filled" size="md" onClick={openInvite} className="w-full sm:w-auto">
+            Invite Teammate
           </Button>
         ) : null}
       </div>

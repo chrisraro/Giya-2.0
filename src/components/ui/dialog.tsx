@@ -98,7 +98,7 @@ export function Dialog({ open, onClose, title, children, describedById, classNam
   return (
     <div
       role="presentation"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/40 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/40 p-3 sm:p-4 backdrop-blur-xs animate-in fade-in duration-200"
       onClick={onClose}
     >
       <div
@@ -109,7 +109,7 @@ export function Dialog({ open, onClose, title, children, describedById, classNam
         {...(describedById ? { "aria-describedby": describedById } : {})}
         tabIndex={-1}
         className={cn(
-          "flex max-h-[90vh] w-full max-w-lg flex-col gap-4 overflow-y-auto rounded-md3-xl bg-surface-container-high p-6 shadow-md outline-none",
+          "flex max-h-[92dvh] w-full max-w-lg flex-col gap-4 overflow-y-auto rounded-2xl sm:rounded-md3-xl bg-surface-container-high p-4 sm:p-6 shadow-xl outline-none transition-all",
           className,
         )}
         onClick={(event) => event.stopPropagation()}

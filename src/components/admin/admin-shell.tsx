@@ -32,7 +32,7 @@ export function AdminShell({ children, adminName, adminRole }: AdminShellProps) 
       </nav>
 
       <div className="flex min-h-dvh flex-col lg:pl-60">
-        <header className="flex items-center justify-between gap-4 border-b border-outline-variant bg-surface-container-lowest px-6 py-3.5 shadow-xs">
+        <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-outline-variant bg-surface-container-lowest px-4 sm:px-6 py-3.5 shadow-xs">
           <div className="flex items-center gap-3">
             <span className="flex size-3 items-center justify-center">
               <span className="absolute size-2.5 animate-ping rounded-full bg-emerald-400 opacity-75" />
@@ -44,7 +44,7 @@ export function AdminShell({ children, adminName, adminRole }: AdminShellProps) 
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center justify-between sm:justify-end gap-3">
             <div className="flex items-center gap-2 rounded-full border border-outline-variant bg-surface-container px-3 py-1.5">
               <span className="flex size-7 items-center justify-center rounded-full bg-primary text-label-m font-bold text-on-primary">
                 {adminName.slice(0, 1).toUpperCase()}
@@ -73,12 +73,12 @@ export function AdminShell({ children, adminName, adminRole }: AdminShellProps) 
           </div>
         </header>
 
-        <p className="border-b border-outline-variant bg-surface-container-low px-6 py-2 text-body-s text-on-surface-variant flex items-center gap-2">
+        <p className="border-b border-outline-variant bg-surface-container-low px-4 sm:px-6 py-2 text-body-s text-on-surface-variant flex items-center gap-2">
           <span className="material-symbols-rounded text-[16px] text-primary">security</span>
           <span>Audit Active: Everything you do here is recorded against your name, with the reason you give.</span>
         </p>
 
-        <main className="flex-1 px-6 py-6">{children}</main>
+        <main className="flex-1 px-4 sm:px-6 py-6">{children}</main>
       </div>
     </div>
   );
