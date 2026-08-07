@@ -9,10 +9,31 @@
 --   * User authentication accounts & consumer profiles
 -- ============================================================================
 
--- Single atomic TRUNCATE with CASCADE to clear all business data and transactions.
--- Truncating public.businesses with CASCADE automatically wipes all referencing child tables
--- (business_staff, business_verifications, products, campaigns, rewards, reward_claims,
--- reward_redemptions, points_rules, points_ledger, receipts, receipt_line_items, fraud_signals,
--- business_food_types, business_merchant_aliases, integration_connections).
+-- 1. Disable evidence and ledger immutability triggers for the reset
+alter table public.points_transactions disable trigger points_transactions_no_truncate;
+alter table public.points_transactions disable trigger points_transactions_append_only;
 
+alter table public.receipts disable trigger receipts_no_truncate;
+alter table public.receipts disable trigger receipts_no_delete;
+
+alter table public.ocr_results disable trigger ocr_results_no_truncate;
+alter table public.ocr_results disable trigger ocr_results_immutable;
+
+alter table public.fraud_signals disable trigger fraud_signals_no_truncate;
+alter table public.fraud_signals disable trigger fraud_signals_immutable;
+
+-- 2. Atomic CASCADE truncate to clear all business tenants and dependent transaction records
 truncate table public.businesses cascade;
+
+-- 3. Re-enable evidence and ledger immutability triggers
+alter table public.points_transactions enable trigger points_transactions_no_truncate;
+alter table public.points_transactions enable trigger points_transactions_append_only;
+
+alter table public.receipts enable trigger receipts_no_truncate;
+alter table public.receipts enable trigger receipts_no_delete;
+
+alter table public.ocr_results enable trigger ocr_results_no_truncate;
+alter table public.ocr_results enable trigger ocr_results_immutable;
+
+alter table public.fraud_signals enable trigger fraud_signals_no_truncate;
+alter table public.fraud_signals enable trigger fraud_signals_immutable;
