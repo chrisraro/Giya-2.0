@@ -282,23 +282,24 @@ export async function purgeBusiness(
 
   try {
     const bId = input.businessId;
-    await deps.supabase.from("points_transactions").delete().eq("business_id", bId);
-    await deps.supabase.from("reward_redemptions").delete().eq("business_id", bId);
-    await deps.supabase.from("reward_claims").delete().eq("business_id", bId);
-    await deps.supabase.from("rewards").delete().eq("business_id", bId);
-    await deps.supabase.from("loyalty_cards").delete().eq("business_id", bId);
-    await deps.supabase.from("loyalty_programs").delete().eq("business_id", bId);
-    await deps.supabase.from("campaigns").delete().eq("business_id", bId);
-    await deps.supabase.from("promotions").delete().eq("business_id", bId);
-    await deps.supabase.from("points_rules").delete().eq("business_id", bId);
-    await deps.supabase.from("receipt_line_items").delete().eq("business_id", bId);
-    await deps.supabase.from("receipts").delete().eq("business_id", bId);
-    await deps.supabase.from("products").delete().eq("business_id", bId);
-    await deps.supabase.from("business_verifications").delete().eq("business_id", bId);
-    await deps.supabase.from("business_food_types").delete().eq("business_id", bId);
-    await deps.supabase.from("business_integrations").delete().eq("business_id", bId);
-    await deps.supabase.from("business_staff").delete().eq("business_id", bId);
-    const { error: deleteError } = await deps.supabase.from("businesses").delete().eq("id", bId);
+    const from = deps.supabase.from.bind(deps.supabase) as any;
+    await from("points_transactions").delete().eq("business_id", bId);
+    await from("redemptions").delete().eq("business_id", bId);
+    await from("reward_claims").delete().eq("business_id", bId);
+    await from("rewards").delete().eq("business_id", bId);
+    await from("loyalty_cards").delete().eq("business_id", bId);
+    await from("loyalty_programs").delete().eq("business_id", bId);
+    await from("campaigns").delete().eq("business_id", bId);
+    await from("promotions").delete().eq("business_id", bId);
+    await from("points_rules").delete().eq("business_id", bId);
+    await from("receipt_line_items").delete().eq("business_id", bId);
+    await from("receipts").delete().eq("business_id", bId);
+    await from("products").delete().eq("business_id", bId);
+    await from("business_verifications").delete().eq("business_id", bId);
+    await from("business_food_types").delete().eq("business_id", bId);
+    await from("business_integrations").delete().eq("business_id", bId);
+    await from("business_staff").delete().eq("business_id", bId);
+    const { error: deleteError } = await from("businesses").delete().eq("id", bId);
 
     if (deleteError) {
       console.error("[admin/business-decisions] purge fall-back delete failed", deleteError);
@@ -335,21 +336,22 @@ export async function purgeAllBusinesses(
   }
 
   try {
-    await deps.supabase.from("points_transactions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("reward_redemptions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("reward_claims").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("rewards").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("loyalty_cards").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("loyalty_programs").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("campaigns").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("promotions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("points_rules").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("receipt_line_items").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("receipts").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("products").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("business_verifications").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await deps.supabase.from("business_staff").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    const { error: deleteError } = await deps.supabase.from("businesses").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    const from = deps.supabase.from.bind(deps.supabase) as any;
+    await from("points_transactions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("redemptions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("reward_claims").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("rewards").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("loyalty_cards").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("loyalty_programs").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("campaigns").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("promotions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("points_rules").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("receipt_line_items").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("receipts").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("products").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("business_verifications").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await from("business_staff").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    const { error: deleteError } = await from("businesses").delete().neq("id", "00000000-0000-0000-0000-000000000000");
 
     if (deleteError) {
       console.error("[admin/business-decisions] purge all fall-back delete failed", deleteError);
