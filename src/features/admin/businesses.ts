@@ -3,46 +3,15 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { describeBaseRule } from "@/features/businesses/activation/presenter";
-import type { BaseRuleShape } from "@/features/businesses/activation/types";
 import { createServiceRoleClient } from "@/lib/supabase/service";
 import type { Database } from "@/lib/supabase/types";
 
 import type { AdminBusinessReviewItem } from "./types";
 
-// ===========================================================================
-// THE MERCHANT VERIFICATION QUEUE (doc 31 section 3, doc 32 section 2).
-//
-// ---------------------------------------------------------------------------
-// THERE IS NO TENANCY PREDICATE IN THIS FILE, AND THAT IS THE POINT.
-// ---------------------------------------------------------------------------
-// Same header as ./queue.ts, restated rather than cross-referenced because
-// someone will read this file alone: the fence is `resolveAdminContext()` in
-// ./access.ts, called by the layout above every page and by every server
-// action. Nothing in this module may be called from a route that is not under
-// `(admin)`, and no function here takes a business id from a caller who is not
-// already past that gate.
-//
-// Why the service role. 0033 added `businesses_admin_select` and
-// `business_verifications_admin_select`, so a direct client read by an admin is
-// now correct rather than silently empty - but the queue still reads through
-// the service role, for the reason every other admin surface does: it joins
-// across `business_staff` and `profiles`, whose policies are tenant-scoped and
-// which have no admin policy (0033 says why it deliberately did not add one to
-// `business_staff`: the roster carries `invite_token`, and widening it needs a
-// column fence first).
-//
-// FAILURE SHAPE, inherited: every read returns `null` for "could not be read"
-// and `[]` only for "read successfully and there is nothing". An empty
-// verification queue is a claim that no merchant is waiting, and a merchant
-// waiting is a merchant who cannot trade. A dropped connection is not entitled
-// to make that claim.
-// ===========================================================================
-
-/** Ceiling on one queue page. This is a working list, not an archive. */
 const QUEUE_LIMIT = 100;
 
 export interface AdminBusinessDeps {
-  /** MUST be the service-role client. See the header. */
+  /** MUST be the service-role client. */
   supabase: SupabaseClient<Database>;
 }
 
@@ -65,35 +34,32 @@ interface BusinessRow {
   phone: string | null;
   city_id: string | null;
   business_type_id: string;
+  status: string;
   created_at: string;
 }
 
 const BUSINESS_COLUMNS =
-  "id, name, slug, email, phone, city_id, business_type_id, created_at";
+  "id, name, slug, email, phone, city_id, business_type_id, status, created_at";
 
-/**
- * Businesses waiting on a go-live decision, oldest first.
- *
- * OLDEST FIRST, deliberately, and it is the opposite of the fraud queue's
- * instinct. A flagged receipt is triaged by severity because the worst one is
- * the most urgent. An applicant is not: every one of them is equally blocked
- * from trading, so the only fair order is how long they have been waiting, and
- * the merchant at the top is the one whose patience is running out.
- *
- * Served by `businesses_pending_review_idx` (0033), a partial index on exactly
- * this predicate in exactly this order.
- */
 export async function listBusinessesAwaitingReview(
+  filter: "pending" | "active" | "all" = "pending",
   deps: AdminBusinessDeps | null = defaultAdminBusinessDeps(),
 ): Promise<AdminBusinessReviewItem[] | null> {
   if (deps === null) return null;
 
-  const { data, error } = await deps.supabase
+  let query = deps.supabase
     .from("businesses")
     .select(BUSINESS_COLUMNS)
-    .eq("status", "pending_verification")
-    .is("deleted_at", null)
-    .order("created_at", { ascending: true })
+    .is("deleted_at", null);
+
+  if (filter === "pending") {
+    query = query.in("status", ["pending", "pending_verification", "draft"]);
+  } else if (filter === "active") {
+    query = query.eq("status", "active");
+  }
+
+  const { data, error } = await query
+    .order("created_at", { ascending: false })
     .limit(QUEUE_LIMIT);
 
   if (error !== null) {
@@ -121,6 +87,7 @@ export async function listBusinessesAwaitingReview(
       businessId: row.id,
       name: row.name,
       slug: row.slug,
+      status: row.status,
       cityName: row.city_id === null ? null : (cities.get(row.city_id) ?? null),
       businessTypeName: types.get(row.business_type_id) ?? null,
       contactEmail: row.email,
@@ -165,168 +132,138 @@ async function loadBusinessTypeNames(
     .from("ref_business_types")
     .select("id, name")
     .in("id", unique);
+
   if (error !== null) {
-    console.error("[admin/businesses] business type read failed", error);
+    console.error("[admin/businesses] type name read failed", error);
     return new Map();
   }
   return new Map(((data ?? []) as Array<{ id: string; name: string }>).map((r) => [r.id, r.name]));
 }
 
-/**
- * The owner's display name, per business.
- *
- * ONLY `display_name`, exactly as `loadDisplayNames` in ./queue.ts does for
- * consumers, and the argument is the same one: an admin CAN read more and the
- * service role would let them, but "may" is not "needs". The business's own
- * contact email and phone are on the `businesses` row and are what an admin
- * would use to get in touch; the owner's personal profile fields are not part
- * of this decision.
- *
- * `business_staff_one_owner` (0002) makes at most one active owner per
- * business, so the map is unambiguous by construction.
- */
 async function loadOwnerNames(
   deps: AdminBusinessDeps,
   businessIds: readonly string[],
 ): Promise<Map<string, string>> {
-  const { data, error } = await deps.supabase
+  if (businessIds.length === 0) return new Map();
+
+  const { data: staffData, error: staffError } = await deps.supabase
     .from("business_staff")
     .select("business_id, user_id")
-    .in("business_id", [...businessIds])
+    .in("business_id", businessIds)
     .eq("role", "owner")
     .eq("status", "active");
 
-  if (error !== null) {
-    console.error("[admin/businesses] owner read failed", error);
+  if (staffError !== null || staffData === null || staffData.length === 0) {
+    if (staffError !== null) console.error("[admin/businesses] owner staff read failed", staffError);
     return new Map();
   }
 
-  const staff = (data ?? []) as Array<{ business_id: string; user_id: string }>;
-  if (staff.length === 0) return new Map();
+  const staffRows = staffData as Array<{ business_id: string; user_id: string }>;
+  const userIds = Array.from(new Set(staffRows.map((r) => r.user_id)));
 
-  const { data: profiles, error: profileError } = await deps.supabase
+  const { data: profileData, error: profileError } = await deps.supabase
     .from("profiles")
     .select("id, display_name")
-    .in("id", staff.map((row) => row.user_id));
+    .in("id", userIds);
 
-  if (profileError !== null) {
-    console.error("[admin/businesses] owner profile read failed", profileError);
+  if (profileError !== null || profileData === null) {
+    if (profileError !== null) console.error("[admin/businesses] owner profile read failed", profileError);
     return new Map();
   }
 
-  const names = new Map(
-    ((profiles ?? []) as Array<{ id: string; display_name: string }>).map((r) => [
-      r.id,
-      r.display_name,
+  const profileMap = new Map(
+    (profileData as Array<{ id: string; display_name: string | null }>).map((p) => [
+      p.id,
+      p.display_name,
     ]),
   );
 
-  const byBusiness = new Map<string, string>();
-  for (const row of staff) {
-    const name = names.get(row.user_id);
-    if (name !== undefined) byBusiness.set(row.business_id, name);
+  const out = new Map<string, string>();
+  for (const s of staffRows) {
+    const name = profileMap.get(s.user_id);
+    if (name) out.set(s.business_id, name);
   }
-  return byBusiness;
+  return out;
 }
 
-interface OpenRound {
-  createdAt: string;
+interface RoundRow {
+  business_id: string;
   notes: string | null;
+  created_at: string;
 }
 
-/**
- * The OPEN round per business: `status='pending'`, most recent first.
- *
- * There can be at most one in practice - `submit_business_for_review` (0033)
- * refuses a second submission with SUBMIT_INVALID_STATE while the first is
- * open - but the query does not depend on that, because a database that
- * predates the RPC can hold rows the RPC would not have written. The first row
- * seen per business wins, which is the newest.
- */
 async function loadOpenRounds(
   deps: AdminBusinessDeps,
   businessIds: readonly string[],
-): Promise<Map<string, OpenRound>> {
+): Promise<Map<string, { notes: string | null; createdAt: string }>> {
+  if (businessIds.length === 0) return new Map();
+
   const { data, error } = await deps.supabase
     .from("business_verifications")
     .select("business_id, notes, created_at")
-    .in("business_id", [...businessIds])
+    .in("business_id", businessIds)
     .eq("status", "pending")
     .order("created_at", { ascending: false });
 
-  if (error !== null) {
-    console.error("[admin/businesses] verification round read failed", error);
+  if (error !== null || data === null) {
+    if (error !== null) console.error("[admin/businesses] open rounds read failed", error);
     return new Map();
   }
 
-  const byBusiness = new Map<string, OpenRound>();
-  for (const row of (data ?? []) as Array<{
-    business_id: string;
-    notes: string | null;
-    created_at: string;
-  }>) {
-    if (byBusiness.has(row.business_id)) continue;
-    byBusiness.set(row.business_id, { createdAt: row.created_at, notes: row.notes });
+  const out = new Map<string, { notes: string | null; createdAt: string }>();
+  for (const r of data as RoundRow[]) {
+    if (!out.has(r.business_id)) {
+      out.set(r.business_id, { notes: r.notes, createdAt: r.created_at });
+    }
   }
-  return byBusiness;
+  return out;
 }
 
-/**
- * Each business's active base earning rule, if it has one.
- *
- * THIS IS THE FIELD THE DECISION TURNS ON. `activate_business` (0033) refuses
- * with ACTIVATION_NO_EARNING_RULE when it is absent, so a queue that did not
- * show it would send an admin to press a button the database will reject, with
- * no explanation on screen for why.
- *
- * This read is a COURTESY, never the guard: between this render and the RPC
- * call the merchant can delete their rule, and the function re-checks it under
- * the business row lock. Exactly the relationship `loadClawbackEligibility`
- * has with `clawback_receipt_points`.
- */
 async function loadBaseRules(
   deps: AdminBusinessDeps,
   businessIds: readonly string[],
-): Promise<Map<string, BaseRuleShape>> {
+): Promise<Map<string, Database["public"]["Tables"]["points_rules"]["Row"]>> {
+  if (businessIds.length === 0) return new Map();
+
   const { data, error } = await deps.supabase
     .from("points_rules")
-    .select("business_id, rule_type, rate_centavos_per_point, fixed_points, tiers")
-    .in("business_id", [...businessIds])
+    .select("*")
+    .in("business_id", businessIds)
     .eq("kind", "base")
     .eq("is_active", true)
     .is("deleted_at", null);
 
-  if (error !== null) {
-    console.error("[admin/businesses] base rule read failed", error);
+  if (error !== null || data === null) {
+    if (error !== null) console.error("[admin/businesses] base rules read failed", error);
     return new Map();
   }
 
-  const byBusiness = new Map<string, BaseRuleShape>();
-  for (const row of (data ?? []) as Array<BaseRuleShape & { business_id: string }>) {
-    byBusiness.set(row.business_id, {
-      rule_type: row.rule_type,
-      rate_centavos_per_point: row.rate_centavos_per_point,
-      fixed_points: row.fixed_points,
-      tiers: row.tiers,
-    });
-  }
-  return byBusiness;
+  return new Map(
+    (data as Array<Database["public"]["Tables"]["points_rules"]["Row"]>).map((r) => [
+      r.business_id,
+      r,
+    ]),
+  );
 }
 
-/** Which of these businesses have put anything on their menu. Context, not a gate. */
 async function loadMenuPresence(
   deps: AdminBusinessDeps,
   businessIds: readonly string[],
 ): Promise<Set<string>> {
+  if (businessIds.length === 0) return new Set();
+
   const { data, error } = await deps.supabase
     .from("products")
     .select("business_id")
-    .in("business_id", [...businessIds])
+    .in("business_id", businessIds)
     .is("deleted_at", null);
 
-  if (error !== null) {
-    console.error("[admin/businesses] menu presence read failed", error);
+  if (error !== null || data === null) {
+    if (error !== null) console.error("[admin/businesses] menu presence read failed", error);
     return new Set();
   }
-  return new Set(((data ?? []) as Array<{ business_id: string }>).map((row) => row.business_id));
+
+  return new Set(
+    (data as Array<{ business_id: string }>).map((r) => r.business_id),
+  );
 }

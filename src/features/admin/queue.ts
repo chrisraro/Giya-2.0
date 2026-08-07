@@ -963,7 +963,7 @@ export async function loadPlatformOverview(
     deps.supabase
       .from("businesses")
       .select("id")
-      .eq("status", "pending_verification")
+      .in("status", ["pending", "pending_verification", "draft"])
       .is("deleted_at", null)
       .limit(OVERVIEW_COUNT_CAP + 1),
     deps.supabase
