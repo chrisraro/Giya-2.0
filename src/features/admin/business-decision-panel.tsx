@@ -103,6 +103,12 @@ export function BusinessDecisionPanel({
         })}
       </div>
 
+      {!canAct && (
+        <p className="text-body-s text-on-surface-variant">
+          Your account role is read-only. Support accounts can view merchant applications but cannot approve or send them back.
+        </p>
+      )}
+
       {open !== null && (
         <div className="flex flex-col gap-2 rounded-md3-sm border border-outline-variant p-3">
           <p className="text-body-s text-on-surface-variant">{COPY[open].description}</p>
