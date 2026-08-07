@@ -255,3 +255,109 @@ export async function rejectBusinessVerification(
 
   return { ok: true };
 }
+
+/**
+ * Permanently purge a business and all associated child data (receipts, ledger, campaigns, staff).
+ */
+export async function purgeBusiness(
+  input: BusinessDecisionInput,
+  deps: BusinessDecisionDeps | null = defaultBusinessDecisionDeps(),
+): Promise<BusinessDecisionOutcome> {
+  if (deps === null) {
+    return fail("DEPENDENCY_UNAVAILABLE", "This action is not available right now.");
+  }
+
+  const reason = checkReason(input.reason);
+  if (!reason.ok) return fail("REASON_REQUIRED", reason.message);
+
+  const { error: rpcError } = await deps.supabase.rpc("purge_business", {
+    p_business_id: input.businessId,
+    p_actor_id: input.actorId,
+    p_reason: reason.reason,
+  });
+
+  if (rpcError === null) {
+    return { ok: true };
+  }
+
+  try {
+    const bId = input.businessId;
+    await deps.supabase.from("points_transactions").delete().eq("business_id", bId);
+    await deps.supabase.from("reward_redemptions").delete().eq("business_id", bId);
+    await deps.supabase.from("reward_claims").delete().eq("business_id", bId);
+    await deps.supabase.from("rewards").delete().eq("business_id", bId);
+    await deps.supabase.from("loyalty_cards").delete().eq("business_id", bId);
+    await deps.supabase.from("loyalty_programs").delete().eq("business_id", bId);
+    await deps.supabase.from("campaigns").delete().eq("business_id", bId);
+    await deps.supabase.from("promotions").delete().eq("business_id", bId);
+    await deps.supabase.from("points_rules").delete().eq("business_id", bId);
+    await deps.supabase.from("receipt_line_items").delete().eq("business_id", bId);
+    await deps.supabase.from("receipts").delete().eq("business_id", bId);
+    await deps.supabase.from("products").delete().eq("business_id", bId);
+    await deps.supabase.from("business_verifications").delete().eq("business_id", bId);
+    await deps.supabase.from("business_food_types").delete().eq("business_id", bId);
+    await deps.supabase.from("business_integrations").delete().eq("business_id", bId);
+    await deps.supabase.from("business_staff").delete().eq("business_id", bId);
+    const { error: deleteError } = await deps.supabase.from("businesses").delete().eq("id", bId);
+
+    if (deleteError) {
+      console.error("[admin/business-decisions] purge fall-back delete failed", deleteError);
+      return fail("WRITE_FAILED", "Failed to purge business data.");
+    }
+    return { ok: true };
+  } catch (err) {
+    console.error("[admin/business-decisions] purge catch error", err);
+    return fail("WRITE_FAILED", "An unexpected error occurred while deleting the business.");
+  }
+}
+
+/**
+ * Permanently purge ALL businesses and transaction data platform-wide.
+ */
+export async function purgeAllBusinesses(
+  input: { actorId: string; reason: string },
+  deps: BusinessDecisionDeps | null = defaultBusinessDecisionDeps(),
+): Promise<BusinessDecisionOutcome> {
+  if (deps === null) {
+    return fail("DEPENDENCY_UNAVAILABLE", "This action is not available right now.");
+  }
+
+  const reason = checkReason(input.reason);
+  if (!reason.ok) return fail("REASON_REQUIRED", reason.message);
+
+  const { error: rpcError } = await deps.supabase.rpc("purge_all_businesses", {
+    p_actor_id: input.actorId,
+    p_reason: reason.reason,
+  });
+
+  if (rpcError === null) {
+    return { ok: true };
+  }
+
+  try {
+    await deps.supabase.from("points_transactions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("reward_redemptions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("reward_claims").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("rewards").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("loyalty_cards").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("loyalty_programs").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("campaigns").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("promotions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("points_rules").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("receipt_line_items").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("receipts").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("products").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("business_verifications").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    await deps.supabase.from("business_staff").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    const { error: deleteError } = await deps.supabase.from("businesses").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+
+    if (deleteError) {
+      console.error("[admin/business-decisions] purge all fall-back delete failed", deleteError);
+      return fail("WRITE_FAILED", "Failed to purge all businesses.");
+    }
+    return { ok: true };
+  } catch (err) {
+    console.error("[admin/business-decisions] purge all catch error", err);
+    return fail("WRITE_FAILED", "An unexpected error occurred while clearing businesses.");
+  }
+}

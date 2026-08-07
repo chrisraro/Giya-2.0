@@ -5,11 +5,11 @@ import * as React from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-import { approveBusinessAction, sendBusinessBackAction } from "./business-actions";
+import { approveBusinessAction, deleteBusinessAction, sendBusinessBackAction } from "./business-actions";
 import type { BusinessActionResult } from "./business-actions";
 import { MAX_REASON_LENGTH, reasonProblem } from "./presenter";
 
-type Decision = "approve" | "send_back";
+type Decision = "approve" | "send_back" | "delete";
 
 const COPY: Record<
   Decision,
@@ -31,6 +31,15 @@ const COPY: Record<
     reasonLabel: "What do they need to fix? Required.",
     reasonHint:
       "THE MERCHANT READS THIS WORD FOR WORD on their dashboard. Write it to them, not about them.",
+    destructive: true,
+  },
+  delete: {
+    label: "Delete / Purge",
+    description:
+      "PERMANENTLY PURGES this business and all related child data (receipts, transactions, products, campaigns, rewards, staff). THIS CANNOT BE UNDONE.",
+    reasonLabel: "Why are you purging this business? Required.",
+    reasonHint:
+      "Internal. Recorded in the platform audit log against your admin account.",
     destructive: true,
   },
 };
@@ -69,7 +78,12 @@ export function BusinessDecisionPanel({
     }
 
     startTransition(async () => {
-      const fn = decision === "approve" ? approveBusinessAction : sendBusinessBackAction;
+      const fn =
+        decision === "approve"
+          ? approveBusinessAction
+          : decision === "send_back"
+            ? sendBusinessBackAction
+            : deleteBusinessAction;
       const res = await fn({ businessId, reason });
       setResult(res);
       if (res.ok) {
@@ -82,7 +96,7 @@ export function BusinessDecisionPanel({
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap gap-2">
-        {(["approve", "send_back"] as const).map((decision) => {
+        {(["approve", "send_back", "delete"] as const).map((decision) => {
           const copy = COPY[decision];
           const isOpen = open === decision;
 

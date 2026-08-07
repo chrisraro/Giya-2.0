@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 
 import { BusinessDecisionPanel } from "./business-decision-panel";
 import { queueAge, slaChipClass } from "./presenter";
+import { PurgeAllBusinessesButton } from "./purge-all-button";
 import type { AdminBusinessReviewItem } from "./types";
 
 function Fact({ label, value }: { label: string; value: string }) {
@@ -133,50 +134,53 @@ export function AdminBusinessesScreen({
 }: AdminBusinessesScreenProps) {
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-headline-s font-bold text-on-surface">Businesses awaiting review</h1>
+          <h1 className="text-headline-s font-bold text-on-surface">Merchant Directory & Verifications</h1>
           <p className="text-body-s text-on-surface-variant">
-            Nobody on this list can be found by a customer, scanned for, or earn
-            anyone a point. Approving is what changes that.
+            Manage business applications, active merchant listings, and database cleanups.
           </p>
         </div>
 
-        {/* Filter Tabs */}
-        <div className="flex items-center gap-1 rounded-full border border-outline-variant bg-surface-container-low p-1">
-          <Link
-            href="/admin/businesses?filter=pending"
-            className={cn(
-              "rounded-full px-3.5 py-1 text-label-m font-medium transition-colors",
-              filter === "pending"
-                ? "bg-primary text-on-primary shadow-xs"
-                : "text-on-surface-variant hover:text-on-surface",
-            )}
-          >
-            Pending Review
-          </Link>
-          <Link
-            href="/admin/businesses?filter=active"
-            className={cn(
-              "rounded-full px-3.5 py-1 text-label-m font-medium transition-colors",
-              filter === "active"
-                ? "bg-primary text-on-primary shadow-xs"
-                : "text-on-surface-variant hover:text-on-surface",
-            )}
-          >
-            Active
-          </Link>
-          <Link
-            href="/admin/businesses?filter=all"
-            className={cn(
-              "rounded-full px-3.5 py-1 text-label-m font-medium transition-colors",
-              filter === "all"
-                ? "bg-primary text-on-primary shadow-xs"
-                : "text-on-surface-variant hover:text-on-surface",
-            )}
-          >
-            All
-          </Link>
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Filter Tabs */}
+          <div className="flex items-center gap-1 rounded-full border border-outline-variant bg-surface-container-low p-1">
+            <Link
+              href="/admin/businesses?filter=pending"
+              className={cn(
+                "rounded-full px-3.5 py-1 text-label-m font-medium transition-colors",
+                filter === "pending"
+                  ? "bg-primary text-on-primary shadow-xs"
+                  : "text-on-surface-variant hover:text-on-surface",
+              )}
+            >
+              Pending Review
+            </Link>
+            <Link
+              href="/admin/businesses?filter=active"
+              className={cn(
+                "rounded-full px-3.5 py-1 text-label-m font-medium transition-colors",
+                filter === "active"
+                  ? "bg-primary text-on-primary shadow-xs"
+                  : "text-on-surface-variant hover:text-on-surface",
+              )}
+            >
+              Active
+            </Link>
+            <Link
+              href="/admin/businesses?filter=all"
+              className={cn(
+                "rounded-full px-3.5 py-1 text-label-m font-medium transition-colors",
+                filter === "all"
+                  ? "bg-primary text-on-primary shadow-xs"
+                  : "text-on-surface-variant hover:text-on-surface",
+              )}
+            >
+              All
+            </Link>
+          </div>
+
+          <PurgeAllBusinessesButton canAct={canAct} />
         </div>
       </div>
 

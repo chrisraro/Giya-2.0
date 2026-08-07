@@ -6,7 +6,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { resolveAdminContext } from "./access";
-import { activateBusiness, rejectBusinessVerification } from "./business-decisions";
+import { activateBusiness, purgeAllBusinesses, purgeBusiness, rejectBusinessVerification } from "./business-decisions";
 import type { BusinessDecisionErrorCode } from "./business-decisions";
 import { MAX_REASON_LENGTH } from "./presenter";
 
@@ -104,5 +104,50 @@ export async function sendBusinessBackAction(input: unknown): Promise<BusinessAc
   return {
     ok: true,
     message: "Sent back. The owner sees your reason on their dashboard and can fix it and resubmit.",
+  };
+}
+
+export async function deleteBusinessAction(input: unknown): Promise<BusinessActionResult> {
+  const admin = await resolveAdminContext();
+  if (admin === null) return fail("NOT_ALLOWED", "You do not have permission to take this action.");
+
+  const parsed = decisionSchema.safeParse(input);
+  if (!parsed.success) return fail("INVALID_INPUT", "That request could not be read. Refresh and try again.");
+
+  const outcome = await purgeBusiness({
+    businessId: parsed.data.businessId,
+    reason: parsed.data.reason,
+    actorId: admin.userId,
+    requestId: randomUUID(),
+  });
+
+  if (!outcome.ok) return fail(outcome.code, outcome.message);
+
+  revalidateQueue();
+  return {
+    ok: true,
+    message: "Business and all related data were permanently purged.",
+  };
+}
+
+export async function purgeAllBusinessesAction(input: unknown): Promise<BusinessActionResult> {
+  const admin = await resolveAdminContext();
+  if (admin === null) return fail("NOT_ALLOWED", "You do not have permission to take this action.");
+
+  const schema = z.object({ reason: z.string().min(1).max(MAX_REASON_LENGTH) });
+  const parsed = schema.safeParse(input);
+  if (!parsed.success) return fail("INVALID_INPUT", "Please enter a valid reason for clearing all data.");
+
+  const outcome = await purgeAllBusinesses({
+    actorId: admin.userId,
+    reason: parsed.data.reason,
+  });
+
+  if (!outcome.ok) return fail(outcome.code, outcome.message);
+
+  revalidateQueue();
+  return {
+    ok: true,
+    message: "All businesses and platform transaction data have been permanently cleared.",
   };
 }
