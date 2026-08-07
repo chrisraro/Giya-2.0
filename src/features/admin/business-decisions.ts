@@ -305,9 +305,8 @@ export async function purgeBusiness(
     await from("receipt_line_items").delete().eq("business_id", bId);
     await from("receipts").delete().eq("business_id", bId);
     await from("products").delete().eq("business_id", bId);
-    await from("business_verifications").delete().eq("business_id", bId);
     await from("business_food_types").delete().eq("business_id", bId);
-    await from("business_integrations").delete().eq("business_id", bId);
+    await from("integration_connections").delete().eq("business_id", bId);
     await from("business_staff").delete().eq("business_id", bId);
     const { error: deleteError } = await from("businesses").delete().eq("id", bId);
 
