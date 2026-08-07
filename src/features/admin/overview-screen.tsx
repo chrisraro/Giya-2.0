@@ -8,63 +8,50 @@ import { cn } from "@/lib/utils";
 import { formatPlatformAmount, queueAge, severityMeta, slaChipClass } from "./presenter";
 import type { AdminQueueItem, PlatformOverview } from "./types";
 
-// ===========================================================================
-// `/admin` - the platform overview.
-//
-// A SYNCHRONOUS, PROP-DRIVEN server component. Four numbers and a strip of the
-// most recent blocking signals, every one of them a live count over an indexed
-// predicate.
-//
-// ---------------------------------------------------------------------------
-// NULL IS NOT ZERO, AND THE DIFFERENCE IS THE POINT OF THIS SCREEN.
-// ---------------------------------------------------------------------------
-// Every tile takes `number | null`. Null renders as "Cannot read right now",
-// never as 0. A platform dashboard reading "0 receipts in review" is a claim
-// that the whole platform is clear, and it is the claim an operator will act on
-// by closing the tab. A failed count is not entitled to make it. The same
-// reasoning `countPendingReview` gives for the business sidebar badge, one
-// scale up.
-//
-// Doc 31 §2 lists ten tiles. Six of them are backed by
-// `analytics_daily_business`, which does not exist yet, and they are simply not
-// here. A tile computed from a fixture would be worse than a missing tile: it
-// looks like information, it survives review, and it is wrong in a direction
-// nobody checks.
-// ===========================================================================
-
 interface TileProps {
   label: string;
   value: number | null;
   hint: string;
   href: string;
-  /** Draws the tile in the error tone when the number is a problem, not just a fact. */
+  icon: string;
   alarmAbove?: number;
 }
 
-function Tile({ label, value, hint, href, alarmAbove }: TileProps) {
+function Tile({ label, value, hint, href, icon, alarmAbove }: TileProps) {
   const alarm = alarmAbove !== undefined && value !== null && value > alarmAbove;
 
   return (
     <Link
       href={href}
       className={cn(
-        "flex flex-col gap-1 rounded-md3-md border border-outline-variant bg-surface p-4",
-        "outline-none transition-colors duration-200 ease-standard motion-reduce:transition-none",
-        "hover:bg-surface-container focus-visible:ring-2 focus-visible:ring-primary",
-        alarm && "border-error",
+        "flex flex-col justify-between gap-3 rounded-md3-md border border-outline-variant bg-surface-container-lowest p-5 shadow-xs",
+        "outline-none transition-all duration-200 ease-standard motion-reduce:transition-none",
+        "hover:border-primary/50 hover:bg-surface-container-low hover:shadow-md focus-visible:ring-2 focus-visible:ring-primary",
+        alarm && "border-error/60 bg-error-container/10 hover:border-error",
       )}
     >
-      <span className="text-label-m text-on-surface-variant">{label}</span>
-      {value === null ? (
-        <span className="text-title-m text-on-surface-variant">Cannot read right now</span>
-      ) : (
+      <div className="flex items-center justify-between">
+        <span className="text-label-l font-semibold text-on-surface-variant">{label}</span>
         <span
-          className={cn("font-mono text-headline-s", alarm ? "text-error" : "text-on-surface")}
+          className={cn(
+            "flex size-9 items-center justify-center rounded-lg",
+            alarm ? "bg-error-container text-on-error-container" : "bg-primary-container/40 text-primary",
+          )}
         >
-          {value}
+          <span className="material-symbols-rounded text-[20px]">{icon}</span>
         </span>
-      )}
-      <span className="text-body-s text-on-surface-variant">{hint}</span>
+      </div>
+
+      <div>
+        {value === null ? (
+          <span className="text-title-m text-on-surface-variant">Cannot read right now</span>
+        ) : (
+          <span className={cn("font-mono text-headline-m font-bold", alarm ? "text-error" : "text-on-surface")}>
+            {value}
+          </span>
+        )}
+        <p className="mt-1 text-body-s text-on-surface-variant">{hint}</p>
+      </div>
     </Link>
   );
 }
@@ -78,14 +65,14 @@ function RecentBlockRow({ item, now }: { item: AdminQueueItem; now: Date }) {
       <Link
         href={`/admin/receipts/${item.receiptId}`}
         className={cn(
-          "flex flex-col gap-2 rounded-md3-md border border-outline-variant bg-surface p-4",
-          "outline-none transition-colors duration-200 ease-standard motion-reduce:transition-none",
-          "hover:bg-surface-container focus-visible:ring-2 focus-visible:ring-primary",
+          "flex flex-col gap-3 rounded-md3-md border border-outline-variant bg-surface-container-lowest p-4 shadow-2xs",
+          "outline-none transition-all duration-200 ease-standard motion-reduce:transition-none",
+          "hover:border-primary/40 hover:bg-surface-container-low focus-visible:ring-2 focus-visible:ring-primary",
           "sm:flex-row sm:items-center sm:gap-4",
         )}
       >
         <div className="min-w-0 flex-1">
-          <p className="truncate text-title-m text-on-surface">
+          <p className="truncate text-title-m font-semibold text-on-surface">
             {item.businessName ?? "No business matched"}
           </p>
           <p className="truncate text-body-s text-on-surface-variant">
@@ -93,14 +80,14 @@ function RecentBlockRow({ item, now }: { item: AdminQueueItem; now: Date }) {
             {item.receiptNumber === null ? "" : ` · No. ${item.receiptNumber}`}
           </p>
         </div>
-        <p className="shrink-0 font-mono text-title-m text-on-surface sm:w-32 sm:text-right">
+        <p className="shrink-0 font-mono text-title-m font-bold text-on-surface sm:w-32 sm:text-right">
           {formatPlatformAmount(item.totalCentavos)}
         </p>
         <div className="flex flex-wrap items-center gap-2 sm:w-64 sm:justify-end">
           {severity !== null && (
             <span
               className={cn(
-                "inline-flex items-center rounded-full px-2.5 py-0.5 text-label-m",
+                "inline-flex items-center rounded-full px-2.5 py-0.5 text-label-m font-medium",
                 severity.chipClass,
               )}
             >
@@ -110,7 +97,7 @@ function RecentBlockRow({ item, now }: { item: AdminQueueItem; now: Date }) {
           )}
           <span
             className={cn(
-              "inline-flex items-center rounded-full px-2.5 py-0.5 text-label-m",
+              "inline-flex items-center rounded-full px-2.5 py-0.5 text-label-m font-medium",
               slaChipClass(age.state),
             )}
           >
@@ -126,16 +113,6 @@ export interface OverviewScreenProps {
   overview: PlatformOverview;
   adminName: string;
   now: Date;
-  /**
-   * D10's platform-wide review rate. Null when the read failed, and the panel
-   * says so rather than claiming 0%.
-   *
-   * A separate prop rather than a member of `PlatformOverview` on purpose: the
-   * overview's tiles are all bounded live COUNTS answering "what needs a person
-   * today", while this is an aggregate over 30 days answering "which dial should
-   * we loosen". Folding it in would put a slow question inside the shape whose
-   * whole contract is that every field is a cheap indexed count.
-   */
   routing: RoutingBreakdown | null;
 }
 
@@ -146,77 +123,135 @@ export function OverviewScreen({
   routing,
 }: OverviewScreenProps) {
   return (
-    <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-headline-s text-on-surface">Overview</h1>
-        <p className="text-body-s text-on-surface-variant">
-          What needs a person today, {adminName}.
-        </p>
+    <div className="flex flex-col gap-8">
+      {/* Top Banner Header */}
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-headline-m font-bold text-on-surface">ERP Executive Dashboard</h1>
+          <p className="text-body-m text-on-surface-variant">
+            Platform operations summary and priority action queues for {adminName}.
+          </p>
+        </div>
+
+        <div className="mt-3 flex items-center gap-2 sm:mt-0">
+          <Link
+            href="/admin/businesses"
+            className="flex items-center gap-2 rounded-md3-xs bg-primary px-4 py-2 text-label-l font-medium text-on-primary shadow-xs transition-opacity hover:opacity-90"
+          >
+            <span className="material-symbols-rounded text-[18px]">verified_user</span>
+            <span>Review Merchants</span>
+          </Link>
+        </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {/*
-          This tile counted `status='pending_verification'` from the day the
-          overview shipped and pointed at `/admin/receipts`, because there was
-          no queue to point at: nothing in the product could put a business into
-          that status and nothing could take it out. Migration 0033 made both
-          possible, so the tile now links to the queue it was always counting.
-          `alarmAbove={0}` because any number here is a merchant who cannot
-          trade.
-        */}
+      {/* Primary ERP KPI Scorecard */}
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Tile
-          label="Awaiting review"
+          label="Awaiting Verification"
           value={overview.businessesAwaitingVerification}
-          hint="Businesses that asked to go live and cannot trade until someone decides"
+          hint="Merchants pending admin go-live decision"
           href="/admin/businesses"
+          icon="storefront"
           alarmAbove={0}
         />
         <Tile
-          label="Receipts in review"
+          label="Receipts in Queue"
           value={overview.receiptsInReview}
-          hint="Across every business. Their own staff see them first."
+          hint="Platform receipts flagged for human review"
           href="/admin/receipts?filter=review"
+          icon="receipt_long"
         />
         <Tile
-          label="Blocked in the last 7 days"
+          label="7-Day Fraud Blocks"
           value={overview.fraudBlocks7d}
-          hint="Receipts a detector stopped outright"
+          hint="Automated duplicate and risk detections"
           href="/admin/fraud?filter=blocked"
+          icon="shield_with_heart"
           alarmAbove={20}
         />
         <Tile
-          label="No business matched"
+          label="Unmatched Receipts"
           value={overview.unmatchedReceipts}
-          hint="Nobody but this portal can see these"
+          hint="Receipts requiring manual merchant matching"
           href="/admin/receipts?filter=unmatched"
+          icon="manage_search"
           alarmAbove={0}
         />
       </div>
 
-      {/*
-        D10, platform scope. It sits below the tiles and above the fraud strip
-        deliberately: the tiles are today's work, the blocks are today's
-        incidents, and this is the only thing on the page that is a POLICY
-        question. It is the number that decides whether to loosen a dial, and
-        the pre-agreed loosening order is recorded in `ReviewReason` in
-        src/features/receipts/server/process.ts so it is not re-argued here.
+      {/* Quick Access ERP Shortcuts */}
+      <div className="rounded-md3-md border border-outline-variant bg-surface-container-lowest p-5 shadow-xs">
+        <h2 className="text-title-m font-bold text-on-surface mb-3 flex items-center gap-2">
+          <span className="material-symbols-rounded text-[20px] text-primary">apps</span>
+          <span>ERP Quick Navigation</span>
+        </h2>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          <Link
+            href="/admin/businesses"
+            className="flex flex-col items-center gap-2 rounded-md3-xs border border-outline-variant bg-surface p-3 text-center transition-colors hover:bg-surface-container"
+          >
+            <span className="material-symbols-rounded text-[24px] text-primary">storefront</span>
+            <span className="text-label-m font-medium text-on-surface">Businesses</span>
+          </Link>
+          <Link
+            href="/admin/consumers"
+            className="flex flex-col items-center gap-2 rounded-md3-xs border border-outline-variant bg-surface p-3 text-center transition-colors hover:bg-surface-container"
+          >
+            <span className="material-symbols-rounded text-[24px] text-primary">group</span>
+            <span className="text-label-m font-medium text-on-surface">Consumers</span>
+          </Link>
+          <Link
+            href="/admin/receipts"
+            className="flex flex-col items-center gap-2 rounded-md3-xs border border-outline-variant bg-surface p-3 text-center transition-colors hover:bg-surface-container"
+          >
+            <span className="material-symbols-rounded text-[24px] text-primary">receipt</span>
+            <span className="text-label-m font-medium text-on-surface">Receipts</span>
+          </Link>
+          <Link
+            href="/admin/fraud"
+            className="flex flex-col items-center gap-2 rounded-md3-xs border border-outline-variant bg-surface p-3 text-center transition-colors hover:bg-surface-container"
+          >
+            <span className="material-symbols-rounded text-[24px] text-primary">gavel</span>
+            <span className="text-label-m font-medium text-on-surface">Fraud Engine</span>
+          </Link>
+          <Link
+            href="/admin/audit"
+            className="flex flex-col items-center gap-2 rounded-md3-xs border border-outline-variant bg-surface p-3 text-center transition-colors hover:bg-surface-container"
+          >
+            <span className="material-symbols-rounded text-[24px] text-primary">history</span>
+            <span className="text-label-m font-medium text-on-surface">Audit Logs</span>
+          </Link>
+          <Link
+            href="/admin/admins"
+            className="flex flex-col items-center gap-2 rounded-md3-xs border border-outline-variant bg-surface p-3 text-center transition-colors hover:bg-surface-container"
+          >
+            <span className="material-symbols-rounded text-[24px] text-primary">admin_panel_settings</span>
+            <span className="text-label-m font-medium text-on-surface">Admin Roster</span>
+          </Link>
+        </div>
+      </div>
 
-        Identical component to the merchant's, on purpose: an admin about to
-        widen a threshold and the merchant complaining about manual approvals
-        must be reading the same number the same way.
-      */}
+      {/* Policy & Review Breakdown */}
       <RoutingBreakdownPanel breakdown={routing} scope="the platform" />
 
-      <section aria-labelledby="recent-blocks" className="flex flex-col gap-3">
-        <h2 id="recent-blocks" className="text-title-m text-on-surface">
-          Most recently blocked
-        </h2>
+      {/* Live Recent Blocks Feed */}
+      <section aria-labelledby="recent-blocks" className="flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <h2 id="recent-blocks" className="text-title-l font-bold text-on-surface flex items-center gap-2">
+            <span className="material-symbols-rounded text-[22px] text-error">notification_important</span>
+            <span>Most Recently Blocked Activity</span>
+          </h2>
+          <Link href="/admin/fraud" className="text-label-l font-semibold text-primary hover:underline">
+            View All Fraud Signals →
+          </Link>
+        </div>
+
         {overview.recentBlocks.length === 0 ? (
           <EmptyState
             icon="verified_user"
-            title="Nothing was blocked recently"
-            body="A blocking signal is a deterministic one: a byte-identical image, a live duplicate receipt number, a near-identical photo. None have fired in the last week."
-            className="border border-outline-variant bg-surface"
+            title="No recent security blocks"
+            body="All platform security checks are clear. No duplicate receipts or high-risk signals recorded in the last 7 days."
+            className="border border-outline-variant bg-surface-container-lowest"
           />
         ) : (
           <ul className="flex flex-col gap-3">

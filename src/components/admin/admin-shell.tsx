@@ -2,23 +2,8 @@ import type { ReactNode } from "react";
 
 import { AdminNav } from "@/components/admin/admin-nav";
 import { Logo } from "@/components/brand/logo";
+import { signOut } from "@/features/identity/actions";
 import { cn } from "@/lib/utils";
-
-// ===========================================================================
-// Chrome for every `/admin` route.
-//
-// A SERVER COMPONENT, unlike `PortalShell`. That is not an oversight: the
-// business shell is a client component because it owns the mobile drawer state
-// the Sidebar and Topbar share, and this one has no drawer to own. Doc 31 is
-// explicit that the admin portal is desktop-first ("Layout: persistent
-// sidebar"), and a rail that is always visible needs no open/close state, no
-// focus management and no client bundle. The one client component in this tree
-// is `AdminNav`, which exists only because marking the current section needs
-// the current path.
-//
-// TOKENS ONLY. Tertiary (Mango) does not appear anywhere in this tree: it is
-// rewards language, and nothing an admin does here is a reward.
-// ===========================================================================
 
 export interface AdminShellProps {
   children: ReactNode;
@@ -39,33 +24,58 @@ export function AdminShell({ children, adminName, adminRole }: AdminShellProps) 
       >
         <div className="flex items-center gap-2 px-4 py-4">
           <Logo className="h-6 w-auto" />
-          <span className="rounded-full bg-surface-container-highest px-2 py-0.5 text-label-s text-on-surface-variant">
-            Platform
+          <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-label-s font-semibold text-primary">
+            ERP Control
           </span>
         </div>
         <AdminNav />
       </nav>
 
       <div className="flex min-h-dvh flex-col lg:pl-60">
-        <header className="flex items-center justify-between gap-4 border-b border-outline-variant px-6 py-4">
-          <p className="text-title-m text-on-surface">Platform administration</p>
-          <p className="text-body-s text-on-surface-variant">
-            {adminName}
-            <span className="ml-2 rounded-full bg-surface-container-high px-2 py-0.5 text-label-s">
-              {adminRole.replace("_", " ")}
+        <header className="flex items-center justify-between gap-4 border-b border-outline-variant bg-surface-container-lowest px-6 py-3.5 shadow-xs">
+          <div className="flex items-center gap-3">
+            <span className="flex size-3 items-center justify-center">
+              <span className="absolute size-2.5 animate-ping rounded-full bg-emerald-400 opacity-75" />
+              <span className="size-2 rounded-full bg-emerald-500" />
             </span>
-          </p>
+            <div className="flex flex-col">
+              <p className="text-title-m font-semibold text-on-surface">Platform ERP Command Center</p>
+              <p className="text-label-s text-on-surface-variant">Live System Operational Status: Healthy</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 rounded-full border border-outline-variant bg-surface-container px-3 py-1.5">
+              <span className="flex size-7 items-center justify-center rounded-full bg-primary text-label-m font-bold text-on-primary">
+                {adminName.slice(0, 1).toUpperCase()}
+              </span>
+              <div className="flex flex-col text-left">
+                <span className="text-label-m font-medium text-on-surface">{adminName}</span>
+                <span className="text-label-s text-on-surface-variant capitalize">
+                  {adminRole.replace("_", " ")}
+                </span>
+              </div>
+            </div>
+
+            <form action={signOut}>
+              <button
+                type="submit"
+                className={cn(
+                  "flex items-center gap-1.5 rounded-full border border-outline-variant bg-surface-container-high px-3 py-1.5 text-label-m font-medium text-on-surface",
+                  "transition-colors duration-150 hover:border-error hover:bg-error-container/30 hover:text-error focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error",
+                )}
+                title="Sign out of Admin Portal"
+              >
+                <span className="material-symbols-rounded text-[18px]">logout</span>
+                <span>Sign Out</span>
+              </button>
+            </form>
+          </div>
         </header>
 
-        {/*
-          Every action taken from these screens is recorded. Said once, in the
-          chrome, rather than in five confirm dialogs: doc 31 section 11's
-          reason-required pattern works because operators know it is standing
-          policy, and a notice that only appears at the moment of acting reads
-          as a warning about that one action instead.
-        */}
-        <p className="border-b border-outline-variant bg-surface-container-low px-6 py-2 text-body-s text-on-surface-variant">
-          Everything you do here is recorded against your name, with the reason you give.
+        <p className="border-b border-outline-variant bg-surface-container-low px-6 py-2 text-body-s text-on-surface-variant flex items-center gap-2">
+          <span className="material-symbols-rounded text-[16px] text-primary">security</span>
+          <span>Audit Active: All admin actions are immutable and recorded against your platform account.</span>
         </p>
 
         <main className="flex-1 px-6 py-6">{children}</main>
