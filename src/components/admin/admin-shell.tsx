@@ -75,7 +75,7 @@ export function AdminShell({ children, adminName, adminRole }: AdminShellProps) 
 
         <p className="border-b border-outline-variant bg-surface-container-low px-6 py-2 text-body-s text-on-surface-variant flex items-center gap-2">
           <span className="material-symbols-rounded text-[16px] text-primary">security</span>
-          <span>Audit Active: All admin actions are immutable and recorded against your platform account.</span>
+          <span>Audit Active: Everything you do here is recorded against your name, with the reason you give.</span>
         </p>
 
         <main className="flex-1 px-6 py-6">{children}</main>
