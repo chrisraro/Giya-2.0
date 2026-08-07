@@ -9,7 +9,7 @@
 --   * User authentication accounts & consumer profiles
 -- ============================================================================
 
--- 1. Disable evidence and ledger immutability triggers for the reset
+-- 1. Disable evidence, ledger, and system immutability triggers for the reset
 alter table public.points_transactions disable trigger points_transactions_no_truncate;
 alter table public.points_transactions disable trigger points_transactions_append_only;
 
@@ -22,10 +22,19 @@ alter table public.ocr_results disable trigger ocr_results_immutable;
 alter table public.fraud_signals disable trigger fraud_signals_no_truncate;
 alter table public.fraud_signals disable trigger fraud_signals_immutable;
 
+alter table public.notifications disable trigger notifications_no_truncate;
+alter table public.notifications disable trigger notifications_read_at_only;
+
+alter table public.audit_logs disable trigger audit_logs_no_truncate;
+alter table public.audit_logs disable trigger audit_logs_append_only;
+
+alter table public.jobs disable trigger jobs_no_truncate;
+alter table public.feature_flags disable trigger feature_flags_no_truncate;
+
 -- 2. Atomic CASCADE truncate to clear all business tenants and dependent transaction records
 truncate table public.businesses cascade;
 
--- 3. Re-enable evidence and ledger immutability triggers
+-- 3. Re-enable evidence, ledger, and system immutability triggers
 alter table public.points_transactions enable trigger points_transactions_no_truncate;
 alter table public.points_transactions enable trigger points_transactions_append_only;
 
@@ -37,3 +46,12 @@ alter table public.ocr_results enable trigger ocr_results_immutable;
 
 alter table public.fraud_signals enable trigger fraud_signals_no_truncate;
 alter table public.fraud_signals enable trigger fraud_signals_immutable;
+
+alter table public.notifications enable trigger notifications_no_truncate;
+alter table public.notifications enable trigger notifications_read_at_only;
+
+alter table public.audit_logs enable trigger audit_logs_no_truncate;
+alter table public.audit_logs enable trigger audit_logs_append_only;
+
+alter table public.jobs enable trigger jobs_no_truncate;
+alter table public.feature_flags enable trigger feature_flags_no_truncate;
