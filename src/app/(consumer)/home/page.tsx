@@ -12,6 +12,8 @@ import { NotificationBell } from "@/features/notifications/components/notificati
 import { getMyUnreadNotificationCount } from "@/features/notifications/server/repo";
 import { getMyBalances } from "@/features/rewards/server/repo";
 import { filipinoGreeting, manilaDateCaption } from "@/lib/greeting";
+import { listPublicPromotions } from "@/features/promotions/server/repo";
+import { PromotionCard } from "@/features/promotions/components/promotion-card";
 import { HOME_DISCOVER_FETCH, HOME_DISCOVER_LIMIT } from "./limits";
 
 // Every read on this page is RLS-scoped to the signed-in consumer or is the
@@ -21,22 +23,14 @@ export const dynamic = "force-dynamic";
 
 
 export default async function HomePage() {
-  // Redirect, not a signed-out render. /home is nothing BUT the signed-in
-  // person: a greeting by name, their balances, their shops. There is no
-  // honest anonymous version of it, and the marketing route group already owns
-  // the signed-out story. Middleware gates this route too; this check is what
-  // makes the guarantee hold at the page itself, independent of the matcher.
   const profile = await getMyConsumerProfile();
   if (!profile) redirect(`/login?next=${encodeURIComponent("/home")}`);
 
-  const [balances, activeBusinesses, unreadNotifications] = await Promise.all([
-    // The same read /wallet renders, rather than a second balances query with
-    // its own semantics.
+  const [balances, activeBusinesses, unreadNotifications, promotions] = await Promise.all([
     getMyBalances(),
     listActiveBusinesses({ limit: HOME_DISCOVER_FETCH }),
-    // A count, not a list: `head: true` sends no rows, and it runs in parallel
-    // with the two reads this page already makes rather than after them.
     getMyUnreadNotificationCount(),
+    listPublicPromotions(5).catch(() => []),
   ]);
 
   const now = new Date();
@@ -99,6 +93,17 @@ export default async function HomePage() {
           </section>
         </>
       )}
+
+      {promotions.length > 0 ? (
+        <section className="mt-8">
+          <h2 className="text-title-m text-on-surface">Featured Promotions</h2>
+          <div className="mt-3 flex flex-col gap-3">
+            {promotions.map((promo) => (
+              <PromotionCard key={promo.id} promotion={promo} />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       {discover.length > 0 || noShopsOnGiya ? (
         <section className="mt-8 pb-8">

@@ -54,6 +54,10 @@ export default async function PortalLayout({ children }: { children: ReactNode }
   // courtesy: the actual control is `validateRedemption`'s BUSINESS_SUSPENDED
   // refusal (src/lib/auth/suspension.ts), which does not depend on this
   // layout ever rendering.
+  if (portal.business.status === "pending") {
+    redirect("/business/pending-approval");
+  }
+
   if (portal.business.status === "suspended") {
     redirect("/suspended?type=business");
   }

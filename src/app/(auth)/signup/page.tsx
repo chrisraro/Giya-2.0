@@ -251,9 +251,10 @@ export default function SignupPage() {
     setSocialError("");
     const supabase = createClient();
     const next = destinationFor(role);
+    const appOrigin = (process.env.NEXT_PUBLIC_APP_URL || (typeof window !== "undefined" ? window.location.origin : "")).replace(/\/$/, "");
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
-      options: { redirectTo: `${window.location.origin}/auth/callback?next=${next}` },
+      options: { redirectTo: `${appOrigin}/auth/callback?next=${next}` },
     });
 
     if (error) {

@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   getMyBalances: vi.fn(),
   listActiveBusinesses: vi.fn(),
   getMyUnreadNotificationCount: vi.fn(),
+  listPublicPromotions: vi.fn().mockResolvedValue([]),
   redirect: vi.fn(),
 }));
 
@@ -33,6 +34,9 @@ vi.mock("@/features/businesses/server/public-repo", () => ({
 }));
 vi.mock("@/features/notifications/server/repo", () => ({
   getMyUnreadNotificationCount: mocks.getMyUnreadNotificationCount,
+}));
+vi.mock("@/features/promotions/server/repo", () => ({
+  listPublicPromotions: mocks.listPublicPromotions,
 }));
 vi.mock("next/navigation", () => ({
   // The real redirect() signals by throwing; throwing here is what stops the

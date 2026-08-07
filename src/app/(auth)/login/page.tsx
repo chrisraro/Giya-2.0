@@ -157,15 +157,11 @@ function LoginPageInner() {
   async function handleSocial(provider: SocialProvider) {
     setSocialError("");
     const supabase = createClient();
-    // encodeURIComponent here (unlike the signup page's two static
-    // destinations) because `next` on this page comes from the request's
-    // own query string by way of getSafeRedirect: it is validated to be
-    // internal, but not guaranteed free of "?"/"&", which would otherwise
-    // corrupt this URL's own `next` query param.
+    const appOrigin = (process.env.NEXT_PUBLIC_APP_URL || (typeof window !== "undefined" ? window.location.origin : "")).replace(/\/$/, "");
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
       options: {
-        redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`,
+        redirectTo: `${appOrigin}/auth/callback?next=${encodeURIComponent(next)}`,
       },
     });
 

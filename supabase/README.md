@@ -1291,6 +1291,13 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0062_feature_flags.sql | 20260806142215 | 0062_feature_flags |
 | 0063_find_auth_user_by_email.sql | 20260806181414 | 0063_find_auth_user_by_email |
 | 0064_avatars_storage.sql | 20260806214609 | avatars_storage |
+| 0065_favorites.sql | (prepared for manual SQL / db push) | 0065_favorites |
+| 0066_loyalty_cards.sql | (prepared for manual SQL / db push) | 0066_loyalty_cards |
+| 0067_business_documents.sql | (prepared for manual SQL / db push) | 0067_business_documents |
+| 0068_analytics_rollup.sql | (prepared for manual SQL / db push) | 0068_analytics_rollup |
+| 0069_qr_codes.sql | (prepared for manual SQL / db push) | 0069_qr_codes |
+| 0070_announcements_legal.sql | (prepared for manual SQL / db push) | 0070_announcements_legal |
+| 0071_settings.sql | (prepared for manual SQL / db push) | 0071_settings |
 
 **0062 and 0063 were applied live but committed without a ledger row here.**
 T3.4a found the gap and recorded it rather than inventing versions — the right

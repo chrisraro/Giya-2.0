@@ -23,7 +23,9 @@ import { getSafeRedirect } from "@/lib/auth/safe-redirect";
 // here instead would only have moved the hole, since it would then have
 // re-run the wizard for everyone who had already completed it.
 export async function GET(request: NextRequest) {
-  const { searchParams, origin } = new URL(request.url);
+  const requestUrl = new URL(request.url);
+  const origin = (process.env.NEXT_PUBLIC_APP_URL || requestUrl.origin).replace(/\/$/, "");
+  const searchParams = requestUrl.searchParams;
   const code = searchParams.get("code");
   const next = getSafeRedirect(searchParams.get("next"), "/home");
 

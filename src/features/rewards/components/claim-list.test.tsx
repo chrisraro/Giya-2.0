@@ -86,7 +86,7 @@ describe("ClaimList", () => {
 
     expect(screen.queryByRole("link", { name: "Show QR" })).not.toBeInTheDocument();
     expect(screen.queryByText(/Expires/)).not.toBeInTheDocument();
-    expect(screen.getByText("Redeemed")).toBeInTheDocument();
+    expect(screen.getAllByText("Redeemed").length).toBeGreaterThan(0);
   });
 
   it("does not show a Show QR link for a claimed reward whose expiresAt has already passed", () => {
@@ -111,8 +111,8 @@ describe("ClaimList", () => {
       />,
     );
 
-    expect(screen.getByText("Expired")).toBeInTheDocument();
-    expect(screen.getByText("Cancelled")).toBeInTheDocument();
+    expect(screen.getAllByText("Expired").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Cancelled").length).toBeGreaterThan(0);
   });
 
   // ------------------------------------------------------- cancel affordance (task 1.4)

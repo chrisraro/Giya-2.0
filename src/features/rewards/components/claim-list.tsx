@@ -1,3 +1,6 @@
+"use client";
+
+import { useState } from "react";
 import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
@@ -15,9 +18,6 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
-// Status chips are neutral/informational, not reward figures - mango
-// (tertiary) stays reserved for the points Badge per the design system's
-// "mango only on points/reward figures" rule.
 function statusChipClass(status: string): string {
   switch (status) {
     case "claimed":
@@ -33,10 +33,6 @@ function statusChipClass(status: string): string {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Y/M/D parts of `date` as observed in Asia/Manila, for calendar-day (not
- * raw-ms) comparisons. Mirrors src/lib/hours.ts's currentManilaWeekday
- * convention: "today"/"tomorrow" should reflect the business's timezone,
- * not the server or test runner's local zone. */
 function manilaDateParts(date: Date): { year: number; month: number; day: number } {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Manila",
@@ -48,12 +44,6 @@ function manilaDateParts(date: Date): { year: number; month: number; day: number
   return { year: get("year"), month: get("month"), day: get("day") };
 }
 
-/**
- * Human expiry text for a 'claimed' reward: "Expired" once past, "Expires
- * today"/"Expires tomorrow" for the two near cases, otherwise "Expires in N
- * days". `now` defaults to the real current time and is only overridden by
- * tests.
- */
 export function formatExpiry(expiresAtIso: string, now: Date = new Date()): string {
   const expiresAt = new Date(expiresAtIso);
   if (expiresAt.getTime() <= now.getTime()) return "Expired";
@@ -75,16 +65,16 @@ export interface ClaimListProps {
   now?: Date;
 }
 
-/**
- * The consumer's own reward claims: status chip, reward + business name,
- * points spent (Badge - reward figure, mango), an expiry countdown for
- * still-live 'claimed' rows, and a "Show QR" link to the redemption screen
- * for claims that are both status='claimed' AND not yet expired (a claimed-
- * but-expired row has simply aged out server-side into 'expired' via the
- * sweep job in most cases, but expiresAt is re-checked here too so a claim
- * that JUST passed its deadline never offers a QR that would 422 on mint).
- */
+type TabType = "all" | "claimed" | "redeemed" | "expired" | "cancelled";
+
 export function ClaimList({ claims, now = new Date() }: ClaimListProps) {
+  const [activeTab, setActiveTab] = useState<TabType>("all");
+
+  const filteredClaims = claims.filter((claim) => {
+    if (activeTab === "all") return true;
+    return claim.status === activeTab;
+  });
+
   if (claims.length === 0) {
     return (
       <EmptyState
@@ -95,61 +85,90 @@ export function ClaimList({ claims, now = new Date() }: ClaimListProps) {
     );
   }
 
+  const tabs: { id: TabType; label: string }[] = [
+    { id: "all", label: "All" },
+    { id: "claimed", label: "Active" },
+    { id: "redeemed", label: "Redeemed" },
+    { id: "expired", label: "Expired" },
+    { id: "cancelled", label: "Cancelled" },
+  ];
+
   return (
-    <div className="flex flex-col gap-2">
-      {claims.map((claim) => {
-        const showQr = claim.status === "claimed" && new Date(claim.expiresAt) > now;
+    <div className="flex flex-col gap-4">
+      {/* Filter Tabs */}
+      <div className="flex gap-1 overflow-x-auto pb-1 no-scrollbar">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={cn(
+              "rounded-full px-3.5 py-1 text-label-s transition-colors shrink-0",
+              activeTab === tab.id
+                ? "bg-primary text-on-primary font-medium"
+                : "bg-surface-container text-on-surface-variant hover:bg-surface-container-high"
+            )}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
-        return (
-          <Card key={claim.claimId} variant="outlined" className="flex flex-col gap-2 p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-title-s text-on-surface">{claim.rewardName}</p>
-                <p className="text-body-s text-on-surface-variant">{claim.businessName}</p>
-              </div>
-              <span
-                className={cn(
-                  "shrink-0 rounded-full px-2.5 py-0.5 text-label-m",
-                  statusChipClass(claim.status),
-                )}
-              >
-                {STATUS_LABEL[claim.status] ?? claim.status}
-              </span>
-            </div>
+      {filteredClaims.length === 0 ? (
+        <p className="py-4 text-center text-body-s text-on-surface-variant">
+          No {activeTab === "all" ? "" : activeTab} claims found.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {filteredClaims.map((claim) => {
+            const showQr = claim.status === "claimed" && new Date(claim.expiresAt) > now;
 
-            <div className="flex items-center justify-between gap-3">
-              <Badge>{claim.pointsSpent} pts</Badge>
-              {claim.status === "claimed" ? (
-                <p className="text-label-m text-on-surface-variant">{formatExpiry(claim.expiresAt, now)}</p>
-              ) : null}
-            </div>
+            return (
+              <Card key={claim.claimId} variant="outlined" className="flex flex-col gap-2 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-title-s text-on-surface">{claim.rewardName}</p>
+                    <p className="text-body-s text-on-surface-variant">{claim.businessName}</p>
+                  </div>
+                  <span
+                    className={cn(
+                      "shrink-0 rounded-full px-2.5 py-0.5 text-label-m",
+                      statusChipClass(claim.status),
+                    )}
+                  >
+                    {STATUS_LABEL[claim.status] ?? claim.status}
+                  </span>
+                </div>
 
-            {showQr ? (
-              <Link
-                href={`/rewards/claims/${claim.claimId}`}
-                className="mt-1 flex h-12 items-center justify-center rounded-full bg-primary text-label-l text-on-primary transition-colors duration-200 ease-standard hover:opacity-90"
-              >
-                Show QR
-              </Link>
-            ) : null}
+                <div className="flex items-center justify-between gap-3">
+                  <Badge>{claim.pointsSpent} pts</Badge>
+                  {claim.status === "claimed" ? (
+                    <p className="text-label-m text-on-surface-variant">
+                      {formatExpiry(claim.expiresAt, now)}
+                    </p>
+                  ) : null}
+                </div>
 
-            {/* Task 1.4: cancel affordance, only for a still-unredeemed
-                claim - never on redeemed/expired/cancelled rows. Shown
-                regardless of expiresAt (unlike showQr above): a claim past
-                its deadline but not yet swept is still status='claimed',
-                and cancelling gets the consumer their points back
-                immediately rather than making them wait for the hourly
-                sweep. */}
-            {claim.status === "claimed" ? (
-              <CancelClaimButton
-                claimId={claim.claimId}
-                pointsSpent={claim.pointsSpent}
-                className="self-start"
-              />
-            ) : null}
-          </Card>
-        );
-      })}
+                {showQr ? (
+                  <Link
+                    href={`/rewards/claims/${claim.claimId}`}
+                    className="mt-1 flex h-12 items-center justify-center rounded-full bg-primary text-label-l text-on-primary transition-colors duration-200 ease-standard hover:opacity-90"
+                  >
+                    Show QR
+                  </Link>
+                ) : null}
+
+                {claim.status === "claimed" ? (
+                  <CancelClaimButton
+                    claimId={claim.claimId}
+                    pointsSpent={claim.pointsSpent}
+                    className="self-start"
+                  />
+                ) : null}
+              </Card>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

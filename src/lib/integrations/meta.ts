@@ -746,3 +746,50 @@ export async function revokePermissions(input: {
     return false;
   }
 }
+
+/**
+ * Publish a text/link post to a Facebook Page (requires pages_manage_posts).
+ */
+export async function publishFacebookPost(input: {
+  readonly pageId: string;
+  readonly pageAccessToken: string;
+  readonly message: string;
+  readonly link?: string | undefined;
+}): Promise<{ id: string }> {
+  requireCredentials();
+  const form: Record<string, string> = { message: input.message };
+  if (input.link) form.link = input.link;
+
+  return call(z.object({ id: z.string() }), {
+    path: `/${encodeURIComponent(input.pageId)}/feed`,
+    form,
+    accessToken: input.pageAccessToken,
+  });
+}
+
+/**
+ * Publish an image/media post to an Instagram Business account.
+ */
+export async function publishInstagramMedia(input: {
+  readonly igUserId: string;
+  readonly pageAccessToken: string;
+  readonly imageUrl: string;
+  readonly caption: string;
+}): Promise<{ id: string }> {
+  requireCredentials();
+
+  const container = await call(z.object({ id: z.string() }), {
+    path: `/${encodeURIComponent(input.igUserId)}/media`,
+    form: {
+      image_url: input.imageUrl,
+      caption: input.caption,
+    },
+    accessToken: input.pageAccessToken,
+  });
+
+  return call(z.object({ id: z.string() }), {
+    path: `/${encodeURIComponent(input.igUserId)}/media_publish`,
+    form: { creation_id: container.id },
+    accessToken: input.pageAccessToken,
+  });
+}

@@ -199,33 +199,16 @@ function toPublicCoordinates(lat: number | null, lng: number | null): Coordinate
 }
 
 export interface ListActiveBusinessesArgs {
-  /**
-   * A name fragment, matched case-insensitively. MUST already have been
-   * through `sanitiseStoreQuery` (src/features/receipts/scan-entry.ts), which
-   * is what strips `%` and `_` so a consumer cannot smuggle `ilike` wildcards
-   * or PostgREST punctuation into this filter.
-   */
   readonly query?: string | undefined;
-  /** Restricts the read to these ids. Still active-only: an id is not a bypass. */
   readonly ids?: readonly string[] | undefined;
-  /** Hard ceiling on rows returned. The caller decides what "too many" means. */
+  readonly cityId?: string | undefined;
+  readonly businessTypeId?: string | undefined;
   readonly limit: number;
 }
 
-/**
- * Active, non-deleted businesses, alphabetically. Same exposure path as
- * `getBusinessBySlug`: the `businesses_public_select` policy from
- * 0002_identity.sql (`status = 'active' and deleted_at is null`, granted to
- * anon and authenticated) is the real gate, and the `.eq`/`.is` filters below
- * are defense in depth exactly as elsewhere in this file. Nothing here reads a
- * column a signed-out visitor cannot already read from `/b/[slug]`.
- */
 export async function listActiveBusinesses(
   args: ListActiveBusinessesArgs,
 ): Promise<BusinessSummary[]> {
-  // An empty id list means "restrict to nothing", not "restrict to nothing in
-  // particular": without this the `.in()` would be dropped and the query would
-  // widen to every business.
   if (args.ids !== undefined && args.ids.length === 0) return [];
 
   const supabase = await createClient();
@@ -240,6 +223,8 @@ export async function listActiveBusinesses(
 
   if (args.ids !== undefined) select = select.in("id", [...args.ids]);
   if (args.query) select = select.ilike("name", `%${args.query}%`);
+  if (args.cityId) select = select.eq("city_id", args.cityId);
+  if (args.businessTypeId) select = select.eq("business_type_id", args.businessTypeId);
 
   const { data, error } = await select;
   if (error || !data || data.length === 0) return [];
@@ -443,4 +428,16 @@ function groupBy<Row, Item>(
     else map.set(key, [itemOf(row)]);
   }
   return map;
+}
+
+export async function listRefCities(): Promise<{ id: string; name: string }[]> {
+  const supabase = await createClient();
+  const { data } = await supabase.from("ref_cities").select("id, name").order("name");
+  return data ?? [];
+}
+
+export async function listRefBusinessTypes(): Promise<{ id: string; name: string }[]> {
+  const supabase = await createClient();
+  const { data } = await supabase.from("ref_business_types").select("id, name").order("name");
+  return data ?? [];
 }

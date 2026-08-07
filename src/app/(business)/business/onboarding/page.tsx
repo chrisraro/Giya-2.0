@@ -414,7 +414,7 @@ export default function BusinessOnboardingPage() {
     // sign-up/sign-in predates this business_staff row and won't carry it.
     const supabase = createClient();
     await supabase.auth.refreshSession();
-    router.push("/business/dashboard");
+    router.push("/business/pending-approval");
   }
 
   function goNext() {
