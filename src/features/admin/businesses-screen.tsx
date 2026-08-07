@@ -50,9 +50,11 @@ function BusinessCard({
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <h2 className="truncate text-title-m font-semibold text-on-surface">{item.name}</h2>
-            <span className={cn("rounded-full px-2.5 py-0.5 text-label-s font-medium capitalize", statusChipClass(item.status))}>
-              {item.status.replace("_", " ")}
-            </span>
+            {item.status && (
+              <span className={cn("rounded-full px-2.5 py-0.5 text-label-s font-medium capitalize", statusChipClass(item.status))}>
+                {item.status.replace("_", " ")}
+              </span>
+            )}
           </div>
           <p className="truncate text-body-s text-on-surface-variant">
             {item.businessTypeName ?? "Type not set"}
@@ -133,9 +135,10 @@ export function AdminBusinessesScreen({
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-headline-s font-bold text-on-surface">Merchant Directory & Verification</h1>
+          <h1 className="text-headline-s font-bold text-on-surface">Businesses awaiting review</h1>
           <p className="text-body-s text-on-surface-variant">
-            Review registered business applications, activate accounts, and audit merchant statuses.
+            Nobody on this list can be found by a customer, scanned for, or earn
+            anyone a point. Approving is what changes that.
           </p>
         </div>
 
@@ -197,7 +200,7 @@ export function AdminBusinessesScreen({
           }
           body={
             filter === "pending"
-              ? "Merchants land here when they register or submit for review. An empty list means no merchants are currently pending review."
+              ? "Merchants land here when their owner sends them for review from their dashboard. An empty list means nobody has asked, not that nobody has signed up."
               : "No business accounts match the current filter selection."
           }
           className="border border-outline-variant bg-surface-container-lowest"

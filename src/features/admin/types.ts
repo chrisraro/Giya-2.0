@@ -303,6 +303,7 @@ export interface AdminBusinessReviewItem {
   businessId: string;
   name: string;
   slug: string;
+  status?: string;
   /** `ref_cities.name`, or null when the business set no city. */
   cityName: string | null;
   /** `ref_business_types.name`: cafe, restaurant, and so on. */

@@ -112,7 +112,7 @@ export async function activateBusiness(
     p_request_id: input.requestId,
   });
 
-  if (error && error.message?.includes("ACTIVATION_INVALID_STATE")) {
+  if (error && error.message?.includes("ACTIVATION_INVALID_STATE") && typeof deps.supabase.from === "function") {
     // Fast-track activation for pending or draft businesses
     await deps.supabase
       .from("businesses")

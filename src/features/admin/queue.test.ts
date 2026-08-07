@@ -435,7 +435,7 @@ describe("loadAdminReceiptDetail", () => {
 describe("loadPlatformOverview", () => {
   it("counts live, indexed facts and nothing invented", async () => {
     const harness = createHarness((op) => {
-      if (op.table === "businesses" && hasFilter(op, "eq", "status", "pending_verification")) {
+      if (op.table === "businesses" && (hasFilter(op, "eq", "status", "pending_verification") || hasFilter(op, "in", "status"))) {
         return { data: [{ id: "b1" }, { id: "b2" }], error: null };
       }
       if (op.table === "receipts" && hasFilter(op, "eq", "status", "review")) {

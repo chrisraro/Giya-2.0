@@ -42,9 +42,20 @@ const BUSINESS_COLUMNS =
   "id, name, slug, email, phone, city_id, business_type_id, status, created_at";
 
 export async function listBusinessesAwaitingReview(
-  filter: "pending" | "active" | "all" = "pending",
-  deps: AdminBusinessDeps | null = defaultAdminBusinessDeps(),
+  filterOrDeps?: "pending" | "active" | "all" | AdminBusinessDeps | null,
+  depsParam?: AdminBusinessDeps | null,
 ): Promise<AdminBusinessReviewItem[] | null> {
+  let filter: "pending" | "active" | "all" = "pending";
+  let deps: AdminBusinessDeps | null = null;
+
+  if (typeof filterOrDeps === "string") {
+    filter = filterOrDeps;
+    deps = depsParam !== undefined ? depsParam : defaultAdminBusinessDeps();
+  } else {
+    filter = "pending";
+    deps = filterOrDeps !== undefined ? filterOrDeps : defaultAdminBusinessDeps();
+  }
+
   if (deps === null) return null;
 
   let query = deps.supabase
@@ -59,7 +70,7 @@ export async function listBusinessesAwaitingReview(
   }
 
   const { data, error } = await query
-    .order("created_at", { ascending: false })
+    .order("created_at", { ascending: true })
     .limit(QUEUE_LIMIT);
 
   if (error !== null) {
