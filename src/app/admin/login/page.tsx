@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { AuthCard } from "@/components/auth/auth-card";
 import { SocialButtons } from "@/components/auth/social-buttons";
 import { PasswordField } from "@/components/auth/password-field";
@@ -15,7 +15,6 @@ const EMAIL_RE = /^\S+@\S+\.\S+$/;
 
 export default function AdminLoginPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const [email, setEmail] = React.useState("teamocsph@gmail.com");
   const [password, setPassword] = React.useState("");
   const [emailError, setEmailError] = React.useState("");
@@ -25,11 +24,14 @@ export default function AdminLoginPage() {
   const [submitting, setSubmitting] = React.useState(false);
 
   React.useEffect(() => {
-    const errorParam = searchParams.get("error");
-    if (errorParam === "not_admin") {
-      setFormError("Access Denied: Your account is not a registered Platform Admin.");
-    } else if (errorParam === "oauth") {
-      setSocialError("OAuth authentication was cancelled or failed.");
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const errorParam = params.get("error");
+      if (errorParam === "not_admin") {
+        setFormError("Access Denied: Your account is not a registered Platform Admin.");
+      } else if (errorParam === "oauth") {
+        setSocialError("OAuth authentication was cancelled or failed.");
+      }
     }
 
     const supabase = createClient();
@@ -50,7 +52,7 @@ export default function AdminLoginPage() {
         }
       }
     });
-  }, [searchParams, router]);
+  }, [router]);
 
   function getBaseUrl(): string {
     if (typeof window !== "undefined") {
