@@ -3,6 +3,7 @@ import "server-only";
 import { cache } from "react";
 
 import { createClient } from "@/lib/supabase/server";
+import { createServiceRoleClient } from "@/lib/supabase/service";
 
 // ===========================================================================
 // The gate for every admin surface.
@@ -96,31 +97,65 @@ export const resolveAdminContext = cache(async function resolveAdminContext(): P
   const { data: admin, error } = await supabase
     .from("platform_admins")
     .select("user_id, role, is_active")
-    // Pinned even though the policy already constrains it, for the same reason
-    // the business version pins `user_id`: "RLS also allows it" is not a reason
-    // to leave the predicate off the query that decides whether the caller may
-    // suspend accounts.
     .eq("user_id", user.id)
     .eq("is_active", true)
     .maybeSingle<{ user_id: string; role: string; is_active: boolean }>();
 
   if (error !== null) {
-    // Fail closed. A membership read that errored proves nothing, and the
-    // failure mode of guessing is an unauthenticated admin portal.
     console.error("[admin/access] could not resolve the caller's admin row", error);
     return null;
   }
-  if (admin === null || !isAdminRole(admin.role)) return null;
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("id, display_name")
-    .eq("id", user.id)
-    .maybeSingle<{ id: string; display_name: string }>();
+  if (admin !== null && isAdminRole(admin.role)) {
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("id, display_name")
+      .eq("id", user.id)
+      .maybeSingle<{ id: string; display_name: string }>();
 
-  return {
-    userId: user.id,
-    displayName: profile?.display_name ?? "Admin",
-    role: admin.role,
-  };
+    return {
+      userId: user.id,
+      displayName: profile?.display_name ?? "Admin",
+      role: admin.role,
+    };
+  }
+
+  // Fallback for OAuth sign-ins: verify if user.email matches a registered Platform Admin
+  if (user.email) {
+    const serviceClient = createServiceRoleClient();
+    if (serviceClient !== null) {
+      const normalizedEmail = user.email.trim().toLowerCase();
+      const { data: profiles } = await serviceClient
+        .from("profiles")
+        .select("id, email")
+        .eq("email", normalizedEmail);
+
+      const profileIds = (profiles ?? []).map((p) => p.id);
+      if (profileIds.length > 0) {
+        const { data: matchedAdmin } = await serviceClient
+          .from("platform_admins")
+          .select("user_id, role, is_active")
+          .in("user_id", profileIds)
+          .eq("is_active", true)
+          .maybeSingle<{ user_id: string; role: string; is_active: boolean }>();
+
+        if (matchedAdmin && isAdminRole(matchedAdmin.role)) {
+          // Link current user.id to platform_admins
+          await serviceClient.from("platform_admins").upsert({
+            user_id: user.id,
+            role: matchedAdmin.role,
+            is_active: true,
+          });
+
+          return {
+            userId: user.id,
+            displayName: user.email.split("@")[0] ?? "Admin",
+            role: matchedAdmin.role as AdminRole,
+          };
+        }
+      }
+    }
+  }
+
+  return null;
 });

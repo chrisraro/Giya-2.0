@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { AuthCard } from "@/components/auth/auth-card";
 import { SocialButtons } from "@/components/auth/social-buttons";
 import { PasswordField } from "@/components/auth/password-field";
@@ -15,6 +15,7 @@ const EMAIL_RE = /^\S+@\S+\.\S+$/;
 
 export default function AdminLoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [email, setEmail] = React.useState("teamocsph@gmail.com");
   const [password, setPassword] = React.useState("");
   const [emailError, setEmailError] = React.useState("");
@@ -22,6 +23,34 @@ export default function AdminLoginPage() {
   const [formError, setFormError] = React.useState("");
   const [socialError, setSocialError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+
+  React.useEffect(() => {
+    const errorParam = searchParams.get("error");
+    if (errorParam === "not_admin") {
+      setFormError("Access Denied: Your account is not a registered Platform Admin.");
+    } else if (errorParam === "oauth") {
+      setSocialError("OAuth authentication was cancelled or failed.");
+    }
+
+    const supabase = createClient();
+    supabase.auth.getUser().then(async ({ data: { user } }) => {
+      if (user) {
+        const { data: adminData } = await supabase
+          .from("platform_admins")
+          .select("role")
+          .eq("user_id", user.id)
+          .eq("is_active", true)
+          .maybeSingle();
+
+        if (adminData) {
+          router.push("/admin");
+        } else {
+          // If signed in as a non-admin consumer, sign out immediately when on the admin login page
+          await supabase.auth.signOut();
+        }
+      }
+    });
+  }, [searchParams, router]);
 
   function getBaseUrl(): string {
     if (typeof window !== "undefined") {

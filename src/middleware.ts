@@ -56,6 +56,10 @@ function isBusinessOnboardingRoute(pathname: string): boolean {
   return pathname === "/business/onboarding" || pathname.startsWith("/business/onboarding/");
 }
 
+function isAdminRoute(pathname: string): boolean {
+  return pathname === "/admin" || (pathname.startsWith("/admin/") && !pathname.startsWith("/admin/login"));
+}
+
 /**
  * Consumer routes that are meaningless without a session and must bounce to
  * /login rather than render an empty or broken screen.
@@ -132,11 +136,14 @@ export async function middleware(request: NextRequest) {
   const isBusinessPortalRoute =
     pathname.startsWith("/business/") && !isBusinessOnboardingRoute(pathname);
 
+  const isAdmin = isAdminRoute(pathname);
+
   const needsSession =
-    onOnboardingRoute || isBusinessPortalRoute || isAuthenticatedConsumerRoute(pathname);
+    onOnboardingRoute || isBusinessPortalRoute || isAdmin || isAuthenticatedConsumerRoute(pathname);
 
   if (needsSession && !user) {
-    const loginUrl = new URL("/login", request.url);
+    const targetLogin = isAdmin ? "/admin/login" : "/login";
+    const loginUrl = new URL(targetLogin, request.url);
     loginUrl.searchParams.set("next", pathname);
     return copySessionCookies(response, NextResponse.redirect(loginUrl));
   }

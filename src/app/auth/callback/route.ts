@@ -67,6 +67,35 @@ export async function GET(request: NextRequest) {
       } catch (thrown) {
         console.error("[identity] device registration threw after code exchange", thrown);
       }
+
+      // SECURITY GATE FOR ADMIN DESTINATIONS:
+      // If the OAuth/PKCE flow is targeting an admin route (/admin or /admin/*),
+      // we MUST verify that the authenticated user is an active Platform Admin.
+      // If not, immediately destroy the session and reject access.
+      if (next.startsWith("/admin")) {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+
+        if (!user) {
+          return NextResponse.redirect(`${origin}/admin/login?error=not_admin`);
+        }
+
+        // Query platform_admins for user.id
+        const { data: adminRow } = await supabase
+          .from("platform_admins")
+          .select("role, is_active")
+          .eq("user_id", user.id)
+          .eq("is_active", true)
+          .maybeSingle();
+
+        if (!adminRow) {
+          console.warn(`[auth/callback] Unauthorized admin access attempt by ${user.email || user.id}`);
+          await supabase.auth.signOut();
+          return NextResponse.redirect(`${origin}/admin/login?error=not_admin`);
+        }
+      }
+
       return NextResponse.redirect(`${origin}${next}`);
     }
   }
