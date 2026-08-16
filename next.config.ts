@@ -7,29 +7,70 @@ import withSerwistInit from "@serwist/next";
 
 import { AVATAR_ACTION_BODY_LIMIT_BYTES } from "./src/features/identity/avatar";
 
+/** Just the variables these two helpers read. Narrower than `NodeJS.ProcessEnv`,
+ *  which Next augments to require `NODE_ENV` and so cannot be built literally. */
+export type BuildEnv = {
+  readonly GIYA_BUILD_ID?: string | undefined;
+  readonly VERCEL_GIT_COMMIT_SHA?: string | undefined;
+  readonly GITHUB_SHA?: string | undefined;
+  readonly NODE_ENV?: string | undefined;
+};
+
 /**
  * The build id every service worker cache name embeds (doc 41 section 7 step 1).
  *
- * A deploy must change this, because that is the entire mechanism by which a
+ * A deploy must change this, because it is the entire mechanism by which a
  * stale shell cannot survive one: the new worker's cache names do not collide
  * with the old worker's, and on `activate` it deletes everything carrying a
- * different id. CI is expected to set `GIYA_BUILD_ID`; Vercel and GitHub
- * Actions both hand us the commit SHA without being asked.
+ * different id. It is ALSO the precache revision of `/offline` and
+ * `/manifest.webmanifest`, so a frozen id does not merely stop caches rotating
+ * - it pins the offline document at whatever the first deploy shipped, forever.
  *
- * The "dev" fallback is for local `next build`, where nothing is deployed and a
- * stable id is what you want. If a real deploy ever runs with none of these set,
- * every deploy shares one id and the caches stop rotating - see the note in
- * src/lib/pwa/cache-names.ts.
+ * Which is why production without one is a thrown error rather than a warning.
+ * `cache-names.ts` already refuses an EMPTY id; "dev" is the shape that slips
+ * past that, looks fine in a build log, and is wrong on every subsequent
+ * deploy. Vercel and GitHub Actions both provide a commit SHA unasked, so this
+ * only fires on a pipeline that has neither and has not set `GIYA_BUILD_ID`.
  */
-const BUILD_ID =
-  process.env.GIYA_BUILD_ID ??
-  process.env.VERCEL_GIT_COMMIT_SHA ??
-  process.env.GITHUB_SHA ??
-  "dev";
+export function resolveBuildId(env: BuildEnv): string {
+  // `||` not `??`: a CI step that exports the variable without a value is the
+  // common way this goes wrong, and an empty string is not a build id.
+  const fromEnv = env.GIYA_BUILD_ID || env.VERCEL_GIT_COMMIT_SHA || env.GITHUB_SHA;
+  if (fromEnv) return fromEnv;
+
+  if (env.NODE_ENV === "production") {
+    throw new Error(
+      "Service worker build id missing. Set GIYA_BUILD_ID (or let CI provide " +
+        "VERCEL_GIT_COMMIT_SHA / GITHUB_SHA). Without it every deploy shares one " +
+        "cache generation and the precached /offline document never updates.",
+    );
+  }
+
+  return "dev";
+}
+
+const BUILD_ID = resolveBuildId(process.env);
 
 /**
- * The precache entries for everything in `public/`, plus the `/offline`
- * document.
+ * Whether this process should build and wire up the service worker at all.
+ *
+ * False in development, and that is the whole point: @serwist/next's wrapper
+ * always adds a `webpack` key, and Next 16 refuses to run Turbopack when it
+ * finds one. The worker is disabled in dev regardless, so applying the wrapper
+ * there buys nothing and costs every HMR reload of every working day. Skipping
+ * it entirely - rather than passing `disable: true`, which still leaves the
+ * webpack key behind - is what gives `next dev` its Turbopack back.
+ */
+export function shouldEnableServiceWorker(env: BuildEnv): boolean {
+  return env.NODE_ENV !== "development";
+}
+
+const SERVICE_WORKER_ENABLED = shouldEnableServiceWorker(process.env);
+
+/**
+ * Doc 41 section 1's precache set: everything in `public/`, plus the two
+ * GENERATED routes a glob can never see - `/offline` and
+ * `/manifest.webmanifest`.
  *
  * WHY THIS IS COMPUTED HERE RATHER THAN LEFT TO @serwist/next.
  *
@@ -40,15 +81,17 @@ const BUILD_ID =
  * would be untestable on a Windows dev machine while CI on Linux looked fine.
  * `manifestTransforms` cannot fix it: @serwist/build appends the plugin's
  * entries as the LAST transform, after ours. Supplying the list is the only
- * hook that comes first, and it also happens to be where `/offline` belongs.
+ * hook that comes first.
  *
- * `/offline` is not in `public/` and is not a build asset - it is a rendered
- * document - so nothing would precache it automatically, and the navigation
- * fallback in src/app/sw.ts would have nothing to fall back TO.
+ * `/offline` and `/manifest.webmanifest` are rendered routes rather than files
+ * on disk, so nothing precaches them automatically. Without the first, the
+ * navigation fallback in src/app/sw.ts has nothing to fall back TO - and
+ * Serwist's `fallbacks` option expects its entries to be precached already.
  *
- * Never throws: this module is imported by src/features/identity/avatar.test.ts.
+ * Never throws: this module is imported by src/features/identity/avatar.test.ts
+ * and by next.config.test.ts, which is where its output is pinned.
  */
-function precacheEntries(): { url: string; revision: string }[] {
+export function precacheEntries(): { url: string; revision: string }[] {
   const publicDir = join(process.cwd(), "public");
 
   // The compiled worker and its sourcemap live in public/ after a build. A
@@ -74,10 +117,17 @@ function precacheEntries(): { url: string; revision: string }[] {
     return out;
   }
 
+  // Rendered routes, not files. Keyed to the build id because that is the only
+  // revision either of them has.
+  const generated = [
+    { url: "/offline", revision: BUILD_ID },
+    { url: "/manifest.webmanifest", revision: BUILD_ID },
+  ];
+
   try {
-    return [...walk(publicDir, ""), { url: "/offline", revision: BUILD_ID }];
+    return [...walk(publicDir, ""), ...generated];
   } catch {
-    return [{ url: "/offline", revision: BUILD_ID }];
+    return generated;
   }
 }
 
@@ -110,27 +160,42 @@ const nextConfig: NextConfig = {
       bodySizeLimit: AVATAR_ACTION_BODY_LIMIT_BYTES,
     },
   },
-  webpack(config, { webpack }) {
-    // Substituted into src/app/sw.ts. The service worker is built by a webpack
-    // CHILD compilation, which inherits the parent's plugin taps, so a
-    // DefinePlugin registered here reaches it.
-    config.plugins.push(
-      new webpack.DefinePlugin({
-        __GIYA_BUILD_ID__: JSON.stringify(BUILD_ID),
-        // src/lib/pwa/buckets.ts reads this to decide whose storage origin is
-        // cacheable. Next inlines NEXT_PUBLIC_* into the app bundle, but the
-        // worker is a separate child compilation and this is the substitution
-        // that is verifiable rather than assumed. Empty string when unset, so
-        // the matcher fails closed and caches nothing rather than caching
-        // anyone's bytes.
-        "process.env.NEXT_PUBLIC_SUPABASE_URL": JSON.stringify(
-          process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
-        ),
-      }),
-    );
-    return config;
-  },
+  // Omitted entirely in development. A `webpack` key is what makes Next 16
+  // refuse to run Turbopack, and in dev this hook has nothing to do: the only
+  // thing it feeds is a service worker that is not built there.
+  ...(SERVICE_WORKER_ENABLED ? { webpack: defineBuildConstants } : {}),
 };
+
+/** Only the sliver of webpack this hook touches. `webpack` is not a direct
+ *  dependency - Next hands its own copy to the hook - so its types are not
+ *  resolvable here and are described structurally instead. */
+type WebpackContext = {
+  readonly webpack: {
+    readonly DefinePlugin: new (definitions: Record<string, string>) => unknown;
+  };
+};
+
+/** Substituted into src/app/sw.ts. The service worker is built by a webpack
+ *  CHILD compilation, which inherits the parent's plugin taps, so a
+ *  DefinePlugin registered here reaches it. */
+function defineBuildConstants(config: { plugins?: unknown[] }, { webpack }: WebpackContext) {
+  config.plugins ??= [];
+  config.plugins.push(
+    new webpack.DefinePlugin({
+      __GIYA_BUILD_ID__: JSON.stringify(BUILD_ID),
+      // src/lib/pwa/buckets.ts reads this to decide whose storage origin is
+      // cacheable. Next inlines NEXT_PUBLIC_* into the app bundle, but the
+      // worker is a separate child compilation and this is the substitution
+      // that is verifiable rather than assumed. Empty string when unset, so the
+      // matcher fails closed and caches nothing rather than caching anyone's
+      // bytes.
+      "process.env.NEXT_PUBLIC_SUPABASE_URL": JSON.stringify(
+        process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
+      ),
+    }),
+  );
+  return config;
+}
 
 const withSerwist = withSerwistInit({
   swSrc: "src/app/sw.ts",
@@ -144,11 +209,17 @@ const withSerwist = withSerwistInit({
   // Doc 41 section 9 says offline actions never surprise the user, and a reload
   // mid-scan discards a capture.
   reloadOnOnline: false,
-  disable: process.env.NODE_ENV === "development",
-  // Everything in public/, plus the /offline document. Supplying this replaces
-  // the plugin's own glob of public/ - see precacheEntries() for why that glob
-  // cannot be left in place, and why a manifestTransform cannot repair it.
+  // Belt and braces: in development the wrapper is not applied at all (see
+  // shouldEnableServiceWorker), so this never gets the chance to matter.
+  disable: !SERVICE_WORKER_ENABLED,
+  // Everything in public/, plus /offline and /manifest.webmanifest. Supplying
+  // this replaces the plugin's own glob of public/ - see precacheEntries() for
+  // why that glob cannot be left in place, and why a manifestTransform cannot
+  // repair it.
   additionalPrecacheEntries: precacheEntries(),
 });
 
-export default withSerwist(nextConfig);
+// In development this is the bare config, with no `webpack` key, which is what
+// lets `next dev` run on Turbopack. `next build` runs with `--webpack` because
+// @serwist/next has no Turbopack support - see package.json.
+export default SERVICE_WORKER_ENABLED ? withSerwist(nextConfig) : nextConfig;
