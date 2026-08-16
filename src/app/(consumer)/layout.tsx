@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { OfflineBanner } from "@/components/pwa/offline-banner";
 import { RegisterServiceWorker } from "@/components/pwa/register-service-worker";
 import { BottomNav } from "@/components/shell/bottom-nav";
 import { createClient } from "@/lib/supabase/server";
@@ -104,6 +105,15 @@ export default async function ConsumerLayout({ children }: { children: React.Rea
         holds that line.
       */}
       <RegisterServiceWorker />
+      {/*
+        Doc 41 section 9's ONE global offline pill. Same layout and the same
+        reason as the registration above: the business and admin portals are
+        not offline-capable surfaces and must not grow an offline affordance
+        that implies they are. It renders nothing while the connection is up,
+        so mounting it unconditionally costs a signed-out visitor on /b/[slug]
+        nothing. src/app/offline-ui-scope.test.ts holds the portal line.
+      */}
+      <OfflineBanner />
     </div>
   );
 }
