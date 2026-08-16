@@ -20,6 +20,18 @@ const eslintConfig = defineConfig([
     "public/sw.js.map",
     "public/swe-worker-*.js",
     "public/swe-worker-*.js.map",
+    // Agent worktrees are full checkouts of this repo living INSIDE it, so a
+    // bare `eslint .` descends into every one of them and lints the whole
+    // codebase again per worktree - ~20k problems while `eslint src scripts`
+    // reports 71. That made the lint gate unreadable and cost a task's review
+    // an incorrect baseline: the brief claimed "clean apart from one warning"
+    // and the implementer had to establish the real number themselves.
+    //
+    // vitest.config.ts carries the identical exclusion for the identical
+    // reason - without it a 3,936-test suite reported 7,840, globbing main
+    // plus every live worktree. Any tool that walks the tree from the repo
+    // root needs this; if you add one, add the exclusion with it.
+    ".claude/worktrees/**",
   ]),
   {
     files: ["src/**/*.{ts,tsx}"],
