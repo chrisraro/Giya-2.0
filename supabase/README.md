@@ -134,6 +134,8 @@ Twenty-six suites, one per domain (review fix, task 2.1: the prior count of "Nin
 | `rls_avatars_storage_smoke.sql` | the `avatars` bucket and its owner-prefix fence on `storage.objects` (0064), 31 assertions: the bucket settings pinned individually (PUBLIC, 2MB, exactly jpeg/png/webp) so flipping any of them is a visible change rather than a silent one; exactly four policies, one per verb, all `{authenticated}` and never `anon`; the fence for all four verbs in BOTH directions (own segment allowed, another consumer's segment denied) plus the malformed-path cases it must fail closed on - a bare bucket-root filename (`foldername('bare.jpg')` is `{}`, so `[1]` is NULL and a NULL predicate is not true), a nested `{uid}/a/b.jpg` refused by the one-level depth pin, and a segment that merely STARTS WITH the caller's uid refused because the comparison is equality and not a prefix match; the UPDATE `with check` half proven separately from its `using` half (a consumer cannot rename their OWN object into somebody else's prefix); and TWO project facts that would otherwise make the file lie - `storage.objects` carries a statement-level `protect_objects_delete` trigger that raises 42501 for EVERY role above RLS unless `storage.allow_delete_query` is set, asserted explicitly BEFORE that GUC goes on so the delete assertions after it are measuring the policy and not the trigger; and both client roles hold full table-level DML on `storage.objects` by Supabase default, asserted so every 42501 in the file reads as a policy refusing a row rather than a missing grant. The three STRUCTURAL pins on `pg_policies.qual` / `with_check` exist because of a measured gap: PostgreSQL applies the SELECT policy to rows an UPDATE or DELETE reads through its WHERE, so with the own-only SELECT policy in place a deliberately widened `using (bucket_id = 'avatars')` on the update or delete policy still touches zero rows and every behavioural assertion stays green - the predicate text is what catches it |
 | `rpc_job_health_terminal_failures_smoke.sql` | `public.sweep_job_terminal_failures` (0061, task 2.5 review-fix pass 2), 12 assertions: THE REGRESSION TEST for the bug the migration exists to close - a job whose only run in the window is in-flight (`status='running'`) reports zero terminal failures and zero terminal runs, unlike 0028's own `sweep_job_health.failures` (`status <> 'succeeded'`), which would count it as one; a mixed fixture (one succeeded run, two genuinely failed runs 30 minutes apart, one in-flight) proving `terminal_runs` excludes the in-flight row, `terminal_failures` counts only `status='failed'`, and the MOST RECENT failure's message wins over the older one; the `p_hours` window genuinely bounding the read (a 1-hour window sees the 30-minutes-ago failure but not the ones 2h/3h back); and the full I-A grant matrix (anon/authenticated denied both by `throws_ok` on a direct call and by literal `has_function_privilege` assertions, service_role allowed). Fixtures go through `cron.schedule()` for the job row (direct `INSERT` on `cron.job` is refused even to `postgres` - verified live, the table is owned by `supabase_admin`) and a direct `INSERT` with an explicit out-of-range `runid` for `cron.job_run_details` (directly insertable, but its `runid` sequence is not) |
 
+| `rpc_loyalty_progression_smoke.sql` | Task T4.5's loyalty card progression (0078), 70 assertions: the schema consolidation itself (0066's six bolted-on columns gone, 0012's five surviving); each `program_type`'s arithmetic - `visit_count`/`receipt_count` +1, `points_target` += the WHOLE receipt total, `spend_amount` += `floor(total_centavos/100)` proven against 48599 centavos so floor (485), round (486) and ceil (486) disagree; `min_amount_per_stamp_centavos` refusing a receipt one centavo below it and admitting one EXACTLY at it (so `>=` and `>` disagree); `max_stamps_per_day` at both 1 and 2, each proven ACROSS a Manila day boundary using a 16:00Z receipt that is the same UTC date and the next Manila day; completion creating exactly one `reward_claims` row at the REWARD's own `claim_expiry_days` (14, deliberately not the column default of 30) with no redeem ledger row for a zero-cost claim; `resets_on_completion` in BOTH directions - `true` overshooting 115 against a target of 100 and keeping the 15-point carryover, `false` freezing at target and then refusing every subsequent receipt so a finished card cannot mint a second free prize; four liveness/type refusals (paused campaign, past `ends_at`, future `starts_at`, a `promotion`-type parent) and `program_type='custom'`; the clawback unwinding ONE call across two cards where one floors at 0 and one does not, in the card's own currency (300 pesos, not the receipt's 70 points), leaving a neighbouring receipt's stamps standing and recording the count in the audit row; a reversed stamp releasing its day's slot (0039's posture); the two cardholder RLS policies proven against a PAUSED campaign and a DEACTIVATED reward with a card-less consumer as the negative half; and the full per-role grant matrix over `award_receipt_points`, `clawback_receipt_points`, `claim_reward` and the four new private helpers. **Every "this did not happen" assertion is paired with a "and the same call DID do its other work" assertion on a different program of the same business** - one receipt advances every live program at once, so without the pair a card that did not move because the progression never ran is indistinguishable from a card the cap correctly refused |
+
 Each suite states the migration range it needs in its header. New suites take
 their fixture ids from insert-returning CTEs rather than looking rows up by
 name: a name lookup collides with live data on a shared project, which is how
@@ -506,6 +508,94 @@ only a comment" is how the 0047 incident below began. No revert was needed
 (0053's header reads correctly after that edit), but every correction to
 0053 or 0054 from here on goes in a companion migration - 0055 is that
 migration for 0054's own I1/I3 interaction.
+
+### Loyalty card progression (0078, task T4.5) — WRITTEN, NOT YET APPLIED
+
+`public.loyalty_cards` existed from `0012_campaigns.sql` and **nothing ever
+wrote to it**; the award path names the gap twice in its own history
+(`0018_award_receipt_points.sql:31`, `0031_admin_access.sql:205`). Consumers
+could open `/cards` and see stamp cards that could never fill.
+
+**The table carried two schemas.** `0066_loyalty_cards.sql` opened with
+`create table if not exists` against a table that already existed — a no-op —
+and its following `add column if not exists` lines bolted a second identity
+(`user_id`) and a second progress model (`stamps_count` / `stamps_target` /
+`prize_reward_name` / `is_completed` / `completed_at`) onto the same rows. The
+shipped UI read the 0066 half; doc 35 §3 step 11 writes the 0012 half. Both
+tables were empty (0 rows, verified live 2026-08-16), so 0078 **drops the 0066
+columns outright** and repoints `src/features/loyalty/server/repo.ts` and both
+card screens at 0012's, joining `loyalty_programs` for `target_value`,
+`program_type` and `stamp_icon` and `rewards` for the prize name.
+
+What 0078 adds:
+
+- **`public.loyalty_stamps`** — one row per (card, receipt) qualifying event,
+  recording the progress that event contributed and the Manila-day key it
+  counts against. It exists because neither required behaviour is expressible
+  against 0012's columns: `last_stamp_at` is one timestamp and cannot count to
+  a `max_stamps_per_day` above 1, and doc 35 §9's "unwinds loyalty progress
+  **attributable to the receipt**" needs a per-receipt figure that `progress`
+  destroys the moment it folds it in. Reversal sets `reversed_at`; there is no
+  negative row, and a reversed stamp stops occupying its day's slot (0039's
+  posture).
+- **`private.advance_loyalty_cards`**, called from inside
+  `award_receipt_points`' own transaction under the locks it already holds —
+  liveness at RECEIPT time (doc 34: never processing time), the min-amount
+  floor, the Manila-day cap, the per-`program_type` increment, completion, and
+  both branches of `resets_on_completion` with the carryover kept.
+- **`private.write_reward_claim`** — `claim_reward`'s ledger path (0013/0015
+  steps 4/5/6) extracted so the completion prize reuses it rather than
+  hand-rolling a second claim writer. `claim_reward`'s guards stay in
+  `claim_reward`: they raise, and a raise in the award path would roll back a
+  ledger row the consumer legitimately earned.
+- **`private.unwind_loyalty_stamps`**, called from
+  `clawback_receipt_points` on both sides of its fully-spent-balance branch,
+  flooring each card at 0 and recording the count it reversed in the clawback's
+  audit row (`after.loyalty_stamps_unwound`).
+- **Two cardholder RLS policies** (`loyalty_programs_cardholder_select`,
+  `rewards_cardholder_select`) so pausing a campaign or retiring a prize does
+  not blank out a card a consumer already holds.
+
+Decisions this migration makes that doc 35 does not spell out, all stated in
+its header: `program_type='custom'` stamps nothing (no ratified increment);
+one completion per qualifying receipt even when the carryover would
+immediately re-complete; a non-resetting card that has reached its target is
+**finished** and takes no further stamps (without that stop, "freezes at
+target" means every later receipt re-fires completion and mints another free
+prize); and the clawback unwinds progress only — `completed_count` and any
+issued claim stand, because the prize may already be redeemed.
+
+**Decision (d) deserves its own paragraph: a loyalty completion runs
+`claim_reward`'s ledger path with NONE of `claim_reward`'s guards.** All six
+that are skipped, by name:
+
+1. **reward liveness** — `is_active`, `deleted_at`, and the reward's own
+   campaign being active and in window. A merchant who retires the prize still
+   has it minted. (The *program's* campaign liveness IS checked; the
+   *reward's* is not, and the two can differ.)
+2. the reward's own `per_customer_limit`
+3. the campaign's `budget.per_customer_limit`
+4. **the campaign's `budget.max_redemptions`** — the merchant's hard cap on
+   prizes a campaign may issue. Completions neither check it nor count toward
+   it, yet `claim_reward`'s own count reads `reward_claims` and *will* see
+   these rows, so the cap can be exceeded from one side and consumed from the
+   other.
+5. `rewards.remaining` — inventory is never decremented.
+6. the campaign row lock 0015 takes before any campaign-wide count.
+
+Consumer **blacklisting is not** in that list: `award_receipt_points` refuses
+a `blacklisted` pair long before step 11 runs, so it is covered upstream.
+
+Why: each of 1–5 is a `raise` in `claim_reward`, and a raise inside the award
+transaction would roll back the consumer's legitimately earned ledger row. That
+explains why they were not copied verbatim — it does **not** establish that
+ignoring them was the only option. Skipping the stamp, or completing the card
+without issuing the claim, also avoid the rollback. Those are product decisions
+about what a consumer who filled a card is owed when the prize behind it has
+been withdrawn; T4.5 shipped the permissive reading and recorded the
+alternatives rather than leaving them to be rediscovered.
+
+Coverage: `supabase/tests/rpc_loyalty_progression_smoke.sql`, 70 assertions.
 
 ### Balance check (0056-0059, task 2.2 + three review-fix passes)
 
@@ -1304,6 +1394,7 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0075_clear_business_data.sql | (a maintenance script, not a schema migration) | — |
 | 0076_purge_business_rpc.sql | **NO ROW — NOT APPLIED** (`purge_business_data` absent) | (unrecorded) |
 | 0077_force_delete_business.sql | **NO ROW — function IS live** | (unrecorded) |
+| 0078_loyalty_card_progression.sql | **NOT YET APPLIED — written by T4.5, applied by the coordinator** | (unrecorded) |
 
 ### ⚠️ Ledger divergence, verified live 2026-08-16
 
