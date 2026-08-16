@@ -1,9 +1,11 @@
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import nextConfig, {
+  PLACEHOLDER_BUILD_ID,
+  assertBuildIdIsReal,
   precacheEntries,
   resolveBuildId,
   shouldEnableServiceWorker,
@@ -45,16 +47,38 @@ describe("resolveBuildId", () => {
     expect(resolveBuildId({ GIYA_BUILD_ID: "", GITHUB_SHA: "gsha" })).toBe("gsha");
   });
 
-  it("uses a stable placeholder outside production", () => {
-    expect(resolveBuildId({ NODE_ENV: "development" })).toBe("dev");
-    expect(resolveBuildId({})).toBe("dev");
+  it("falls back to a stable placeholder rather than failing", () => {
+    expect(resolveBuildId({ NODE_ENV: "development" })).toBe(PLACEHOLDER_BUILD_ID);
+    expect(resolveBuildId({})).toBe(PLACEHOLDER_BUILD_ID);
   });
 
-  it("CRITICAL: refuses to build for production without a real build id", () => {
+  it("CRITICAL: resolving never throws, not even in production", () => {
+    // This function runs at MODULE LOAD, and next.config.ts is loaded by
+    // `next start` as well as by `next build`. Throwing here would take down a
+    // production server over a variable that only matters while the worker is
+    // being compiled - a self-hosted deploy that built fine yesterday would
+    // refuse to boot today. The check belongs in the build phase, and that is
+    // where assertBuildIdIsReal puts it.
+    expect(() => resolveBuildId({ NODE_ENV: "production" })).not.toThrow();
+    expect(resolveBuildId({ NODE_ENV: "production" })).toBe(PLACEHOLDER_BUILD_ID);
+  });
+});
+
+describe("assertBuildIdIsReal", () => {
+  it("CRITICAL: fails a production build that would bake in the placeholder", () => {
     // Failing the build is the only outcome that cannot ship silently. With
     // "dev" baked in, every deploy shares one id: caches never rotate, and the
     // precached /offline document is frozen at whatever the first deploy had.
-    expect(() => resolveBuildId({ NODE_ENV: "production" })).toThrow(/GIYA_BUILD_ID/);
+    expect(() => assertBuildIdIsReal(PLACEHOLDER_BUILD_ID, true)).toThrow(/GIYA_BUILD_ID/);
+  });
+
+  it("passes a production build that has a real id", () => {
+    expect(() => assertBuildIdIsReal("5aaf2ff", true)).not.toThrow();
+  });
+
+  it("CRITICAL: says nothing outside a production build", () => {
+    // The placeholder is the correct, intended value for a local build.
+    expect(() => assertBuildIdIsReal(PLACEHOLDER_BUILD_ID, false)).not.toThrow();
   });
 });
 
@@ -147,6 +171,64 @@ describe("precacheEntries", () => {
     for (const entry of entries) {
       expect(entry.revision, entry.url).toMatch(/^[0-9a-z]+$/);
     }
+  });
+});
+
+describe("the build-id check fires during a BUILD, not at config load", () => {
+  // The narrowing this block exists to hold. next.config.ts is loaded by
+  // `next start` as well as by `next build`, and the id is baked into the
+  // emitted worker at build time - so once a build has a real id, the running
+  // server never needs one. A throw at module load would refuse to boot a
+  // production server that built perfectly well.
+
+  class FakeDefinePlugin {
+    constructor(readonly definitions: Record<string, string>) {}
+  }
+  const fakeWebpack = { DefinePlugin: FakeDefinePlugin };
+
+  /**
+   * The module as it loads in a production process with no build id at all -
+   * which is exactly the `next start` situation this narrowing is about.
+   */
+  async function loadWithNoBuildId() {
+    vi.resetModules();
+    vi.stubEnv("GIYA_BUILD_ID", "");
+    vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "");
+    vi.stubEnv("GITHUB_SHA", "");
+    vi.stubEnv("NODE_ENV", "production");
+    return import("./next.config");
+  }
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("CRITICAL: loading the config with no build id does not throw - the `next start` shape", async () => {
+    await expect(loadWithNoBuildId()).resolves.toBeDefined();
+  });
+
+  it("CRITICAL: the webpack hook refuses a production build with no build id", async () => {
+    const mod = await loadWithNoBuildId();
+    expect(() => mod.defineBuildConstants({ plugins: [] }, { webpack: fakeWebpack, dev: false })).toThrow(
+      /GIYA_BUILD_ID/,
+    );
+  });
+
+  it("compiles a local build with the placeholder, and substitutes both constants", async () => {
+    const mod = await loadWithNoBuildId();
+    const config: { plugins?: unknown[] } = { plugins: [] };
+
+    expect(() => mod.defineBuildConstants(config, { webpack: fakeWebpack, dev: true })).not.toThrow();
+
+    const [plugin] = config.plugins as FakeDefinePlugin[];
+    expect(Object.keys(plugin?.definitions ?? {})).toEqual([
+      "__GIYA_BUILD_ID__",
+      "process.env.NEXT_PUBLIC_SUPABASE_URL",
+    ]);
+    // src/app/sw.ts reads the first as its cache generation; src/lib/pwa/buckets.ts
+    // reads the second to decide whose storage origin may be cached.
+    expect(plugin?.definitions.__GIYA_BUILD_ID__).toBe(JSON.stringify(PLACEHOLDER_BUILD_ID));
   });
 });
 

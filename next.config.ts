@@ -16,6 +16,9 @@ export type BuildEnv = {
   readonly NODE_ENV?: string | undefined;
 };
 
+/** What a local build uses when nothing supplies a real id. */
+export const PLACEHOLDER_BUILD_ID = "dev";
+
 /**
  * The build id every service worker cache name embeds (doc 41 section 7 step 1).
  *
@@ -26,27 +29,44 @@ export type BuildEnv = {
  * `/manifest.webmanifest`, so a frozen id does not merely stop caches rotating
  * - it pins the offline document at whatever the first deploy shipped, forever.
  *
- * Which is why production without one is a thrown error rather than a warning.
- * `cache-names.ts` already refuses an EMPTY id; "dev" is the shape that slips
- * past that, looks fine in a build log, and is wrong on every subsequent
- * deploy. Vercel and GitHub Actions both provide a commit SHA unasked, so this
- * only fires on a pipeline that has neither and has not set `GIYA_BUILD_ID`.
+ * DELIBERATELY TOTAL: it resolves or falls back, and never throws. This runs at
+ * module load, and next.config.ts is loaded by `next start` as well as by
+ * `next build`. The id is baked into the emitted worker at build time, so once
+ * a build has a real one the running server never needs it - and refusing to
+ * boot a production server over a cache-versioning variable would take down a
+ * deploy that compiled perfectly well yesterday. The check that has teeth is
+ * `assertBuildIdIsReal`, called from the build phase only.
  */
 export function resolveBuildId(env: BuildEnv): string {
   // `||` not `??`: a CI step that exports the variable without a value is the
   // common way this goes wrong, and an empty string is not a build id.
   const fromEnv = env.GIYA_BUILD_ID || env.VERCEL_GIT_COMMIT_SHA || env.GITHUB_SHA;
-  if (fromEnv) return fromEnv;
+  return fromEnv || PLACEHOLDER_BUILD_ID;
+}
 
-  if (env.NODE_ENV === "production") {
-    throw new Error(
-      "Service worker build id missing. Set GIYA_BUILD_ID (or let CI provide " +
-        "VERCEL_GIT_COMMIT_SHA / GITHUB_SHA). Without it every deploy shares one " +
-        "cache generation and the precached /offline document never updates.",
-    );
-  }
+/**
+ * Fails a production BUILD that would bake the placeholder into the worker.
+ *
+ * Called from the webpack hook, which is the phase that does the baking and
+ * the only phase where the answer can still be acted on. `isProductionBuild`
+ * comes from Next's own `dev` flag rather than from NODE_ENV, because that flag
+ * is what actually distinguishes the compilation that emits `public/sw.js`.
+ *
+ * Loud on purpose: `cache-names.ts` already refuses an EMPTY id, and "dev" is
+ * the shape that slips past it, reads fine in a build log, and is wrong on
+ * every deploy after the first. Vercel and GitHub Actions both provide a commit
+ * SHA unasked, so this only fires on a pipeline that has neither and has not
+ * set `GIYA_BUILD_ID`.
+ */
+export function assertBuildIdIsReal(buildId: string, isProductionBuild: boolean): void {
+  if (!isProductionBuild) return;
+  if (buildId !== PLACEHOLDER_BUILD_ID) return;
 
-  return "dev";
+  throw new Error(
+    "Service worker build id missing. Set GIYA_BUILD_ID (or let CI provide " +
+      "VERCEL_GIT_COMMIT_SHA / GITHUB_SHA). Without it every deploy shares one " +
+      "cache generation and the precached /offline document never updates.",
+  );
 }
 
 const BUILD_ID = resolveBuildId(process.env);
@@ -173,12 +193,22 @@ type WebpackContext = {
   readonly webpack: {
     readonly DefinePlugin: new (definitions: Record<string, string>) => unknown;
   };
+  /** Next's own flag for "this is a dev compilation". */
+  readonly dev: boolean;
 };
 
-/** Substituted into src/app/sw.ts. The service worker is built by a webpack
- *  CHILD compilation, which inherits the parent's plugin taps, so a
- *  DefinePlugin registered here reaches it. */
-function defineBuildConstants(config: { plugins?: unknown[] }, { webpack }: WebpackContext) {
+/**
+ * Substituted into src/app/sw.ts. The service worker is built by a webpack
+ * CHILD compilation, which inherits the parent's plugin taps, so a DefinePlugin
+ * registered here reaches it.
+ *
+ * This is also where the build id is checked, because this is the phase that
+ * bakes it in - see assertBuildIdIsReal. Exported so next.config.test.ts can
+ * prove the check fires here and NOT at module load.
+ */
+export function defineBuildConstants(config: { plugins?: unknown[] }, { webpack, dev }: WebpackContext) {
+  assertBuildIdIsReal(BUILD_ID, !dev);
+
   config.plugins ??= [];
   config.plugins.push(
     new webpack.DefinePlugin({
