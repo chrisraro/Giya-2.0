@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 
-import { ReceiptOutbox } from "@/components/pwa/receipt-outbox";
 import { ReceiptCapture } from "@/features/receipts/components/receipt-capture";
 import { ScanBusinessChooser } from "@/features/receipts/components/scan-business-chooser";
 import {
@@ -75,16 +74,6 @@ export default async function ScanPage({
           Take a photo of your receipt to earn points.
         </p>
       </div>
-
-      {/*
-        Doc 41 section 3: the persistent queue card lives on /scan and
-        /receipts. Above the capture flow on this screen, because a consumer
-        standing in a shop with ten unsent receipts needs to know that before
-        they take an eleventh that the cap will refuse. It is a client
-        component and renders nothing for an empty queue, so it costs a page
-        with no backlog one IndexedDB read.
-      */}
-      <ReceiptOutbox />
 
       <ReceiptCapture businessId={businessId} showOcrStubNote={showOcrStubNote} />
     </main>

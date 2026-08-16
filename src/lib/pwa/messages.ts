@@ -38,16 +38,6 @@ export type SwMessage = {
 export const SKIP_WAITING_MESSAGE: SwMessage = { type: "SKIP_WAITING" };
 
 /**
- * What the worker posts to every open window after a Background Sync replay
- * emptied rows from the receipt outbox (doc 41 sections 1 and 3).
- *
- * SW -> app, unlike the two above. The replay ran inside the worker, so a tab
- * showing the queue card has no other way to learn that rows it is displaying
- * are gone; `src/components/pwa/receipt-outbox.tsx` listens for it.
- */
-export const OUTBOX_CHANGED_MESSAGE: SwMessage = { type: "OUTBOX_CHANGED" };
-
-/**
  * A declared message, or `null` for anything unrecognised or malformed.
  *
  * Never throws. Anything running on the page can `postMessage` at a service

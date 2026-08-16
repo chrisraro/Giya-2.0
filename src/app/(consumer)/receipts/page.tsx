@@ -1,6 +1,5 @@
 import { notFound } from "next/navigation";
 
-import { ReceiptOutbox } from "@/components/pwa/receipt-outbox";
 import { ReceiptHistoryList } from "@/features/receipts/components/receipt-history-list";
 import { receiptStatusSchema } from "@/features/receipts/schemas";
 import { listMyReceipts } from "@/features/receipts/server/repo";
@@ -77,17 +76,6 @@ export default async function ReceiptsPage({ searchParams }: PageProps) {
       <p className="mt-1 text-body-m text-on-surface-variant">
         Every receipt you have scanned, and what happened to it.
       </p>
-
-      {/*
-        Doc 41 section 3's queue card, the other of the two screens it names.
-        It sits ABOVE the history because a queued receipt is not in that list:
-        the list comes from Postgres, and these rows have never been uploaded.
-        Without the card they would be invisible on the one screen whose whole
-        job is answering "what happened to the photos I took".
-      */}
-      <section className="mt-6">
-        <ReceiptOutbox />
-      </section>
 
       <section className="mt-6">
         <ReceiptHistoryList
