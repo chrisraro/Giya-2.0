@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 import { AdminNav } from "@/components/admin/admin-nav";
 import { Logo } from "@/components/brand/logo";
-import { signOut } from "@/features/identity/actions";
+import { LogoutForm } from "@/components/pwa/logout-form";
 import { cn } from "@/lib/utils";
 
 export interface AdminShellProps {
@@ -57,7 +57,13 @@ export function AdminShell({ children, adminName, adminRole }: AdminShellProps) 
               </div>
             </div>
 
-            <form action={signOut}>
+            {/* One logout path for the whole app. Portal paths are excluded
+                from the pages cache (see src/lib/pwa/runtime-caching.ts), so an
+                admin has nothing of their own to purge - but an operator who
+                also uses this browser as a consumer does, and routing every
+                logout through the same component is what stops the next surface
+                being added without the purge. */}
+            <LogoutForm>
               <button
                 type="submit"
                 className={cn(
@@ -69,7 +75,7 @@ export function AdminShell({ children, adminName, adminRole }: AdminShellProps) 
                 <span className="material-symbols-rounded text-[18px]">logout</span>
                 <span>Sign Out</span>
               </button>
-            </form>
+            </LogoutForm>
           </div>
         </header>
 

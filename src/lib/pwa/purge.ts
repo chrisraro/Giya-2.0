@@ -91,16 +91,18 @@ export async function purgeUserCaches(
   // That guard was written first and a mutant deleted it with nothing turning
   // red: `undefined.keys()` throws INSIDE the try below, which returns [] for
   // its own reasons, so the guard was unobservable - dead code wearing a
-  // comment about Safari private windows. The absent case is now handled by the
-  // `names === undefined` check, whose removal really does break the no-Cache-
-  // Storage test, because `.filter` on undefined throws outside the try.
+  // comment about Safari private windows. Moved BELOW the try, where deleting
+  // it really does break the no-Cache-Storage test, because `.filter` on
+  // undefined throws where nothing catches it. (The `storage` half of that
+  // condition is what re-narrows the type for the deletes; `names !== undefined`
+  // already implies it.)
   let names: readonly string[] | undefined;
   try {
     names = await storage?.keys();
   } catch {
     return [];
   }
-  if (names === undefined) return [];
+  if (names === undefined || storage === undefined || storage === null) return [];
 
   const doomed = names.filter(holdsAuthenticatedData);
   const settled = await Promise.allSettled(doomed.map((name) => storage.delete(name)));

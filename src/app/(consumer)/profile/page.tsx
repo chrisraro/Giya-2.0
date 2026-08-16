@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
-import { signOut } from "@/features/identity/actions";
+import { LogoutForm } from "@/components/pwa/logout-form";
 import { emailLocalPart, initialsFrom } from "@/features/identity/display-name";
 import { getMyConsumerProfile } from "@/features/identity/server/repo";
 import { NotificationBadge } from "@/features/notifications/components/notification-badge";
@@ -124,9 +124,16 @@ export default async function ProfilePage() {
         {/* A form posting to a server action, not a link to /login. A link only
             moved the user to another screen while their session cookies stayed
             valid, so "Log out" did not log anyone out. See signOut() for why
-            cookie deletion forces this to be an action. No client island: a
-            plain form action keeps this page a server component. */}
-        <form action={signOut}>
+            cookie deletion forces this to be an action.
+
+            THE ONE CLIENT ISLAND ON THIS PAGE, and it is worth the bytes. A
+            plain <form action={signOut}> cannot purge `giya-pages-*`, which on
+            this RSC app holds the consumer's name and balance inside cached
+            HTML: postMessage to a service worker does not exist in a Server
+            Action. LogoutForm posts the purge and then calls the same action.
+            Everything visible below is still server-rendered; only the form
+            element itself crosses the boundary. */}
+        <LogoutForm>
           <button
             type="submit"
             className={`${ROW_CLASS} w-full text-error outline-none focus-visible:ring-2 focus-visible:ring-primary`}
@@ -136,7 +143,7 @@ export default async function ProfilePage() {
             </span>
             <span className="flex-1 text-left text-body-l">Log out</span>
           </button>
-        </form>
+        </LogoutForm>
       </section>
     </main>
   );

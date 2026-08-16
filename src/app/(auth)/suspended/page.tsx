@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 
 import { AuthCard } from "@/components/auth/auth-card";
+import { LogoutForm } from "@/components/pwa/logout-form";
 import { Button } from "@/components/ui/button";
-import { signOut } from "@/features/identity/actions";
 
 // Doc 30 section 2.8: "/suspended | Suspension notice | [MVP] | Terminal
 // screen, logout only". Reached from the consumer layout's and the business
@@ -66,11 +66,15 @@ export default async function SuspendedPage({
       >
         Appeal this suspension
       </a>
-      <form action={signOut}>
+      {/* LogoutForm, not a bare <form action={signOut}>: a suspended consumer
+          reached this screen through the layout gate, so their /home and
+          /wallet documents are already in `giya-pages-*` with their name and
+          balance in the HTML. See src/lib/pwa/purge.ts. */}
+      <LogoutForm>
         <Button type="submit" variant="text" className="w-full">
           Log out
         </Button>
-      </form>
+      </LogoutForm>
     </AuthCard>
   );
 }

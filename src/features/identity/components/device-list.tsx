@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { motion, useReducedMotion } from "motion/react";
 
 import { Button } from "@/components/ui/button";
+import { postUserCachePurge } from "@/lib/pwa/logout-purge";
 
 import { revokeDevice } from "../actions";
 import { GENERIC_FAILURE, reportThrown } from "../messages";
@@ -69,6 +70,14 @@ export function DeviceList({ devices: initial }: DeviceListProps) {
 
       if (result.signedOut) {
         // This session is genuinely over - the action called auth.signOut().
+        // Same purge as the Log out button, for the same reason: the documents
+        // this consumer's /home and /wallet were rendered into are sitting in
+        // `giya-pages-*` with their name and balance in the HTML, and the next
+        // person to sign in on this phone must not be served them. Never
+        // throws, never awaited; see src/lib/pwa/logout-purge.ts.
+        postUserCachePurge(
+          typeof navigator === "undefined" ? undefined : navigator.serviceWorker,
+        );
         // `replace`, not `push`: there is nothing to go back to.
         router.replace("/login");
         return;
