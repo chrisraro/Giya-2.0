@@ -40,27 +40,47 @@ export function OfflineBanner() {
       </span>
       {/*
         EVERY CLAIM IN THIS SENTENCE MUST BE TRUE AT THE MOMENT IT SHIPS.
-        It is deliberately narrower than doc 41's eventual offline story, and
-        that is not an oversight.
 
-        It used to read "You are offline. Scanned receipts will be queued in
-        your outbox." Nothing enqueues: `src/features/pwa/outbox.ts` has no
-        callers, so that sentence promised a consumer their basement scan was
-        safe when it was not. T5.3 is the task that builds the outbox and the
-        wallet snapshot; T5.3 IS ALSO THE TASK THAT MAY WIDEN THIS STRING, and
-        only once the enqueue call it describes exists.
+        HISTORY, BECAUSE IT IS THE POINT. It once read "You are offline.
+        Scanned receipts will be queued in your outbox." Nothing enqueued:
+        `src/features/pwa/outbox.ts` had no callers, so that sentence told a
+        consumer their basement scan was safe when it was not. T5.2 cut it back
+        to the two things T5.1 had actually shipped and named T5.3 as the task
+        allowed to widen it, "only once the enqueue call it describes exists".
 
-        What is true today, and all that is claimed: the connection is down,
-        and the NetworkFirst pages route (src/lib/pwa/runtime-caching.ts, row
-        1) answers a navigation from Cache Storage when the network does not.
-        "Pages saved on this device" rather than "your cards and rewards"
-        because a page never opened here - or not opened since the last deploy,
-        as cache names carry the build id - is not saved, and falls through to
-        /offline.
+        THAT CALL NOW EXISTS. `receipt-capture.tsx` sends a capture that failed
+        for want of a connection to `enqueueCapturedReceipt`, which either
+        writes it to IndexedDB or refuses and says so. The second clause is
+        earned, and offline-banner.test.tsx drives that whole flow rather than
+        taking this comment's word for it.
+
+        WHAT IS CLAIMED, AND WHY EACH PART SURVIVES EVERY PATH:
+
+          "Pages saved on this device still work" - the NetworkFirst pages route
+          (src/lib/pwa/runtime-caching.ts, row 1) answers a navigation from
+          Cache Storage when the network does not. Not "your cards and rewards":
+          a page never opened here, or not opened since the last deploy (cache
+          names carry the build id), is not saved and falls through to /offline.
+
+          "queued receipts are still on this phone" - a statement about the rows
+          that ARE in the outbox, in the present tense. It survives the two
+          paths where an enqueue is refused, because a capture the 10-item cap
+          or a full disk turned away never became a queued receipt and nothing
+          here speaks for it; those refusals do their own telling, on the scan
+          screen, in the words in features/pwa/outbox-copy.ts.
+
+        WHAT IS DELIBERATELY NOT CLAIMED. Not "safe", and nothing in the future
+        tense. Doc 41 section 8 is explicit that iOS can evict the outbox after
+        about seven days of Safari non-use, and that "if eviction still claims
+        the outbox, the receipt is gone and we never pretend otherwise". A pill
+        promising safety would be pretending otherwise.
       */}
       {/* `&apos;` (U+0027) not `&rsquo;`, matching the rest of the app's JSX
           copy - the escape is react/no-unescaped-entities, not typography. */}
-      <span>You&apos;re offline. Pages saved on this device still work.</span>
+      <span>
+        You&apos;re offline. Pages saved on this device still work, and queued receipts are still on
+        this phone.
+      </span>
     </motion.div>
   );
 }
