@@ -1291,13 +1291,52 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0062_feature_flags.sql | 20260806142215 | 0062_feature_flags |
 | 0063_find_auth_user_by_email.sql | 20260806181414 | 0063_find_auth_user_by_email |
 | 0064_avatars_storage.sql | 20260806214609 | avatars_storage |
-| 0065_favorites.sql | (prepared for manual SQL / db push) | 0065_favorites |
-| 0066_loyalty_cards.sql | (prepared for manual SQL / db push) | 0066_loyalty_cards |
-| 0067_business_documents.sql | (prepared for manual SQL / db push) | 0067_business_documents |
-| 0068_analytics_rollup.sql | (prepared for manual SQL / db push) | 0068_analytics_rollup |
-| 0069_qr_codes.sql | (prepared for manual SQL / db push) | 0069_qr_codes |
-| 0070_announcements_legal.sql | (prepared for manual SQL / db push) | 0070_announcements_legal |
-| 0071_settings.sql | (prepared for manual SQL / db push) | 0071_settings |
+| 0065_favorites.sql | **NO ROW — objects ARE live** | (unrecorded) |
+| 0066_loyalty_cards.sql | **NO ROW — objects ARE live** | (unrecorded) |
+| 0067_business_documents.sql | **NO ROW — objects ARE live** | (unrecorded) |
+| 0068_analytics_rollup.sql | **NO ROW — table live, rollup fn ABSENT** | (unrecorded) |
+| 0069_qr_codes.sql | **NO ROW — objects ARE live** | (unrecorded) |
+| 0070_announcements_legal.sql | **NO ROW — objects ARE live** | (unrecorded) |
+| 0071_settings.sql | **NO ROW — objects ARE live** | (unrecorded) |
+| 0072_partitioning_helpers.sql | **NO ROW — not verified** | (unrecorded) |
+| 0073_enterprise_sso.sql | **NO ROW — NOT APPLIED** (`sso_connections` absent) | (unrecorded) |
+| 0074_seed_admin.sql | **NO ROW — not verified** | (unrecorded) |
+| 0075_clear_business_data.sql | (a maintenance script, not a schema migration) | — |
+| 0076_purge_business_rpc.sql | **NO ROW — NOT APPLIED** (`purge_business_data` absent) | (unrecorded) |
+| 0077_force_delete_business.sql | **NO ROW — function IS live** | (unrecorded) |
+
+### ⚠️ Ledger divergence, verified live 2026-08-16
+
+**The ledger's newest row is `20260806214609` (`avatars_storage`, file 0064).
+Thirteen migration files exist above it and NONE has a ledger row — yet most of
+their objects are deployed.** This is the 0047 out-of-band class again, now at
+scale, and it is uneven in a way that makes the files an unreliable guide to
+what is running:
+
+| Verified live | Verified ABSENT |
+|---|---|
+| `favorites`, `loyalty_cards`, `business_documents`, `analytics_daily_business`, `qr_codes`, `announcements`, `legal_versions`, `settings`, `force_delete_business()` | `sso_connections` (0073), `purge_business_data()` (0076), any analytics-rollup function (0068), any loyalty-progression function |
+
+Read that table twice before touching anything here. `0076_purge_business_rpc.sql`
+is **not** deployed while `0077_force_delete_business.sql` **is** — so the two
+halves of the business-deletion feature are in different states, and the admin
+UI that calls them cannot be reasoned about from the files alone.
+
+Two consequences that will bite:
+
+1. **`supabase db push` would attempt to re-apply all thirteen.** For the ones
+   already live that means re-running `create table` / `create policy`
+   statements against existing objects. Check each file's idempotency before
+   any push, and prefer `supabase migration repair --status applied <version>`
+   for the ones confirmed deployed.
+2. **The ledger can no longer answer "what is deployed?"** Until it is
+   reconciled, `pg_proc` / `to_regclass` / `pg_policies` are the only sources of
+   truth — exactly the position the 0057 incident put us in, where a migration
+   was recorded as applied and its central function had never landed.
+
+Nothing here was reconstructed: every cell above came from a live
+`to_regclass` / `pg_proc` query, not from reading the migration files. Do not
+fill in a version number by guessing — that is how 0047 became hard to untangle.
 
 **0062 and 0063 were applied live but committed without a ledger row here.**
 T3.4a found the gap and recorded it rather than inventing versions — the right
