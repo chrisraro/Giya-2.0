@@ -115,7 +115,18 @@ const nextConfig: NextConfig = {
     // CHILD compilation, which inherits the parent's plugin taps, so a
     // DefinePlugin registered here reaches it.
     config.plugins.push(
-      new webpack.DefinePlugin({ __GIYA_BUILD_ID__: JSON.stringify(BUILD_ID) }),
+      new webpack.DefinePlugin({
+        __GIYA_BUILD_ID__: JSON.stringify(BUILD_ID),
+        // src/lib/pwa/buckets.ts reads this to decide whose storage origin is
+        // cacheable. Next inlines NEXT_PUBLIC_* into the app bundle, but the
+        // worker is a separate child compilation and this is the substitution
+        // that is verifiable rather than assumed. Empty string when unset, so
+        // the matcher fails closed and caches nothing rather than caching
+        // anyone's bytes.
+        "process.env.NEXT_PUBLIC_SUPABASE_URL": JSON.stringify(
+          process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
+        ),
+      }),
     );
     return config;
   },

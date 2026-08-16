@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PUBLIC_MEDIA_BUCKETS, isPublicBucket } from "./buckets";
 
@@ -27,6 +27,17 @@ const publicObject = (bucket: string, object = "a1b2/photo.jpg") =>
   `${PROJECT}/storage/v1/object/public/${bucket}/${object}`;
 const signedObject = (bucket: string, object = "a1b2/photo.jpg") =>
   `${PROJECT}/storage/v1/object/sign/${bucket}/${object}?token=eyJhbGciOiJIUzI1NiJ9.signature`;
+
+// The allowed origin is derived from NEXT_PUBLIC_SUPABASE_URL, which Next
+// inlines at build time and next.config.ts also substitutes into the service
+// worker bundle explicitly.
+beforeEach(() => {
+  vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", PROJECT);
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("isPublicBucket - private buckets", () => {
   it("CRITICAL: a signed receipts URL is not cacheable", () => {
@@ -121,10 +132,100 @@ describe("isPublicBucket - public buckets", () => {
   });
 });
 
+describe("isPublicBucket - the URL has to be OUR storage", () => {
+  // The bucket allowlist says which PATHS are cacheable and says nothing about
+  // whose server answers them. Without an origin check, anyone who can get a
+  // URL in front of the app - a merchant filling in a banner image field, a CMS
+  // field, a review body - can pin arbitrary bytes CacheFirst on a consumer's
+  // device for seven days with no revalidation, outliving moderation or a
+  // takedown. No Giya data leaks: the attacker's bytes cache under the
+  // attacker's URL. What leaks is the app's storage budget and its ability to
+  // ever stop showing that image.
+
+  it("CRITICAL: refuses an unrelated origin serving the same path shape", () => {
+    expect(
+      isPublicBucket("https://evil.example.com/storage/v1/object/public/avatars/a1b2/photo.jpg"),
+    ).toBe(false);
+  });
+
+  it("CRITICAL: refuses a lookalike host that BEGINS with our project host", () => {
+    // "zlfxfzlnklqhajacngxf.supabase.co.evil.com" is evil.com. Any check done
+    // with `includes` or `startsWith` on the host takes it.
+    expect(
+      isPublicBucket(
+        "https://zlfxfzlnklqhajacngxf.supabase.co.evil.com/storage/v1/object/public/products/a1b2/photo.jpg",
+      ),
+    ).toBe(false);
+  });
+
+  it("CRITICAL: refuses a DIFFERENT Supabase project on the same domain", () => {
+    // The one a `.supabase.co` suffix check waves straight through, and the
+    // easiest attack of the lot: anyone can create a Supabase project, make a
+    // bucket public, and hand us a URL that is genuinely hosted on
+    // supabase.co. The comparison has to be the whole origin, project
+    // subdomain included.
+    expect(
+      isPublicBucket("https://attacker.supabase.co/storage/v1/object/public/avatars/a1b2/photo.jpg"),
+    ).toBe(false);
+  });
+
+  it("CRITICAL: refuses a userinfo prefix that reads like our host", () => {
+    // `https://host@evil.com/...` fetches from evil.com. It is the oldest
+    // phishing shape there is and it beats any check done on the raw string
+    // rather than on the parsed origin.
+    expect(
+      isPublicBucket(
+        "https://zlfxfzlnklqhajacngxf.supabase.co@evil.com/storage/v1/object/public/avatars/a1b2/photo.jpg",
+      ),
+    ).toBe(false);
+  });
+
+  it("CRITICAL: refuses a hostile origin smuggled through next/image", () => {
+    const inner = encodeURIComponent(
+      "https://evil.example.com/storage/v1/object/public/avatars/a1b2/photo.jpg",
+    );
+    expect(isPublicBucket(`https://giya.ph/_next/image?url=${inner}&w=640`)).toBe(false);
+  });
+
+  it("CRITICAL: caches nothing at all when the storage URL is not configured", () => {
+    // Fail closed. An unset NEXT_PUBLIC_SUPABASE_URL means we cannot say whose
+    // server this is, and "cache nothing" costs a refetch while "cache
+    // anything" is the whole problem above.
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "");
+    expect(isPublicBucket(publicObject("avatars"))).toBe(false);
+  });
+
+  it("keeps working when the storage URL is a custom domain", () => {
+    // Derived from the env var rather than hardcoded to `.supabase.co`, so a
+    // project behind its own storage hostname is not silently uncached.
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://cdn.giya.ph");
+    expect(
+      isPublicBucket("https://cdn.giya.ph/storage/v1/object/public/products/a1b2/photo.jpg"),
+    ).toBe(true);
+    expect(isPublicBucket(publicObject("products"))).toBe(false);
+  });
+});
+
 describe("isPublicBucket - refusals that are not about buckets", () => {
   it("refuses a bucket whose name merely starts with a public one", () => {
     expect(isPublicBucket(publicObject("avatarsx"))).toBe(false);
     expect(isPublicBucket(publicObject("rewards-private"))).toBe(false);
+  });
+
+  it("compares the bucket name after percent-decoding it", () => {
+    // Decoding BEFORE the allowlist comparison is the safe direction: it is
+    // what makes `%72eceipts` resolve to `receipts` and be refused, rather than
+    // sailing past a list that only knows the literal spelling. The accepted
+    // case is what proves the decode actually runs.
+    expect(isPublicBucket(publicObject("%61vatars"))).toBe(true);
+    expect(isPublicBucket(publicObject("%72eceipts"))).toBe(false);
+  });
+
+  it("refuses a malformed percent-escape instead of throwing on it", () => {
+    // decodeURIComponent("%zz") throws a URIError. A matcher that throws takes
+    // the worker's whole fetch handler down with it.
+    expect(() => isPublicBucket(publicObject("%zz"))).not.toThrow();
+    expect(isPublicBucket(publicObject("%zz"))).toBe(false);
   });
 
   it("refuses a bucket root with no object after it", () => {

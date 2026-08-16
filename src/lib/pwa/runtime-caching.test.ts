@@ -7,7 +7,8 @@ import {
   type RuntimeCaching,
   type Strategy,
 } from "serwist";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { vi } from "vitest";
 
 import { giyaRouteSpecs, matchGiyaRoute, toRuntimeCaching } from "./runtime-caching";
 
@@ -35,6 +36,16 @@ const BUILD = "5aaf2ff";
 
 const ORIGIN = "https://giya.ph";
 const SUPABASE = "https://zlfxfzlnklqhajacngxf.supabase.co";
+
+// The image row delegates to isPublicBucket, which only accepts objects on the
+// configured storage origin. See buckets.test.ts for why that check exists.
+beforeEach(() => {
+  vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", SUPABASE);
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 function match(
   href: string,
