@@ -8,6 +8,7 @@ import {
 import { submitCapturedReceipt } from "../features/receipts/upload";
 import { isStaleGiyaCache } from "../lib/pwa/cache-names";
 import { OUTBOX_CHANGED_MESSAGE, swMessageAction } from "../lib/pwa/messages";
+import { purgeUserCaches } from "../lib/pwa/purge";
 import { giyaRouteSpecs, toRuntimeCaching } from "../lib/pwa/runtime-caching";
 
 /**
@@ -37,7 +38,15 @@ type ServiceWorkerScope = {
   /** Injected by @serwist/next's InjectManifest: the precache manifest. */
   readonly __SW_MANIFEST: (PrecacheEntry | string)[] | undefined;
   skipWaiting(): Promise<void>;
-  addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
+  /**
+   * `ExtendableMessageEvent`. `waitUntil` is the half that matters for the
+   * logout purge: the page posts and immediately navigates to /login, so
+   * without it the browser is free to kill an idle worker mid-delete.
+   */
+  addEventListener(
+    type: "message",
+    listener: (event: { data: unknown; waitUntil(promise: Promise<unknown>): void }) => void,
+  ): void;
   addEventListener(
     type: "activate",
     listener: (event: { waitUntil(promise: Promise<unknown>): void }) => void,
@@ -81,10 +90,23 @@ const serwist = new Serwist({
 });
 
 // Doc 41 section 1: `{type, payload?}`, unknown types ignored. The parsing and
-// the "what does this mean" decision are in ../lib/pwa/messages.ts.
+// the "what does this mean" decision are in ../lib/pwa/messages.ts; WHICH caches
+// a purge removes is in ../lib/pwa/purge.ts. Both are tested by execution.
 self.addEventListener("message", (event) => {
-  if (swMessageAction(event.data) === "skip-waiting") {
+  const action = swMessageAction(event.data);
+
+  if (action === "skip-waiting") {
     void self.skipWaiting();
+    return;
+  }
+
+  // Doc 41 preamble rule 2: caches are purged on deploy AND ON LOGOUT. Inside
+  // `waitUntil` because the page that posted this is on its way to /login and
+  // may be gone a millisecond later; an idle worker with nothing extending it
+  // can be killed with the delete half-done, which is the exposure this exists
+  // to close.
+  if (action === "purge-user-caches") {
+    event.waitUntil(purgeUserCaches(caches));
   }
 });
 

@@ -1,14 +1,28 @@
 /**
  * The service-worker <-> app message registry (doc 41 section 1).
  *
- * Doc 41 specifies five `postMessage` types. This task implements exactly one -
- * `SKIP_WAITING`, the accept side of the update flow (section 7) - and declares
- * the rest so the tasks that own them extend this union instead of inventing
- * their own string literals:
+ * Doc 41 specifies five `postMessage` types. Three are implemented:
  *
- *   SET_USER, PURGE_USER_CACHES  T5.3, with the per-user me-cache
- *   OUTBOX_CHANGED               T5.3, with the IndexedDB receipt outbox
- *   NAVIGATE                     the push work, with `notificationclick`
+ *   SKIP_WAITING       T5.1, the accept side of the update flow (section 7)
+ *   OUTBOX_CHANGED     T5.3a, SW -> app after a Background Sync replay
+ *   PURGE_USER_CACHES  T5.3b, the logout purge (preamble rule 2, section 8)
+ *
+ * Two are declared and not implemented:
+ *
+ *   SET_USER   NOBODY OWNS THIS YET, and it must not be implemented for its own
+ *              sake. Doc 41 gives it exactly one job: telling the worker which
+ *              user the per-user me-cache name (`giya-me-{buildId}-{userIdHash}`)
+ *              belongs to. That cache is section 4's, which is DEFERRED - the
+ *              three consumer pages are `force-dynamic` server components, there
+ *              is no client fetching of `/api/v1/me/*` and no TanStack Query, so
+ *              a me-cache would cache routes with no callers. See
+ *              docs/superpowers/plans/2026-08-06-missing-modules.md, Wave 5.
+ *              Until that redesign happens, a SET_USER handler would be state
+ *              the worker stores and never reads: a field whose removal changes
+ *              nothing. The logout purge deliberately does NOT need it - it
+ *              deletes by cache CLASS, not by user, so it is correct without the
+ *              worker ever having been told who was signed in.
+ *   NAVIGATE   the push work, with `notificationclick`
  *
  * The protocol is forward-compatible: unknown types are IGNORED, never thrown
  * on. That matters most during a deploy, when an old worker still controls a
@@ -48,6 +62,18 @@ export const SKIP_WAITING_MESSAGE: SwMessage = { type: "SKIP_WAITING" };
 export const OUTBOX_CHANGED_MESSAGE: SwMessage = { type: "OUTBOX_CHANGED" };
 
 /**
+ * What the app posts on the way out of a session (doc 41 preamble rule 2,
+ * section 8). App -> SW.
+ *
+ * NO PAYLOAD, AND THAT IS THE DESIGN. The worker deletes by cache CLASS - every
+ * `giya-pages-*` and `giya-me-*` - not by user, so it does not need to be told
+ * whose session just ended, and cannot get it wrong if the answer arrives late
+ * or not at all. See ./purge.ts for which classes and why the pages cache is one
+ * of them.
+ */
+export const PURGE_USER_CACHES_MESSAGE: SwMessage = { type: "PURGE_USER_CACHES" };
+
+/**
  * A declared message, or `null` for anything unrecognised or malformed.
  *
  * Never throws. Anything running on the page can `postMessage` at a service
@@ -65,8 +91,8 @@ export function parseSwMessage(data: unknown): SwMessage | null {
     : { type: type as SwMessageType, payload };
 }
 
-/** The actions this worker implements. T5.3 and the push work add to this. */
-export type SwMessageAction = "skip-waiting" | "ignore";
+/** The actions this worker implements. The push work adds to this. */
+export type SwMessageAction = "skip-waiting" | "purge-user-caches" | "ignore";
 
 /**
  * What the worker should do with an inbound message.
@@ -82,10 +108,14 @@ export function swMessageAction(data: unknown): SwMessageAction {
   switch (message.type) {
     case "SKIP_WAITING":
       return "skip-waiting";
-    // Declared by doc 41, implemented by later tasks. Falling through to
-    // "ignore" is the correct interim behaviour, not an oversight.
-    case "SET_USER":
     case "PURGE_USER_CACHES":
+      return "purge-user-caches";
+    // OUTBOX_CHANGED travels the other way (SW -> app) and is handled by
+    // src/components/pwa/receipt-outbox.tsx, so the worker ignoring it is
+    // correct rather than pending. SET_USER and NAVIGATE are declared and
+    // unimplemented; see this file's header for who owns them and why SET_USER
+    // has deliberately not been given a handler.
+    case "SET_USER":
     case "OUTBOX_CHANGED":
     case "NAVIGATE":
       return "ignore";
