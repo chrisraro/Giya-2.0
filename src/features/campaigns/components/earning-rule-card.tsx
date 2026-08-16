@@ -12,6 +12,10 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { formatPeso, pesoToCentavos } from "@/lib/money";
 import { describeBaseRule } from "@/features/businesses/activation/presenter";
+import {
+  ScanPreview,
+  type ScanPreviewRule,
+} from "@/features/receipts/components/scan-preview";
 
 import { roundingSchema } from "../schemas";
 import type { BaseRuleInput } from "../schemas";
@@ -112,6 +116,30 @@ export function EarningRuleCard({ baseRule, onSave }: EarningRuleCardProps) {
   } = useForm<EditFormValues>({ resolver: zodResolver(editFormSchema), defaultValues });
 
   const ruleType = useWatch({ control, name: "ruleType" });
+  const watchedRate = useWatch({ control, name: "rate" });
+  const watchedRounding = useWatch({ control, name: "rounding" });
+
+  /**
+   * The rule the "test a receipt" preview computes under: the one in the FORM,
+   * not the one in the database.
+   *
+   * That is the whole point of the control. A merchant moving from 1 point per
+   * ₱100 to 1 point per ₱50 is asking what the new rule pays, and a preview
+   * answering from `baseRule` would confidently show them the old number on the
+   * screen where they are choosing the new one.
+   *
+   * null for anything there is no honest amount-based answer for:
+   *  - `fixed_per_visit` awards the same points whatever the receipt says, so a
+   *    peso field would be a control that cannot change its own output.
+   *  - a rate that does not parse, or is not positive, is a half-typed one.
+   */
+  const previewRule = React.useMemo<ScanPreviewRule | null>(() => {
+    if (ruleType !== "amount_rate") return null;
+    if (!watchedRate || !isValidPeso(watchedRate)) return null;
+    const rateCentavosPerPoint = pesoToCentavos(watchedRate);
+    if (rateCentavosPerPoint <= 0) return null;
+    return { rateCentavosPerPoint, rounding: watchedRounding };
+  }, [ruleType, watchedRate, watchedRounding]);
 
   function openEdit() {
     reset(defaultValues);
@@ -264,6 +292,20 @@ export function EarningRuleCard({ baseRule, onSave }: EarningRuleCardProps) {
             </Button>
           </div>
         </form>
+
+        {/* OUTSIDE the <form>, deliberately. A number input inside a form
+            submits it on Enter, and a merchant who types a test amount and hits
+            Enter would save a rule they were still deciding on. */}
+        {previewRule === null ? null : (
+          <div className="mt-4">
+            <ScanPreview
+              rule={previewRule}
+              heading="Test a receipt"
+              description="Enter a receipt total to see what this rule would award."
+              footnote="Base rule only. Any live campaign multipliers or bonuses are added on top."
+            />
+          </div>
+        )}
       </CardContent>
     </Card>
   );

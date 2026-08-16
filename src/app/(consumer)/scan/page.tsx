@@ -1,12 +1,15 @@
 import type { Metadata } from "next";
 
+import { listActiveBusinesses } from "@/features/businesses/server/public-repo";
 import { ReceiptCapture } from "@/features/receipts/components/receipt-capture";
 import { ScanBusinessChooser } from "@/features/receipts/components/scan-business-chooser";
+import { ScanPreview } from "@/features/receipts/components/scan-preview";
 import {
   parseBusinessIdParam,
   parseStoreQueryParam,
   shouldShowOcrStubNote,
 } from "@/features/receipts/scan-entry";
+import { loadScanPreviewRule } from "@/features/receipts/server/preview-rule";
 import { loadScanTargets } from "@/features/receipts/server/scan-targets";
 
 export const metadata: Metadata = {
@@ -66,6 +69,21 @@ export default async function ScanPage({
     ocrServiceUrl: process.env.OCR_SERVICE_URL,
   });
 
+  // THE ESTIMATE IS OPTIONAL; THE CAMERA IS NOT.
+  //
+  // Both reads exist only to feed the "~N pts at <shop>" preview, and both
+  // degrade to "no preview" rather than take down the capture flow, which is
+  // the money path this page exists for. The rule read throws on a query error
+  // (house convention) and is caught here, deliberately, for that reason.
+  const [boundBusinesses, previewRule] = await Promise.all([
+    listActiveBusinesses({ ids: [businessId], limit: 1 }),
+    loadScanPreviewRule(businessId).catch((error: unknown) => {
+      console.error("[scan] preview rule read failed; rendering /scan without the estimate", error);
+      return null;
+    }),
+  ]);
+  const boundBusiness = boundBusinesses[0] ?? null;
+
   return (
     <main className="mx-auto flex max-w-md flex-col gap-4 px-4 pt-6 pb-8">
       <div>
@@ -76,6 +94,15 @@ export default async function ScanPage({
       </div>
 
       <ReceiptCapture businessId={businessId} showOcrStubNote={showOcrStubNote} />
+
+      {/* Rendered ONLY with both a shop to name and that shop's own rule to
+          compute under. ScanPreview falls back to 1 point per peso when given
+          no rule, and a shop earning 1 point per ₱50 would then be quoted
+          double what its receipts actually pay. Nothing beats a wrong number
+          here, so the guard is on the page rather than inside the component. */}
+      {boundBusiness === null || previewRule === null ? null : (
+        <ScanPreview businessName={boundBusiness.name} rule={previewRule} />
+      )}
     </main>
   );
 }
