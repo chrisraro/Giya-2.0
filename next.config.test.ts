@@ -255,6 +255,49 @@ describe("service worker build wiring", () => {
     // because it is THIS file's wrapper that can break it, and a 1 MB cap on
     // avatar uploads was a Critical on an earlier task.
     expect(typeof nextConfig.experimental?.serverActions?.bodySizeLimit).toBe("number");
-    expect(nextConfig.webpack).toBeTypeOf("function");
+  });
+
+  it("CRITICAL: our webpack hook is actually composed into the exported config", () => {
+    // NOT `expect(nextConfig.webpack).toBeTypeOf("function")`. That was the
+    // assertion here before, and it is satisfied by Serwist rather than by us:
+    // the wrapper ALWAYS adds a `webpack` key, so it passed whether or not our
+    // hook was wired into it.
+    //
+    // Deleting `webpack: defineBuildConstants` from nextConfig therefore left
+    // the whole suite green AND the build green, and shipped a public/sw.js
+    // containing the bare identifier `__GIYA_BUILD_ID__` - a ReferenceError the
+    // instant the worker evaluates. The worker never installs, no cache is ever
+    // created, `/offline` never answers, and assertBuildIdIsReal never fires
+    // either, because the hook it lives in is gone.
+    //
+    // So this drives the DEFAULT export's webpack function - Serwist's wrapper,
+    // which calls ours - and asserts the substitution comes out the far end.
+    // That is composition, not the presence of a key.
+    class FakeDefinePlugin {
+      constructor(readonly definitions: Record<string, string>) {}
+    }
+
+    const config: { plugins: unknown[]; entry: () => Promise<unknown> } = {
+      plugins: [],
+      entry: async () => ({}),
+    };
+
+    // `isServer: true` keeps Serwist out of its client-only branch, which globs
+    // the filesystem and registers InjectManifest; `dev: true` keeps the
+    // build-id assertion quiet, since a test run has no real build id.
+    nextConfig.webpack?.(config, {
+      webpack: { DefinePlugin: FakeDefinePlugin },
+      dev: true,
+      isServer: true,
+      dir: ROOT,
+      config: { basePath: "" },
+    } as never);
+
+    const defined = (config.plugins as FakeDefinePlugin[])
+      .filter((plugin) => plugin instanceof FakeDefinePlugin)
+      .flatMap((plugin) => Object.keys(plugin.definitions));
+
+    expect(defined).toContain("__GIYA_BUILD_ID__");
+    expect(defined).toContain("process.env.NEXT_PUBLIC_SUPABASE_URL");
   });
 });

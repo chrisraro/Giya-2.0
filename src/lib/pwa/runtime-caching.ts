@@ -84,8 +84,13 @@ const FONT_FILE = /\.(?:woff2?|ttf|otf|eot)$/;
  *
  * Whole path segments only: `/businesses` is the public directory a consumer
  * browses and must keep its offline fallback.
+ *
+ * `\/+` rather than `\/` because `//business/dashboard` is a path the server
+ * really answers - it 308s to `/business/dashboard` and serves the merchant's
+ * dashboard - while `new URL(...).pathname` preserves the double slash, so a
+ * single-slash anchor misses it and row 1 would claim the document.
  */
-const PORTAL_PATH = /^\/(?:business|admin)(?:\/|$)/;
+const PORTAL_PATH = /^\/+(?:business|admin)(?:\/|$)/;
 
 export function giyaRouteSpecs(buildId: string): readonly GiyaRouteSpec[] {
   return [

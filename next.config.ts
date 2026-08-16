@@ -214,11 +214,16 @@ export function defineBuildConstants(config: { plugins?: unknown[] }, { webpack,
     new webpack.DefinePlugin({
       __GIYA_BUILD_ID__: JSON.stringify(BUILD_ID),
       // src/lib/pwa/buckets.ts reads this to decide whose storage origin is
-      // cacheable. Next inlines NEXT_PUBLIC_* into the app bundle, but the
-      // worker is a separate child compilation and this is the substitution
-      // that is verifiable rather than assumed. Empty string when unset, so the
-      // matcher fails closed and caches nothing rather than caching anyone's
-      // bytes.
+      // cacheable.
+      //
+      // BELT AND BRACES, NOT LOAD-BEARING. Next inlines NEXT_PUBLIC_* into the
+      // service worker's child compilation on its own - measured: removing this
+      // line and rebuilding still emits the origin as a string literal in
+      // public/sw.js, with no bare `process.env` reference left behind. It is
+      // kept because the substitution the security boundary depends on should
+      // be visible in this file rather than inferred from framework behaviour,
+      // and because `?? ""` pins the unset case to an empty string, which is
+      // what makes the matcher fail closed.
       "process.env.NEXT_PUBLIC_SUPABASE_URL": JSON.stringify(
         process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
       ),

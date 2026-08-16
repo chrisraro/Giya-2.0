@@ -179,6 +179,21 @@ describe("what deliberately gets no route, and is therefore NetworkOnly", () => 
     expect(match(`${ORIGIN}/admin`, { mode: "navigate" })).toBeNull();
   });
 
+  it("CRITICAL: a leading double slash does not smuggle a portal path past the exclusion", () => {
+    // `//business/dashboard` is a same-origin path the server answers: it 308s
+    // to /business/dashboard and serves the merchant's real dashboard. But
+    // `new URL(...).pathname` preserves the double slash, so an anchored
+    // `^\/business` misses it and row 1 claims the document.
+    //
+    // Reachability is low - an href="//business/dashboard" is protocol-relative
+    // and goes to a different HOST, so this needs a pasted URL or a
+    // string-concatenated location.assign - but it is exactly the property the
+    // exclusion exists to hold, and "hard to reach" is not "cannot happen".
+    expect(match(`${ORIGIN}//business/dashboard`, { mode: "navigate" })).toBeNull();
+    expect(match(`${ORIGIN}///admin/receipts`, { mode: "navigate" })).toBeNull();
+    expect(match(`${ORIGIN}//business`, { mode: "navigate" })).toBeNull();
+  });
+
   it("still caches consumer routes whose names merely start like a portal one", () => {
     // The exclusion is on whole path segments. `/businesses` is the public
     // directory a consumer browses, and losing its offline fallback to a prefix

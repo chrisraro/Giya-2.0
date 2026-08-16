@@ -180,6 +180,18 @@ describe("isPublicBucket - the URL has to be OUR storage", () => {
     ).toBe(false);
   });
 
+  it("CRITICAL: refuses plain http on our own host", () => {
+    // The one place a whole-ORIGIN comparison differs from a host comparison,
+    // and the reason to prefer it. Same host, same path, downgraded scheme: the
+    // response is attacker-modifiable in transit, and CacheFirst would pin
+    // whatever came back for seven days. `host.endsWith(ourHost)` accepts this.
+    expect(
+      isPublicBucket(
+        "http://zlfxfzlnklqhajacngxf.supabase.co/storage/v1/object/public/avatars/a1b2/photo.jpg",
+      ),
+    ).toBe(false);
+  });
+
   it("CRITICAL: refuses a hostile origin smuggled through next/image", () => {
     const inner = encodeURIComponent(
       "https://evil.example.com/storage/v1/object/public/avatars/a1b2/photo.jpg",
