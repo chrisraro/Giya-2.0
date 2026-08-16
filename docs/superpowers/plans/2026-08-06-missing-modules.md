@@ -122,7 +122,28 @@
 
 - **T5.1 Service worker + manifest.** Serwist: precache shell, runtime caching per doc (supabase-img CacheFirst, tiles CacheFirst capped, pages NetworkFirst); manifest fixes (`id`, `start_url`, `orientation`, `lang`, `shortcuts`, maskable raster icons); build-id versioning + skipWaiting update toast; SW scoped out of `(business)`/`(admin)`.
 - **T5.2 Offline UX.** `/offline` fallback; `useOnlineStatus()` + global offline pill; install prompt after first approved scan (`beforeinstallprompt` + iOS instructions).
-- **T5.3 Offline outbox.** IndexedDB (`giya-offline`) receipt outbox: capture offline → queue → auto-submit on reconnect (reuses idempotency key design); wallet snapshot store + staleness banner. Redemption stays online-only (keep).
+- **T5.3 Offline outbox.** IndexedDB (`giya-offline`) receipt outbox: capture offline → queue → auto-submit on reconnect (reuses idempotency key design); wallet snapshot store + staleness banner. Redemption stays online-only (keep). Split into T5.3a (the durable outbox) and T5.3b (logout cache purge + user-scoped outbox).
+
+### Deferred in Wave 5: doc 41 §4, offline wallet viewing (user decision, T5.3b)
+
+Doc 41 §4 ("Offline data strategy") is **not built**, and the wallet snapshot store and staleness banner named in T5.3 above go with it. This is a deferral, not an omission, and the reason is that §4 describes an application this one is not.
+
+§4 builds offline wallet viewing on two things: the §1 "own-user NetworkFirst API cache" (`giya-me-*`), and a `wallet_snapshot` IndexedDB store *"used by TanStack Query as `initialData` hydration"*. Both presume a client-fetching SPA. What is actually in the repo:
+
+- `/wallet`, `/rewards` and `/cards` are **server components** with `export const dynamic = "force-dynamic"`, reading Supabase directly through `createClient()`. The points balance and the claims are rendered into the HTML on the server.
+- **TanStack Query is not a dependency**, and adopting it is itself on the Deferred list below ("repo convention is RSC + server actions").
+- **Nothing client-side fetches `/api/v1/me/*`.** Only `me/receipts` and `me/receipts/[receiptId]` exist, and neither has a client consumer.
+
+So the me-cache row would cache routes nobody calls, and `wallet_snapshot` would hydrate a query layer that does not exist. Building either would produce machinery that looks like the spec and does nothing, which is the failure mode this wave has already paid for four times.
+
+**What a redesign would have to decide.** Offline wallet viewing on an RSC app is a different design, not a missing row in a table:
+
+1. **What is cached: documents or data?** The pages cache already holds the rendered `/wallet` document, so a limited form of offline viewing exists today by accident. Doing it deliberately means deciding whether the offline view is that document (no staleness banner possible, because the HTML is fixed) or JSON hydrated into a client island (which means building the island, and the `/api/v1/me/*` client that would call it).
+2. **How staleness is shown.** §4's banner needs a fetched-at timestamp the consumer can see. A server-rendered document has no way to say "this is 3 hours old" after the fact without a client component reading its own cache metadata.
+3. **What the offline view must refuse.** Redemption stays online-only, so an offline wallet has to disable the actions that spend points rather than let them fail at the server. That is UI work on screens that currently assume a live session.
+4. **Where the purge lands.** Any per-user store added by that work must join the logout purge in `src/lib/pwa/purge.ts`, which is written to make adding one a single line.
+
+T5.3b built the security half of §1 instead: `PURGE_USER_CACHES`, and a purge that covers `giya-pages-*` because on this architecture the RSC document IS the user's data. See `src/lib/pwa/purge.ts`. Doc 41 §1's `SET_USER` message stays declared and unimplemented for the same reason the me-cache does; the outbox's own "who is signed in" problem is solved durably in `src/features/pwa/active-user.ts`, which explains why a posted message could not solve it.
 
 ## Wave 6 — Portal/admin completion
 
