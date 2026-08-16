@@ -145,6 +145,23 @@ describe("OfflineBanner", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("CRITICAL: cannot swallow a tap meant for the page underneath", () => {
+    // The other half of doc 41 section 9's "non-blocking", and the half a
+    // `role`/`aria-live` assertion says nothing about. The pill is fixed over
+    // the content, so without `pointer-events-none` it is a dead strip across
+    // the top of every consumer screen for as long as the connection is down -
+    // exactly when somebody is most likely to be tapping at things.
+    //
+    // Asserted on the class rather than by hit-testing because jsdom does not
+    // do layout or hit-testing at all: `elementFromPoint` returns null and
+    // every box is zero-sized, so there is no honest way to ask "what would
+    // this tap hit?" here. This pins the mechanism, and says so.
+    setOnline(false);
+    render(<OfflineBanner />);
+
+    expect(screen.getByRole("status").className).toContain("pointer-events-none");
+  });
+
   it("CRITICAL: skips the entrance animation for a consumer who asked for less motion", () => {
     // Doc 16: "DO gate animation behind reduced-motion". The pill slides down
     // from -12px at opacity 0; under reduced motion it must simply BE there.

@@ -244,6 +244,34 @@ describe("iOS, detected by capability and not by user agent", () => {
     expect(screen.queryByRole("button", { name: ACCEPT })).toBeNull();
   });
 
+  it("CRITICAL: spends one of the three lifetime asks, exactly as the native sheet does", () => {
+    // The intersection the other two describes leave open: the iOS block never
+    // looked at storage and the budget block never set up iOS, so guarding the
+    // `recordAsk` write with `capability === "native"` passed the whole suite.
+    //
+    // In production that mutant means the cap is never enforced on the ONE
+    // platform where the offer cannot be actioned in a single tap: the sheet
+    // returns on every approved receipt, forever, with a page of instructions.
+    pretendIOS(false);
+    render(<InstallPrompt />);
+    moment();
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(stored()?.asks).toBe(1);
+    expect(typeof stored()?.lastAskedAt).toBe("number");
+  });
+
+  it("CRITICAL: obeys the same cooldown and cap as the native sheet", () => {
+    // The other half of the same gap: a budget that is written but not read on
+    // this path would be just as useless.
+    pretendIOS(false);
+    seed({ asks: 3, lastAskedAt: Date.now() - 3650 * DAY_MS });
+    render(<InstallPrompt />);
+    moment();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("names no browser it cannot be sure of", () => {
     // Every iOS browser is WebKit and every one of them defines
     // navigator.standalone, so "Safari" would be wrong for a consumer using
@@ -302,6 +330,28 @@ describe("never when it is already installed", () => {
 
     expect(stored()?.installed).toBe(true);
     expect(stored()?.asks).toBe(0);
+  });
+
+  it("CRITICAL: spends the stashed event on install, so it cannot be offered again", () => {
+    // Storage is hostile here on purpose, and that is the whole test. With a
+    // writable store, dropping `deferredRef.current = null` from the
+    // `appinstalled` handler is invisible: `canAsk` refuses on the persisted
+    // `installed: true` record before the stale event is ever consulted.
+    //
+    // With nothing writable the record never persists, `canAsk` says yes, and
+    // a still-stashed event reads as `native` - so the consumer who has just
+    // finished installing is offered the install again. The clear is the only
+    // thing standing in the way.
+    installHostileLocalStorage();
+    render(<InstallPrompt />);
+    fireBeforeInstallPrompt();
+
+    act(() => {
+      window.dispatchEvent(new Event("appinstalled"));
+    });
+    moment();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("remembers an install that happened in an earlier session", () => {
