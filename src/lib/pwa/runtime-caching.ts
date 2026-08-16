@@ -131,7 +131,14 @@ function strategyFor(spec: GiyaRouteSpec): Strategy {
 
   switch (spec.strategy) {
     case "NetworkFirst":
-      return new NetworkFirst({ ...options, networkTimeoutSeconds: spec.networkTimeoutSeconds });
+      // Spread conditionally rather than passing `undefined`: the tsconfig sets
+      // exactOptionalPropertyTypes, so an explicit undefined is not the same as
+      // an absent key.
+      return new NetworkFirst(
+        spec.networkTimeoutSeconds === undefined
+          ? options
+          : { ...options, networkTimeoutSeconds: spec.networkTimeoutSeconds },
+      );
     case "StaleWhileRevalidate":
       return new StaleWhileRevalidate(options);
     case "CacheFirst":

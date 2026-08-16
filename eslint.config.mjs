@@ -12,6 +12,14 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Service worker build output: @serwist/next compiles src/app/sw.ts into
+    // public/ on every build. It is minified third-party-shaped code we did not
+    // write and cannot fix, and linting it buries real findings under ~90
+    // warnings about a bundler's output. The SOURCE, src/app/sw.ts, is linted.
+    "public/sw.js",
+    "public/sw.js.map",
+    "public/swe-worker-*.js",
+    "public/swe-worker-*.js.map",
   ]),
   {
     files: ["src/**/*.{ts,tsx}"],

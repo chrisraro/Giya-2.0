@@ -67,7 +67,9 @@ describe("manifest identity", () => {
     // module's reader, so this compares two independent derivations of the same
     // fact instead of a value against itself.
     const css = readFileSync(join(ROOT, "src/styles/md3-tokens.css"), "utf8");
-    const surface = /:root, \.light \{[^}]*--md-sys-color-surface:\s*(#[0-9a-f]{6})/is.exec(css)?.[1];
+    // No `s` flag: the target is ES2017, where dotAll is a syntax error, and
+    // `[^}]` already spans newlines.
+    const surface = /:root, \.light \{[^}]*--md-sys-color-surface:\s*(#[0-9a-f]{6})/i.exec(css)?.[1];
     expect(surface).toMatch(/^#[0-9a-f]{6}$/i);
     expect(manifest().theme_color).toBe(surface);
     expect(manifest().background_color).toBe(surface);

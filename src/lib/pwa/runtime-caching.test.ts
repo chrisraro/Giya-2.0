@@ -1,4 +1,12 @@
-import { CacheFirst, ExpirationPlugin, NetworkFirst, StaleWhileRevalidate } from "serwist";
+import {
+  CacheFirst,
+  ExpirationPlugin,
+  NetworkFirst,
+  StaleWhileRevalidate,
+  type RouteMatchCallback,
+  type RuntimeCaching,
+  type Strategy,
+} from "serwist";
 import { describe, expect, it } from "vitest";
 
 import { giyaRouteSpecs, matchGiyaRoute, toRuntimeCaching } from "./runtime-caching";
@@ -174,16 +182,35 @@ describe("cache configuration doc 41 section 1 specifies", () => {
 describe("translation into Serwist strategies", () => {
   const runtimeCaching = toRuntimeCaching(giyaRouteSpecs(BUILD));
 
+  /** `handler` is `Strategy | RouteHandlerCallback` in Serwist's types; ours is
+   *  always the former, and that is itself part of what is asserted. */
+  function strategyOf(route: RuntimeCaching | undefined): Strategy {
+    const handler = route?.handler;
+    if (typeof handler !== "object") throw new Error("expected a Strategy instance");
+    return handler as Strategy;
+  }
+
+  /** The matcher's argument names `ExtendableEvent`, which lives in TS's
+   *  webworker lib and is not in this project's `lib`. Derived from the
+   *  callback's own signature instead of written out. */
+  type MatchArgs = Parameters<RouteMatchCallback>[0];
+
+  function matches(route: RuntimeCaching | undefined, url: URL): unknown {
+    const matcher = route?.matcher;
+    if (typeof matcher !== "function") throw new Error("expected a matcher function");
+    return matcher({ url, sameOrigin: false, request: { destination: "image" } } as MatchArgs);
+  }
+
   it("produces one Serwist route per row, with the strategy each row names", () => {
     expect(runtimeCaching).toHaveLength(4);
-    expect(runtimeCaching[0]?.handler).toBeInstanceOf(NetworkFirst);
-    expect(runtimeCaching[1]?.handler).toBeInstanceOf(StaleWhileRevalidate);
-    expect(runtimeCaching[2]?.handler).toBeInstanceOf(CacheFirst);
-    expect(runtimeCaching[3]?.handler).toBeInstanceOf(NetworkFirst);
+    expect(strategyOf(runtimeCaching[0])).toBeInstanceOf(NetworkFirst);
+    expect(strategyOf(runtimeCaching[1])).toBeInstanceOf(StaleWhileRevalidate);
+    expect(strategyOf(runtimeCaching[2])).toBeInstanceOf(CacheFirst);
+    expect(strategyOf(runtimeCaching[3])).toBeInstanceOf(NetworkFirst);
   });
 
   it("carries the build-id cache name onto the strategy that writes it", () => {
-    expect(runtimeCaching.map((route) => route.handler.cacheName)).toEqual([
+    expect(runtimeCaching.map((route) => strategyOf(route).cacheName)).toEqual([
       "giya-pages-5aaf2ff",
       "giya-static-5aaf2ff",
       "giya-images-5aaf2ff",
@@ -196,45 +223,35 @@ describe("translation into Serwist strategies", () => {
     // alternative is asserting the numbers on our own data structure and never
     // proving they were handed to anything - which is exactly how a cache with
     // no LRU at all would pass a test suite.
-    const images = runtimeCaching[2]?.handler.plugins.find(
-      (plugin) => plugin instanceof ExpirationPlugin,
-    ) as unknown as { _config: Record<string, unknown> } | undefined;
-    expect(images?._config).toMatchObject({
+    const configOf = (route: RuntimeCaching | undefined): Record<string, unknown> | undefined =>
+      (
+        strategyOf(route).plugins.find((plugin) => plugin instanceof ExpirationPlugin) as
+          | { _config?: Record<string, unknown> }
+          | undefined
+      )?._config;
+
+    expect(configOf(runtimeCaching[2])).toMatchObject({
       maxEntries: 200,
       maxAgeSeconds: 604800,
       purgeOnQuotaError: true,
     });
-
-    const api = runtimeCaching[3]?.handler.plugins.find(
-      (plugin) => plugin instanceof ExpirationPlugin,
-    ) as unknown as { _config: Record<string, unknown> } | undefined;
-    expect(api?._config).toMatchObject({ maxEntries: 50, maxAgeSeconds: 600 });
+    expect(configOf(runtimeCaching[3])).toMatchObject({ maxEntries: 50, maxAgeSeconds: 600 });
   });
 
   it("keeps the routing decision intact through the translation", () => {
     // The Serwist matcher takes the same shape the spec's does; this proves the
     // adapter forwards rather than reinterprets.
-    const url = new URL(`${SUPABASE}/storage/v1/object/public/products/a1b2/photo.jpg`);
-    const matcher = runtimeCaching[2]?.matcher;
     expect(
-      matcher?.({
-        url,
-        sameOrigin: false,
-        request: { destination: "image" } as Request,
-        event: {} as ExtendableEvent,
-      }),
+      matches(
+        runtimeCaching[2],
+        new URL(`${SUPABASE}/storage/v1/object/public/products/a1b2/photo.jpg`),
+      ),
     ).toBe(true);
-
-    const signed = new URL(
-      `${SUPABASE}/storage/v1/object/sign/receipts/1111/9f2c.jpg?token=abc`,
-    );
     expect(
-      matcher?.({
-        url: signed,
-        sameOrigin: false,
-        request: { destination: "image" } as Request,
-        event: {} as ExtendableEvent,
-      }),
+      matches(
+        runtimeCaching[2],
+        new URL(`${SUPABASE}/storage/v1/object/sign/receipts/1111/9f2c.jpg?token=abc`),
+      ),
     ).toBe(false);
   });
 });
