@@ -76,6 +76,32 @@ export interface OutboxItem {
   readonly captured_at: string;
   /** Minted once at capture and reused by every replay, across restarts. */
   readonly idempotency_key: string;
+  /**
+   * The storage path this submission's bytes were uploaded to, or null while
+   * they have not been uploaded yet.
+   *
+   * THE TENTH FIELD, AND WHY DOC 41'S NINE ARE NOT ENOUGH.
+   * `POST /api/v1/receipts/uploads` mints `${user.id}/${randomUUID()}.jpg` on
+   * every call, so a drain that re-presigns each attempt sends a DIFFERENT body
+   * under the same Idempotency-Key. src/lib/api/handler.ts fingerprints the
+   * body, so such a submission can never be answered with the stored 202 that
+   * doc 41 section 3 step 4 calls "the primary replay guard"; it gets a 409
+   * instead, and the whole `(incl. Idempotent-Replayed: true)` path in that
+   * step is unreachable for an outbox item.
+   *
+   * It is also a receipt-destroying window. handler.ts compares `body_hash`
+   * BEFORE it checks `state === "in_progress"`, and the in-progress marker is
+   * written before the handler runs with a 120s TTL. A POST that reached the
+   * server and then died mid-handler leaves that marker; the retry 30 seconds
+   * later with a fresh path is answered 409 IDEMPOTENCY_REPLAYED, which this
+   * feature reads as already-processed and deletes the row for. No receipt
+   * exists, and none ever will. With a stable body the same request answers
+   * IDEMPOTENCY_IN_PROGRESS, which the drain retries.
+   *
+   * Storing it needs no schema version bump: IndexedDB rows are documents, not
+   * columns, and every reader normalises a missing value to null.
+   */
+  readonly image_path: string | null;
   readonly attempts: number;
   /** The last failure class, for the queue card. */
   readonly last_error: string | null;
@@ -83,7 +109,9 @@ export interface OutboxItem {
 }
 
 /** The fields a replay or a manual action may rewrite. */
-export type OutboxPatch = Partial<Pick<OutboxItem, "attempts" | "last_error" | "status">>;
+export type OutboxPatch = Partial<
+  Pick<OutboxItem, "attempts" | "last_error" | "status" | "image_path">
+>;
 
 /**
  * The queue is not usable. Never swallowed into a success anywhere in this
@@ -282,6 +310,12 @@ export interface EnqueueReceiptInput {
    * server replays its original answer instead of filing a second receipt.
    */
   readonly idempotencyKey: string;
+  /**
+   * A path from an attempt whose upload already succeeded, or `undefined` when
+   * the capture never reached the network. Keeping it is what makes every later
+   * replay send a byte-identical body; see `OutboxItem.image_path`.
+   */
+  readonly imagePath: string | null | undefined;
 }
 
 /** Why a capture was not kept. Each maps to one sentence in ./outbox-copy.ts. */
@@ -312,6 +346,7 @@ function toOutboxItem(input: EnqueueReceiptInput): OutboxItem {
     business_id: normaliseOptional(input.businessId),
     captured_at: input.capturedAt,
     idempotency_key: input.idempotencyKey,
+    image_path: normaliseOptional(input.imagePath ?? undefined),
     attempts: 0,
     last_error: null,
     status: "queued",

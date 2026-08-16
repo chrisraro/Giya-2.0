@@ -68,32 +68,44 @@ export function ReceiptOutbox() {
     }
   }, []);
 
-  const drain = React.useCallback(async () => {
-    // A launch drain and an `online` drain can land together, and two drains
-    // over one queue would submit each item twice. The Idempotency-Key makes
-    // that safe, not free.
-    if (drainingRef.current) return;
-    drainingRef.current = true;
-    try {
-      await drainOutbox({
-        submit: submitCapturedReceipt,
-        now: () => Date.now(),
-        schedule: scheduleRef.current,
-        notify: (event: OutboxReplayEvent) => setNotice(event.message),
-      });
-    } finally {
-      drainingRef.current = false;
-      await refresh();
-    }
-  }, [refresh]);
+  const drain = React.useCallback(
+    async (retryFailed: boolean) => {
+      // A launch drain and an `online` drain can land together, and two drains
+      // over one queue would submit each item twice. The Idempotency-Key makes
+      // that safe, not free.
+      if (drainingRef.current) return;
+      drainingRef.current = true;
+      try {
+        await drainOutbox({
+          submit: submitCapturedReceipt,
+          now: () => Date.now(),
+          schedule: scheduleRef.current,
+          retryFailed,
+          notify: (event: OutboxReplayEvent) => setNotice(event.message),
+        });
+      } finally {
+        drainingRef.current = false;
+        await refresh();
+      }
+    },
+    [refresh],
+  );
 
   // Doc 41 section 3: "replay attempts on app launch and on the `online` event".
+  //
+  // The two runs differ in one argument, and it matters. A MOUNT is not
+  // evidence that anything changed: navigating to /receipts and back would
+  // otherwise spend an attempt on a row that has already spent five. An
+  // `online` TRANSITION is evidence - the thing that was missing has come back -
+  // so it is allowed to reach failed rows. Without that, five attempts spent in
+  // one bad afternoon strand a receipt until the consumer notices the Retry
+  // button, on a platform doc 41 section 8 says will evict it in about a week.
   React.useEffect(() => {
-    void drain();
+    void drain(false);
   }, [drain]);
 
   React.useEffect(() => {
-    const onOnline = () => void drain();
+    const onOnline = () => void drain(true);
     window.addEventListener("online", onOnline);
     return () => window.removeEventListener("online", onOnline);
   }, [drain]);
@@ -120,7 +132,7 @@ export function ReceiptOutbox() {
     scheduleRef.current.drainDueAt = 0;
     await updateOutboxItem(item.id, { status: "queued", attempts: 0, last_error: null });
     setNotice(null);
-    await drain();
+    await drain(true);
   }
 
   async function confirmDelete(item: OutboxItem): Promise<void> {

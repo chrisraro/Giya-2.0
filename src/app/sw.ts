@@ -121,6 +121,10 @@ async function replayOutbox(): Promise<void> {
     submit: submitCapturedReceipt,
     now: () => Date.now(),
     schedule: outboxSchedule,
+    // A `sync` event only fires because the browser decided connectivity is
+    // back, which is the same evidence the app's `online` handler acts on, so
+    // this run may reach rows that have spent their five attempts.
+    retryFailed: true,
     // The worker has no UI. Doc 41 section 1 gives it one message for this:
     // OUTBOX_CHANGED, sent below once, rather than per item.
     notify: () => undefined,

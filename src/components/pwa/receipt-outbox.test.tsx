@@ -23,6 +23,7 @@ function row(overrides: Partial<OutboxItem> = {}): OutboxItem {
     business_id: null,
     captured_at: "2026-08-16T09:00:00.000Z",
     idempotency_key: "22222222-2222-4222-8222-222222222222",
+    image_path: null,
     attempts: 0,
     last_error: null,
     status: "queued",
@@ -118,6 +119,24 @@ describe("ReceiptOutbox replay (doc 41 sections 3 and 6)", () => {
     fireEvent(window, new Event("online"));
 
     await waitFor(() => expect(submitMock.submitCapturedReceipt).toHaveBeenCalledTimes(2));
+    await waitFor(async () => expect(await listOutboxItems()).toHaveLength(0));
+  });
+
+  it("CRITICAL: an online transition retries a row that a mount will not touch", async () => {
+    // Five attempts are spendable in one bad afternoon, and doc 41 section 8
+    // gives an iOS outbox about seven days before eviction. A mount is not
+    // evidence anything changed - navigating to /receipts and back would spend
+    // attempts on a row that has none left - but `online` is, so the two runs
+    // pass different answers and this test is what holds them apart.
+    await putOutboxItem(row({ status: "failed", attempts: 5, last_error: "network" }));
+    render(<ReceiptOutbox />);
+    await screen.findByText("1 receipt waiting to upload");
+    expect(submitMock.submitCapturedReceipt).not.toHaveBeenCalled();
+
+    submitMock.submitCapturedReceipt.mockResolvedValue(ACCEPTED);
+    fireEvent(window, new Event("online"));
+
+    await waitFor(() => expect(submitMock.submitCapturedReceipt).toHaveBeenCalledTimes(1));
     await waitFor(async () => expect(await listOutboxItems()).toHaveLength(0));
   });
 

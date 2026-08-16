@@ -65,6 +65,15 @@ describe("service worker outbox sync wiring (doc 41 sections 3 and 6)", () => {
     expect(parseSwMessage({ type: "OUTBOX_CHANGED" })?.type).toBe("OUTBOX_CHANGED");
   });
 
+  it("lets the background replay reach rows that spent their five attempts", () => {
+    // A `sync` event only fires because the browser decided connectivity is
+    // back, which is the same evidence the app's `online` handler acts on. With
+    // `retryFailed: false` the one replay path that runs with the app CLOSED
+    // would skip exactly the receipts that most need it - and doc 41 section 8
+    // gives an iOS outbox about seven days before eviction.
+    expect(SW).toContain("retryFailed: true");
+  });
+
   it("says nothing to a tab when the drain removed no rows", () => {
     // An idempotent handler is required (doc 41 section 6: "safe to fire with
     // an empty outbox"). Waking every open tab to tell it nothing happened is

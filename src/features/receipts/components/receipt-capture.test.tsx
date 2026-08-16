@@ -437,6 +437,63 @@ describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
     expect(item?.idempotency_key).toMatch(/^[0-9a-f-]{36}$/i);
   });
 
+  it("CRITICAL: carries the image_path of an upload that already landed", async () => {
+    // The presign and the PUT succeeded; only the submit POST died. The bytes
+    // are in the bucket under IMAGE_PATH, so the queued row must remember it:
+    // POST /api/v1/receipts/uploads mints a fresh path on every call, and a
+    // replay that re-presigned would change the body under an unchanged
+    // Idempotency-Key and be answered 409 instead of replaying the 202.
+    fetchMock
+      .mockResolvedValueOnce(ticket())
+      .mockResolvedValueOnce(putOk())
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    render(<ReceiptCapture />);
+    await captureAPhoto();
+
+    fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
+    await screen.findByText(/We will send it when you are back online/);
+
+    const { listOutboxItems } = await import("@/features/pwa/outbox");
+    const [item] = await listOutboxItems();
+    expect(item?.image_path).toBe(IMAGE_PATH);
+  });
+
+  it("stores no image_path when the capture never reached the network", async () => {
+    // The other side of the boundary: nothing was uploaded, so the drain has to
+    // presign for itself rather than replay a path that does not exist.
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    render(<ReceiptCapture />);
+    await captureAPhoto();
+
+    fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
+    await screen.findByText(/We will send it when you are back online/);
+
+    const { listOutboxItems } = await import("@/features/pwa/outbox");
+    const [item] = await listOutboxItems();
+    expect(item?.image_path).toBeNull();
+  });
+
+  it("CRITICAL: stamps captured_at when the photo was taken, not when sending failed", async () => {
+    // Doc 41 section 3: "minted at capture". It is also the outbox's FIFO key,
+    // so a stamp taken at enqueue time would order the queue by when
+    // submissions gave up rather than by when photos were taken, and would show
+    // the consumer a time they never took a photo at.
+    vi.setSystemTime(new Date("2026-08-16T09:00:00.000Z"));
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    render(<ReceiptCapture />);
+    await captureAPhoto();
+
+    // Ten minutes pass on the confirm screen before they tap send.
+    vi.setSystemTime(new Date("2026-08-16T09:10:00.000Z"));
+    fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
+    await screen.findByText(/We will send it when you are back online/);
+
+    const { listOutboxItems } = await import("@/features/pwa/outbox");
+    const [item] = await listOutboxItems();
+    expect(item?.captured_at).toBe("2026-08-16T09:00:00.000Z");
+    vi.useRealTimers();
+  });
+
   it("does NOT queue a 4xx, because a domain answer is not a missing connection", async () => {
     fetchMock
       .mockResolvedValueOnce(ticket())
@@ -462,6 +519,7 @@ describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
         business_id: null,
         captured_at: `2026-08-16T09:0${index}:00.000Z`,
         idempotency_key: `key-${index}`,
+        image_path: null,
         attempts: 0,
         last_error: null,
         status: "queued",

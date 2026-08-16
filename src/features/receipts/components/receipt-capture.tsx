@@ -73,6 +73,17 @@ interface Preview {
   /** null where the browser has no object URLs; the flow still works. */
   readonly url: string | null;
   readonly sha256: string | undefined;
+  /**
+   * When the photo was TAKEN, stamped the moment it is accepted.
+   *
+   * Doc 41 section 3 calls `captured_at` "minted at capture" and it is the
+   * outbox's FIFO key. Reading the clock at enqueue time instead would stamp
+   * the moment a submission FAILED - after compression, after the confirm tap,
+   * after however long a Try again sat on screen - so two receipts photographed
+   * minutes apart could queue in the wrong order, and the queue card would show
+   * a consumer a time they never took a photo at.
+   */
+  readonly capturedAt: string;
 }
 
 interface Submission {
@@ -198,7 +209,7 @@ export function ReceiptCapture({ businessId, showOcrStubNote }: ReceiptCapturePr
     // uploaded under it) belong to a receipt the consumer decided against.
     submissionRef.current = null;
     setError(null);
-    setPreview({ image, url, sha256: undefined });
+    setPreview({ image, url, sha256: undefined, capturedAt: new Date().toISOString() });
     setPhase("confirming");
 
     // Advisory only (doc 33 step 3), so it is computed off the critical path and
@@ -301,8 +312,13 @@ export function ReceiptCapture({ businessId, showOcrStubNote }: ReceiptCapturePr
       image: preview.image.blob,
       clientSha256: submission.clientSha256,
       businessId,
-      capturedAt: new Date().toISOString(),
+      capturedAt: preview.capturedAt,
       idempotencyKey: submission.key,
+      // If the PUT already landed before the connection died, the bytes are in
+      // the bucket under this path and every replay must reuse it: the shared
+      // handler fingerprints the body, so a replay that re-presigned would be
+      // answered 409 rather than replaying the original 202.
+      imagePath: submission.imagePath,
     });
 
     if (!queued.ok) {

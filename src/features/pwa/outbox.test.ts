@@ -55,6 +55,7 @@ const CAPTURE: EnqueueReceiptInput = {
   businessId: "3f1b0d9c-4444-4444-8444-444444444444",
   capturedAt: "2026-08-16T09:00:00.000Z",
   idempotencyKey: "22222222-2222-4222-8222-222222222222",
+  imagePath: undefined,
 };
 
 function capture(overrides: Partial<EnqueueReceiptInput> = {}): EnqueueReceiptInput {
@@ -69,6 +70,7 @@ function storedRow(index: number): OutboxItem {
     business_id: null,
     captured_at: `2026-08-16T09:0${index}:00.000Z`,
     idempotency_key: `key-${index}`,
+    image_path: null,
     attempts: 0,
     last_error: null,
     status: "queued",
@@ -125,6 +127,11 @@ describe("outbox schema (doc 41 section 3)", () => {
     await enqueueCapturedReceipt(capture());
 
     const [item] = await listOutboxItems();
+    // Doc 41 section 3's nine, plus `image_path`. The tenth is not decoration:
+    // the uploads endpoint mints a fresh path per call, so without it every
+    // replay sends a different body under the same Idempotency-Key and the
+    // stored-response replay doc 41 calls "the primary replay guard" can never
+    // fire for an outbox item. See the field's own comment.
     expect(Object.keys(item ?? {}).sort()).toEqual([
       "attempts",
       "business_id",
@@ -133,6 +140,7 @@ describe("outbox schema (doc 41 section 3)", () => {
       "id",
       "idempotency_key",
       "image",
+      "image_path",
       "last_error",
       "status",
     ]);
@@ -153,6 +161,16 @@ describe("outbox schema (doc 41 section 3)", () => {
     const [item] = await listOutboxItems();
     expect(item?.business_id).toBeNull();
     expect(item?.client_sha256).toBeNull();
+    expect(item?.image_path).toBeNull();
+  });
+
+  it("keeps an image_path from an attempt whose upload already landed", async () => {
+    // The bytes are in the bucket under this path. Every replay has to reuse
+    // it, or the body changes under an unchanged Idempotency-Key.
+    await enqueueCapturedReceipt(capture({ imagePath: "user-1/already-uploaded.jpg" }));
+
+    const [item] = await listOutboxItems();
+    expect(item?.image_path).toBe("user-1/already-uploaded.jpg");
   });
 });
 

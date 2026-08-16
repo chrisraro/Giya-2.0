@@ -120,11 +120,30 @@ export type ReplayDisposition =
 const ALREADY_SENT_CODES = new Set(["RECEIPT_DUPLICATE", "IDEMPOTENCY_REPLAYED"]);
 
 /**
- * How long to wait when the server rate-limited us without a usable
+ * How long to wait when the server told us to slow down without a usable
  * `Retry-After`. One minute is the smallest pause that is not effectively a
- * busy loop against a limiter.
+ * busy loop, and erring short is safe: the server simply says so again.
  */
-const RATE_LIMIT_FALLBACK_SECONDS = 60;
+const SERVER_PAUSE_FALLBACK_SECONDS = 60;
+
+/**
+ * 4xx codes that mean "wait", not "no", and that carry a `Retry-After` saying
+ * how long.
+ *
+ * `CONSUMER_SCAN_BLOCKED` is here and it is the important one.
+ * `submit.ts`'s `assertNotBlocked` throws it for doc 37's consequences ladder
+ * against `consumers.blocked_until`: the block is, in that code's own words,
+ * "automatic, auto-expiring, audited", the consumer is told "Please try again
+ * later", and the response carries the exact number of seconds until it lifts.
+ *
+ * Doc 41 section 3's terminal examples - `RECEIPT_DUPLICATE`,
+ * `VALIDATION_FAILED` - are permanent judgements ABOUT THE RECEIPT. This is a
+ * temporary judgement ABOUT THE ACCOUNT. Letting it fall through to the generic
+ * 4xx branch deleted a photo that was never uploaded and that nothing on the
+ * server can restore, over a cooldown that expires by itself. Section 8 puts
+ * the outbox on the short list of things that are not safe to lose.
+ */
+const WAIT_AND_RETRY_CODES = new Set(["CONSUMER_SCAN_BLOCKED"]);
 
 /**
  * What the drain should do about one submission's outcome.
@@ -159,11 +178,14 @@ export function classifyReplayOutcome(outcome: ReceiptSubmissionOutcome): Replay
   if (error.code === "OFFLINE") return { kind: "pause", error: "offline" };
   if (error.kind === "unauthenticated") return { kind: "pause", error: "unauthenticated" };
 
-  if (error.kind === "rate_limited") {
+  // Both branches of "the server told us to wait, and said for how long".
+  // WAIT_AND_RETRY_CODES is checked BEFORE the generic 4xx rule below, because
+  // status alone cannot tell a permanent refusal from an auto-expiring one.
+  if (error.kind === "rate_limited" || WAIT_AND_RETRY_CODES.has(error.code)) {
     return {
       kind: "retry",
-      error: "rate_limited",
-      pauseSeconds: error.retryAfterSeconds ?? RATE_LIMIT_FALLBACK_SECONDS,
+      error: error.kind === "rate_limited" ? "rate_limited" : error.code.toLowerCase(),
+      pauseSeconds: error.retryAfterSeconds ?? SERVER_PAUSE_FALLBACK_SECONDS,
     };
   }
 
@@ -210,6 +232,22 @@ export interface DrainDeps {
   readonly submit: SubmitReceipt;
   readonly now: () => number;
   readonly schedule: BackoffSchedule;
+  /**
+   * May this run touch rows that have already spent their five attempts?
+   *
+   * Required, never optional, because it is a decision about a consumer's last
+   * copy of a receipt and every caller has to make it out loud. `true` only for
+   * runs triggered by a genuinely new circumstance - an `online` transition, a
+   * Background Sync event, a tap on Retry - and never for the ordinary drain
+   * that happens whenever the queue card mounts.
+   *
+   * Doc 41's own sketch drains `['queued','failed']` unconditionally. This is
+   * narrower because five attempts are spendable in one bad afternoon and a
+   * hair-trigger re-drain would spend them; it is wider than "never", because
+   * doc 41 section 8 gives an iOS outbox about seven days before eviction and a
+   * row nothing will ever touch again is a receipt with a deadline on it.
+   */
+  readonly retryFailed: boolean;
   readonly notify: (event: OutboxReplayEvent) => void;
 }
 
@@ -222,17 +260,19 @@ export interface DrainResult {
 }
 
 /**
- * A row the automatic drain is allowed to pick up.
+ * A row this run is allowed to pick up.
  *
- * `failed` is excluded: five attempts are spent and doc 41 hands it to the
- * manual Retry button. `uploading` is INCLUDED, which is a deliberate departure
- * from doc 41's `getAll({status: ['queued','failed']})` sketch: a row is only
- * ever `uploading` because an attempt did not report back (the tab was closed,
- * the worker was killed), and leaving it out strands that receipt on the phone
+ * `uploading` is always included, which is a deliberate departure from doc 41's
+ * `getAll({status: ['queued','failed']})` sketch: a row is only ever
+ * `uploading` because an attempt did not report back (the tab was closed, the
+ * worker was killed), and leaving it out strands that receipt on the phone
  * forever with no automatic path out. The stored Idempotency-Key is what makes
  * picking it up again safe.
+ *
+ * `failed` depends on `retryFailed`; see `DrainDeps`.
  */
-function isDrainable(item: OutboxItem): boolean {
+function isDrainable(item: OutboxItem, retryFailed: boolean): boolean {
+  if (item.status === "failed") return retryFailed;
   return item.status === "queued" || item.status === "uploading";
 }
 
@@ -262,7 +302,7 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainResult> {
   }
 
   for (const item of items) {
-    if (!isDrainable(item)) continue;
+    if (!isDrainable(item, deps.retryFailed)) continue;
     if (deps.now() < (deps.schedule.itemDueAt.get(item.id) ?? 0)) continue;
 
     await updateOutboxItem(item.id, { status: "uploading" });
@@ -276,7 +316,10 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainResult> {
       // server fingerprints under the Idempotency-Key.
       businessId: item.business_id ?? undefined,
       clientSha256: item.client_sha256 ?? undefined,
-      imagePath: null,
+      // The path this submission already uploaded to, if any. Reusing it is
+      // what keeps the body byte-identical across replays; see
+      // `OutboxItem.image_path` for what re-presigning costs.
+      imagePath: item.image_path ?? null,
     });
 
     const disposition = classifyReplayOutcome(outcome);
@@ -304,27 +347,42 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainResult> {
 
     if (disposition.kind === "pause") {
       // No attempt was made, so nothing is counted and the row goes back to
-      // waiting exactly as it was.
-      await updateOutboxItem(item.id, { status: item.status === "failed" ? "failed" : "queued" });
+      // waiting exactly as it was - INCLUDING a `failed` row, which a
+      // retryFailed run can have reached. Writing "queued" unconditionally
+      // would quietly promote a spent row, taking its Retry button and its
+      // "Not sent yet" label away while nothing was going to retry it.
+      await updateOutboxItem(item.id, {
+        status: item.status,
+        image_path: outcome.imagePath,
+      });
       attempted -= 1;
       return { attempted, sent, removed, paused: true, pauseSeconds: null };
     }
 
-    const attempts = item.attempts + 1;
+    // Capped, so an item that keeps failing across `online` events does not
+    // climb forever and the "you have run out of attempts" announcement below
+    // fires on the transition rather than every time.
+    const attempts = Math.min(item.attempts + 1, OUTBOX_MAX_ATTEMPTS);
     const exhausted = attempts >= OUTBOX_MAX_ATTEMPTS;
     await updateOutboxItem(item.id, {
       attempts,
       last_error: disposition.error,
       status: exhausted ? "failed" : "queued",
+      // Persisted on EVERY surviving row: an attempt that presigned and
+      // uploaded before it failed leaves its path here, and an attempt whose
+      // PUT itself failed leaves null so the next one mints a fresh ticket.
+      image_path: outcome.imagePath,
     });
 
-    if (exhausted) {
+    // Held even when exhausted, so ten `online` events in a minute cost the
+    // server nothing. backoffMsForAttempts clamps to the last step, one hour.
+    deps.schedule.itemDueAt.set(item.id, deps.now() + backoffMsForAttempts(attempts));
+
+    if (exhausted && item.attempts < OUTBOX_MAX_ATTEMPTS) {
       // The row STAYS. Doc 41 section 8: the outbox is the one thing on the
       // device that is not safe to lose, so running out of automatic retries
       // hands the receipt to a button, it does not throw the photo away.
       deps.notify({ type: "failed", id: item.id, message: OUTBOX_FAILED_MESSAGE });
-    } else {
-      deps.schedule.itemDueAt.set(item.id, deps.now() + backoffMsForAttempts(attempts));
     }
 
     if (disposition.pauseSeconds !== undefined) {
