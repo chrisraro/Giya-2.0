@@ -5,6 +5,7 @@ import Link from "next/link";
 import { motion, useReducedMotion } from "motion/react";
 
 import { Card } from "@/components/ui/card";
+import { signalInstallMoment } from "@/features/pwa/install-prompt";
 import { cn } from "@/lib/utils";
 
 import { PendingButton } from "@/components/ui/pending-button";
@@ -231,6 +232,27 @@ export function ReceiptStatus({ receipt, onEscalate }: ReceiptStatusProps) {
   const outcome = receiptOutcome(state.status);
   const copy = statusCopy(state);
   const celebrating = outcome === "approved";
+
+  // ---- The moment of demonstrated value -----------------------------------
+  // Doc 41 section 2's install trigger: "when the user's first receipt reaches
+  // approved". This screen only ANNOUNCES it and knows nothing about
+  // installability; whether anything is shown is decided by
+  // src/components/pwa/install-prompt.tsx against a budget of three lifetime
+  // asks. Keeping the decision out of here is what stops a loyalty screen
+  // growing a second opinion about install prompts.
+  //
+  // Fires on an already-approved first paint as well as on a live flip: the
+  // stub OCR provider settles inside one request, so the server's own read
+  // often renders `approved` and no Realtime event ever arrives. The ref makes
+  // it once per mount rather than once per render - the points figure lands a
+  // beat later from a second fetch, and each of those renders would otherwise
+  // spend an ask.
+  const announcedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!celebrating || announcedRef.current) return;
+    announcedRef.current = true;
+    signalInstallMoment();
+  }, [celebrating]);
 
   // Reduced motion collapses every spring below to no animation at all: the
   // badge and the points figure simply appear, already settled. The colour

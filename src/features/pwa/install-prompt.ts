@@ -49,6 +49,22 @@ export const NEVER_ASKED: InstallPromptRecord = {
 export type InstallPromptStorage = Pick<Storage, "getItem" | "setItem">;
 
 /**
+ * `localStorage`, reached lazily.
+ *
+ * The property access `window.localStorage` is itself what throws when a
+ * browser has site data blocked, so it happens INSIDE these two callbacks,
+ * where the try/catch in `readInstallPromptRecord`/`writeInstallPromptRecord`
+ * covers it. Capturing `window.localStorage` into a constant at module scope
+ * would throw at import time, in a module the consumer layout imports.
+ */
+export const localInstallPromptStorage: InstallPromptStorage = {
+  getItem: (key) => window.localStorage.getItem(key),
+  setItem: (key, value) => {
+    window.localStorage.setItem(key, value);
+  },
+};
+
+/**
  * The two capability signals, read as values so the decisions above them stay
  * pure. Deliberately NOT a user-agent string: doc 41's iOS row is about a
  * capability (Safari fires no `beforeinstallprompt` and defines

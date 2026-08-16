@@ -46,6 +46,7 @@ vi.mock("@/lib/supabase/server", () => ({
 const ConsumerLayout = (await import("./layout")).default;
 const { OfflineBanner } = await import("@/components/pwa/offline-banner");
 const { RegisterServiceWorker } = await import("@/components/pwa/register-service-worker");
+const { InstallPrompt } = await import("@/components/pwa/install-prompt");
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -158,6 +159,20 @@ describe("the consumer shell mounts the PWA surfaces", () => {
     signedOut();
 
     expect(componentTypes(await renderLayout())).toContain(OfflineBanner);
+  });
+
+  it("CRITICAL: mounts the install prompt", async () => {
+    // Here rather than on the receipt screen that triggers it, and that is not
+    // a tidiness choice: `beforeinstallprompt` fires on PAGE LOAD, and a
+    // client-side navigation into /scan/[receiptId] is not one. A listener
+    // mounted at the trigger site would never capture an event to replay.
+    signedIn();
+    mocks.maybeSingle.mockResolvedValue({
+      data: { onboarded_at: "2026-07-01T00:00:00.000Z", is_suspended: false },
+      error: null,
+    });
+
+    expect(componentTypes(await renderLayout())).toContain(InstallPrompt);
   });
 
   it("still mounts the service worker registration alongside it (T5.1)", async () => {

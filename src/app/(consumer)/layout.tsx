@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { InstallPrompt } from "@/components/pwa/install-prompt";
 import { OfflineBanner } from "@/components/pwa/offline-banner";
 import { RegisterServiceWorker } from "@/components/pwa/register-service-worker";
 import { BottomNav } from "@/components/shell/bottom-nav";
@@ -114,6 +115,15 @@ export default async function ConsumerLayout({ children }: { children: React.Rea
         nothing. src/app/offline-ui-scope.test.ts holds the portal line.
       */}
       <OfflineBanner />
+      {/*
+        The install offer (doc 41 section 2). Mounted HERE rather than on the
+        receipt screen that triggers it, and that is not tidiness:
+        `beforeinstallprompt` fires on page load, and a client-side navigation
+        into /scan/[receiptId] is not a page load, so a listener attached at
+        the trigger site would never have an event to replay. It renders
+        nothing until a receipt of theirs reaches `approved`.
+      */}
+      <InstallPrompt />
     </div>
   );
 }

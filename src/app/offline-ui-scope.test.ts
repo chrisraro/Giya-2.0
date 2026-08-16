@@ -43,10 +43,15 @@ const CONSUMER_LAYOUT = join("src", "app", "(consumer)", "layout.tsx");
 const ROOT_LAYOUT = join("src", "app", "layout.tsx");
 
 /** The mounts that make a surface look offline-capable. */
-const OFFLINE_UX_MOUNTS = ["<OfflineBanner"] as const;
+const OFFLINE_UX_MOUNTS = ["<OfflineBanner", "<InstallPrompt"] as const;
 
 /** Vocabulary no portal file has any business touching. */
-const OFFLINE_UX_IDENTIFIERS = ["OfflineBanner", "useOnlineStatus"] as const;
+const OFFLINE_UX_IDENTIFIERS = [
+  "OfflineBanner",
+  "InstallPrompt",
+  "useOnlineStatus",
+  "beforeinstallprompt",
+] as const;
 
 function sourceFiles(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -95,6 +100,18 @@ describe("the offline UX is a consumer-only surface", () => {
     for (const mount of OFFLINE_UX_MOUNTS) {
       expect(root?.text, `root layout mounts ${mount}`).not.toContain(mount);
     }
+  });
+
+  it("CRITICAL: nothing outside the install prompt itself touches beforeinstallprompt", () => {
+    // Doc 41: "Never prompt cold." A second listener anywhere would either
+    // race this one for the event or fail to preventDefault it, which is how
+    // Chrome's own install bar reappears at a moment nobody chose.
+    // The LISTENER, not the word: the decision module names the event in its
+    // prose and has every right to.
+    const owners = FILES.filter((file) =>
+      file.text.includes('addEventListener("beforeinstallprompt"'),
+    ).map((file) => file.path);
+    expect(owners).toEqual([join("src", "components", "pwa", "install-prompt.tsx")]);
   });
 
   it("keeps the offline pill a client component", () => {
