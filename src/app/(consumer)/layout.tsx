@@ -1,7 +1,5 @@
 import { redirect } from "next/navigation";
 
-import { InstallPrompt } from "@/components/pwa/install-prompt";
-import { OfflineBanner } from "@/components/pwa/offline-banner";
 import { RegisterServiceWorker } from "@/components/pwa/register-service-worker";
 import { BottomNav } from "@/components/shell/bottom-nav";
 import { createClient } from "@/lib/supabase/server";
@@ -106,24 +104,6 @@ export default async function ConsumerLayout({ children }: { children: React.Rea
         holds that line.
       */}
       <RegisterServiceWorker />
-      {/*
-        Doc 41 section 9's ONE global offline pill. Same layout and the same
-        reason as the registration above: the business and admin portals are
-        not offline-capable surfaces and must not grow an offline affordance
-        that implies they are. It renders nothing while the connection is up,
-        so mounting it unconditionally costs a signed-out visitor on /b/[slug]
-        nothing. src/app/offline-ui-scope.test.ts holds the portal line.
-      */}
-      <OfflineBanner />
-      {/*
-        The install offer (doc 41 section 2). Mounted HERE rather than on the
-        receipt screen that triggers it, and that is not tidiness:
-        `beforeinstallprompt` fires on page load, and a client-side navigation
-        into /scan/[receiptId] is not a page load, so a listener attached at
-        the trigger site would never have an event to replay. It renders
-        nothing until a receipt of theirs reaches `approved`.
-      */}
-      <InstallPrompt />
     </div>
   );
 }

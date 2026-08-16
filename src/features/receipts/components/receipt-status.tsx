@@ -5,7 +5,6 @@ import Link from "next/link";
 import { motion, useReducedMotion } from "motion/react";
 
 import { Card } from "@/components/ui/card";
-import { signalInstallMoment } from "@/features/pwa/install-prompt";
 import { cn } from "@/lib/utils";
 
 import { PendingButton } from "@/components/ui/pending-button";
@@ -232,37 +231,6 @@ export function ReceiptStatus({ receipt, onEscalate }: ReceiptStatusProps) {
   const outcome = receiptOutcome(state.status);
   const copy = statusCopy(state);
   const celebrating = outcome === "approved";
-
-  // ---- The moment of demonstrated value -----------------------------------
-  // Doc 41 section 2's install trigger: "when the user's first receipt reaches
-  // approved". This screen only ANNOUNCES it and knows nothing about
-  // installability; whether anything is shown is decided by
-  // src/components/pwa/install-prompt.tsx against a budget of three lifetime
-  // asks. Keeping the decision out of here is what stops a loyalty screen
-  // growing a second opinion about install prompts.
-  //
-  // Fires on an already-approved first paint as well as on a live flip: the
-  // stub OCR provider settles inside one request, so the server's own read
-  // often renders `approved` and no Realtime event ever arrives, and a
-  // transition-only trigger would miss the common path.
-  //
-  // ONCE PER TRANSITION INTO `approved`, and the dependency array is the only
-  // thing doing that. This carried a `useRef` latch as well, whose comment
-  // claimed to be what made it once-per-mount rather than once-per-render;
-  // that was false twice over. `[celebrating]` already gives once per
-  // transition - the points figure arriving a beat later from a second fetch
-  // re-renders without re-running this - and the ref could only have mattered
-  // if `celebrating` went true -> false -> true, which this state machine does
-  // not do: `watching` stops the Realtime subscription once the status is
-  // settled, and `escalationState` only offers from `rejected`. It was deleted
-  // rather than kept with a truer comment, because even if some future status
-  // change did re-enter `approved`, the cost is already bounded downstream -
-  // install-prompt.tsx caps the sheet at one showing per page load regardless
-  // of how many moments it hears.
-  React.useEffect(() => {
-    if (!celebrating) return;
-    signalInstallMoment();
-  }, [celebrating]);
 
   // Reduced motion collapses every spring below to no animation at all: the
   // badge and the points figure simply appear, already settled. The colour
