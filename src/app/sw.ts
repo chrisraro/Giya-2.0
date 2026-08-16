@@ -1,7 +1,13 @@
 import { Serwist, type PrecacheEntry } from "serwist";
 
+import {
+  createBackoffSchedule,
+  drainOutbox,
+  isOutboxSyncTag,
+} from "../features/pwa/outbox-replay";
+import { submitCapturedReceipt } from "../features/receipts/upload";
 import { isStaleGiyaCache } from "../lib/pwa/cache-names";
-import { swMessageAction } from "../lib/pwa/messages";
+import { OUTBOX_CHANGED_MESSAGE, swMessageAction } from "../lib/pwa/messages";
 import { giyaRouteSpecs, toRuntimeCaching } from "../lib/pwa/runtime-caching";
 
 /**
@@ -36,6 +42,14 @@ type ServiceWorkerScope = {
     type: "activate",
     listener: (event: { waitUntil(promise: Promise<unknown>): void }) => void,
   ): void;
+  /** Background Sync (doc 41 sections 3 and 6). Absent on iOS and Firefox. */
+  addEventListener(
+    type: "sync",
+    listener: (event: { readonly tag: string; waitUntil(promise: Promise<unknown>): void }) => void,
+  ): void;
+  readonly clients: {
+    matchAll(options?: { type?: string }): Promise<{ postMessage(message: unknown): void }[]>;
+  };
 };
 
 declare const self: ServiceWorkerScope;
@@ -80,6 +94,46 @@ self.addEventListener("message", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(purgeStaleCaches());
 });
+
+// Doc 41 sections 3 and 6: the one-shot Background Sync replay, tag
+// `receipt-outbox`. THIS LISTENER IS WHY `registerOutboxSync` IS NOT
+// DECORATION - registering a tag no worker answers is a guard whose removal
+// changes nothing, and doc 41 section 6 requires the handler be idempotent and
+// safe to fire against an empty outbox, which `drainOutbox` is.
+//
+// The drain itself, its classification and its backoff live in
+// ../features/pwa/outbox-replay.ts, where they run in an ordinary test. What is
+// left here is wiring. Everything it touches (IndexedDB, fetch, Blob) exists in
+// a worker; nothing in that import chain touches the DOM.
+//
+// The schedule is module scope, so it survives between sync events for as long
+// as this worker lives. It holds when an item may next be tried, never what to
+// send: losing it retries sooner and can never lose a receipt.
+const outboxSchedule = createBackoffSchedule();
+
+self.addEventListener("sync", (event) => {
+  if (!isOutboxSyncTag(event.tag)) return;
+  event.waitUntil(replayOutbox());
+});
+
+async function replayOutbox(): Promise<void> {
+  const result = await drainOutbox({
+    submit: submitCapturedReceipt,
+    now: () => Date.now(),
+    schedule: outboxSchedule,
+    // The worker has no UI. Doc 41 section 1 gives it one message for this:
+    // OUTBOX_CHANGED, sent below once, rather than per item.
+    notify: () => undefined,
+  });
+
+  if (result.removed === 0) return;
+
+  // Doc 41 section 1: "app invalidates ['receipts','list'] and refreshes queue
+  // UI". An open tab has no other way to learn that rows it is displaying were
+  // uploaded by a worker it never spoke to.
+  const windows = await self.clients.matchAll({ type: "window" });
+  for (const client of windows) client.postMessage(OUTBOX_CHANGED_MESSAGE);
+}
 
 async function purgeStaleCaches(): Promise<void> {
   const names = await caches.keys();
