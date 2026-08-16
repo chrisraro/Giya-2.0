@@ -64,6 +64,20 @@ function submit(): void {
   fireEvent.click(screen.getByRole("button", { name: "Log out" }));
 }
 
+/**
+ * Lets everything the action started, but did not await, run to completion.
+ *
+ * The logout path deliberately fires storage work without awaiting it, so that
+ * nothing on the way out of a session can hang. That means "the row is still
+ * there when the action resolves" is a much weaker claim than "the row is still
+ * there", and only the second one is the promise the copy makes.
+ */
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 5; turn += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 beforeEach(() => {
   trace = [];
   postThrows = false;
@@ -198,6 +212,12 @@ describe("LogoutForm", () => {
     });
 
     await logOutAction();
+    // AFTER everything the action started has finished, not merely after it
+    // returned. A first draft asserted immediately, and a mutant that added a
+    // fire-and-forget delete survived it: the action resolves before its own
+    // background work lands, so the row was still there at the moment of the
+    // check and gone a millisecond later.
+    await settle();
 
     expect(await listOutboxItems()).toHaveLength(1);
   });
