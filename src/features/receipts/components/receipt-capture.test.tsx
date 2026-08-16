@@ -1,5 +1,7 @@
 import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
+import { Blob as NodeBlob } from "node:buffer";
 
 const nav = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("next/navigation", () => ({
@@ -360,7 +362,11 @@ describe("ReceiptCapture submission", () => {
     expect(await screen.findByRole("link", { name: "Sign in" })).toHaveAttribute("href", "/login");
   });
 
-  it("announces a network failure and keeps the photo for a retry", async () => {
+  it("refuses honestly when a network failure cannot be queued either", async () => {
+    // jsdom has no IndexedDB and this test does not install one, so the outbox
+    // refuses. The screen must NOT claim the receipt was saved: an unqueueable
+    // capture that says "saved on your phone" is the exact failure the outbox
+    // rewrite exists to remove.
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
     render(<ReceiptCapture />);
     await captureAPhoto();
@@ -368,7 +374,139 @@ describe("ReceiptCapture submission", () => {
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("Connection problem");
+    expect(alert).toHaveTextContent("We could not save it on this phone");
+    expect(alert).toHaveTextContent("so it was not kept");
+    expect(screen.queryByText(/We will send it when you are back online/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+});
+
+describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
+  // A REAL IndexedDB, for the same reason outbox.test.ts uses one: the claim
+  // under test is that the receipt is on the phone, and a stand-in store would
+  // let that claim pass without a single byte reaching a database.
+  beforeEach(() => {
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    vi.stubGlobal("navigator", { onLine: true });
+  });
+
+  it("queues the receipt when the connection dies, and says exactly that", async () => {
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    render(<ReceiptCapture businessId={BUSINESS_ID} />);
+    await captureAPhoto();
+
+    fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
+
+    expect(
+      await screen.findByText("Saved on your phone. We will send it when you are back online."),
+    ).toBeInTheDocument();
+    // Not an error, and not a route change: the consumer stays put and knows
+    // where the receipt is.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(nav.push).not.toHaveBeenCalled();
+
+    const { listOutboxItems } = await import("@/features/pwa/outbox");
+    const items = await listOutboxItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.business_id).toBe(BUSINESS_ID);
+    expect(items[0]?.status).toBe("queued");
+    expect(items[0]?.attempts).toBe(0);
+  });
+
+  it("stores the SAME Idempotency-Key the failed attempt used", async () => {
+    // This is receipt-capture.test.tsx's in-session retry property carried
+    // across a process death. If the queued row held a fresh key, a replay
+    // after the tab closed would file a second receipt for the same purchase
+    // whenever the original POST had actually reached the server.
+    fetchMock
+      .mockResolvedValueOnce(ticket())
+      .mockResolvedValueOnce(putOk())
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    render(<ReceiptCapture businessId={BUSINESS_ID} />);
+    await captureAPhoto();
+
+    fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
+    await screen.findByText(/We will send it when you are back online/);
+
+    const submits = submitCalls(fetchMock);
+    expect(submits).toHaveLength(1);
+    const { listOutboxItems } = await import("@/features/pwa/outbox");
+    const [item] = await listOutboxItems();
+    expect(item?.idempotency_key).toBe(idempotencyKeyOf(submits[0] ?? []));
+    // And it is a real key, not two coincidentally-undefined values.
+    expect(item?.idempotency_key).toMatch(/^[0-9a-f-]{36}$/i);
+  });
+
+  it("does NOT queue a 4xx, because a domain answer is not a missing connection", async () => {
+    fetchMock
+      .mockResolvedValueOnce(ticket())
+      .mockResolvedValueOnce(putOk())
+      .mockResolvedValueOnce(jsonResponse(422, { error: { code: "RECEIPT_DUPLICATE" } }));
+    render(<ReceiptCapture />);
+    await captureAPhoto();
+
+    fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Already scanned");
+    const { listOutboxItems } = await import("@/features/pwa/outbox");
+    expect(await listOutboxItems()).toHaveLength(0);
+  });
+
+  it("refuses the 11th capture with the cap sentence and never says it was saved", async () => {
+    const { putOutboxItem, listOutboxItems } = await import("@/features/pwa/outbox");
+    for (let index = 0; index < 10; index += 1) {
+      await putOutboxItem({
+        id: `row-${index}`,
+        image: new NodeBlob(["x"], { type: "image/jpeg" }) as unknown as Blob,
+        client_sha256: null,
+        business_id: null,
+        captured_at: `2026-08-16T09:0${index}:00.000Z`,
+        idempotency_key: `key-${index}`,
+        attempts: 0,
+        last_error: null,
+        status: "queued",
+      });
+    }
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    render(<ReceiptCapture />);
+    await captureAPhoto();
+
+    fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Upload your pending receipts first.");
+    expect(screen.queryByText(/We will send it when you are back online/)).not.toBeInTheDocument();
+    expect(await listOutboxItems()).toHaveLength(10);
+  });
+
+  it("asks for a Background Sync replay once the receipt is queued", async () => {
+    const register = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", {
+      onLine: true,
+      serviceWorker: { ready: Promise.resolve({ sync: { register } }) },
+    });
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    render(<ReceiptCapture />);
+    await captureAPhoto();
+
+    fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
+    await screen.findByText(/We will send it when you are back online/);
+
+    await waitFor(() => expect(register).toHaveBeenCalledWith("receipt-outbox"));
+  });
+
+  it("still queues on a browser with no Background Sync, and says so anyway", async () => {
+    // Doc 41 section 6: unsupported on iOS Safari. The receipt is on the phone
+    // either way, so the confirmation must not depend on the registration.
+    vi.stubGlobal("navigator", { onLine: true, serviceWorker: { ready: Promise.resolve({}) } });
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    render(<ReceiptCapture />);
+    await captureAPhoto();
+
+    fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
+
+    expect(await screen.findByText(/We will send it when you are back online/)).toBeInTheDocument();
+    const { listOutboxItems } = await import("@/features/pwa/outbox");
+    expect(await listOutboxItems()).toHaveLength(1);
   });
 });

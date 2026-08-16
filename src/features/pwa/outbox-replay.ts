@@ -65,6 +65,41 @@ export function isOutboxSyncTag(tag: string | undefined): boolean {
   return tag === OUTBOX_SYNC_TAG;
 }
 
+/** The Background Sync slice of a registration, which TypeScript's DOM lib omits. */
+type SyncCapableRegistration = ServiceWorkerRegistration & {
+  readonly sync?: { register(tag: string): Promise<void> };
+};
+
+/**
+ * Asks the browser to drain the queue in the background (doc 41 section 3
+ * step 1), and reports whether it agreed to.
+ *
+ * `false` is the ORDINARY answer, not an error: doc 41 section 6's support
+ * matrix has one-shot Background Sync unsupported on iOS Safari and on Firefox
+ * Android, which between them are a large share of this market. On those
+ * browsers the launch and `online` replays in
+ * `src/components/pwa/receipt-outbox.tsx` are the whole story, so the caller
+ * must not treat the answer as a precondition for anything. Feature-detected
+ * (`'sync' in registration`), never sniffed, per doc 41 section 6.
+ */
+export async function registerOutboxSync(
+  container: ServiceWorkerContainer | undefined,
+): Promise<boolean> {
+  if (container === undefined || container === null) return false;
+
+  try {
+    const registration = (await container.ready) as SyncCapableRegistration;
+    if (registration.sync === undefined) return false;
+    await registration.sync.register(OUTBOX_SYNC_TAG);
+    return true;
+  } catch {
+    // Permission denied, storage blocked, or a registration that never resolves
+    // ready. None of it changes what the consumer was told: the receipt is in
+    // IndexedDB either way, and the fallback replays still run.
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Classification
 // ---------------------------------------------------------------------------

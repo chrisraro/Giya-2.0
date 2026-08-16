@@ -13,6 +13,7 @@ import {
   createBackoffSchedule,
   drainOutbox,
   isOutboxSyncTag,
+  registerOutboxSync,
   type OutboxReplayEvent,
   type SubmitReceipt,
 } from "./outbox-replay";
@@ -383,5 +384,37 @@ describe("background sync tag (doc 41 section 6)", () => {
     expect(isOutboxSyncTag("receipt-outbox")).toBe(true);
     expect(isOutboxSyncTag("wallet-refresh")).toBe(false);
     expect(isOutboxSyncTag(undefined)).toBe(false);
+  });
+
+  it("registers the tag on a browser that supports Background Sync", async () => {
+    const register = vi.fn().mockResolvedValue(undefined);
+    const container = { ready: Promise.resolve({ sync: { register } }) };
+
+    const registered = await registerOutboxSync(container as unknown as ServiceWorkerContainer);
+
+    expect(registered).toBe(true);
+    expect(register).toHaveBeenCalledWith("receipt-outbox");
+  });
+
+  it("reports false, without throwing, on iOS Safari and Firefox Android", async () => {
+    // Doc 41 section 6: one-shot Background Sync is unsupported on both. The
+    // registration object simply has no `sync`, which is the feature detection
+    // the spec asks for and not a user-agent guess. The fallback replays carry
+    // the queue on those browsers, so this answer must not read as a failure.
+    const container = { ready: Promise.resolve({}) };
+
+    expect(await registerOutboxSync(container as unknown as ServiceWorkerContainer)).toBe(false);
+  });
+
+  it("reports false when there is no service worker container at all", async () => {
+    expect(await registerOutboxSync(undefined)).toBe(false);
+  });
+
+  it("reports false when the browser refuses the registration", async () => {
+    const container = {
+      ready: Promise.resolve({ sync: { register: vi.fn().mockRejectedValue(new Error("denied")) } }),
+    };
+
+    expect(await registerOutboxSync(container as unknown as ServiceWorkerContainer)).toBe(false);
   });
 });

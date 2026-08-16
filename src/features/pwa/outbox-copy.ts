@@ -73,6 +73,17 @@ export const OUTBOX_UNAVAILABLE_MESSAGE =
   "We could not save your receipt on this phone, so it was not kept. Take the photo again when you have a connection.";
 
 /**
+ * Headings for the three refusals, on the capture screen's error card.
+ *
+ * Each names the obstacle, never the person. "Your upload queue is full" is a
+ * fact about the queue; "you have scanned too many" would be an accusation
+ * about someone doing exactly what the app asked them to do.
+ */
+export const OUTBOX_CAP_TITLE = "Your upload queue is full";
+export const OUTBOX_STORAGE_FULL_TITLE = "No room left on this phone";
+export const OUTBOX_UNAVAILABLE_TITLE = "We could not save it on this phone";
+
+/**
  * A queued receipt that the drain successfully submitted (doc 41 section 3
  * step 5, "notify the user"), restructured off its em-dash.
  */

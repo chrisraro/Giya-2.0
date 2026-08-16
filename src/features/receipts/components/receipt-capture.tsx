@@ -7,6 +7,14 @@ import { useRouter } from "next/navigation";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { LinearProgress } from "@/components/ui/progress";
 import { Card } from "@/components/ui/card";
+import { enqueueCapturedReceipt, type EnqueueRefusal } from "@/features/pwa/outbox";
+import {
+  OUTBOX_CAP_TITLE,
+  OUTBOX_SAVED_MESSAGE,
+  OUTBOX_STORAGE_FULL_TITLE,
+  OUTBOX_UNAVAILABLE_TITLE,
+} from "@/features/pwa/outbox-copy";
+import { registerOutboxSync } from "@/features/pwa/outbox-replay";
 import { cn } from "@/lib/utils";
 
 import {
@@ -58,7 +66,7 @@ import { CameraViewfinder } from "./camera-viewfinder";
 // fingerprints the request body, so a retry that re-uploaded to a fresh path
 // would be answered 409 IDEMPOTENCY_REPLAYED rather than replayed.
 
-type Phase = "idle" | "capturing" | "confirming" | "uploading" | "error";
+type Phase = "idle" | "capturing" | "confirming" | "uploading" | "error" | "saved";
 
 interface Preview {
   readonly image: CompressedImage;
@@ -111,11 +119,40 @@ const NO_CAMERA_ON_SERVER = () => false;
  * nothing here: the error card carries role="alert" and announces itself
  * assertively, and a second polite announcement of the same event would read
  * the consumer their bad news twice.
+ *
+ * `saved` is silent here for the same reason: its card carries role="status",
+ * which is already a polite live region, so announcing it again would read the
+ * offline confirmation out twice.
  */
 export function phaseAnnouncement(phase: Phase): string {
   if (phase === "confirming") return "Photo captured. Check it, then send it or retake it.";
   if (phase === "uploading") return "Sending your receipt.";
   return "";
+}
+
+/**
+ * A refusal from the outbox, rendered by the same error card as a server error.
+ *
+ * `retryable: true` in all three cases, and that is not optimism: the photo is
+ * still in memory on this screen, so Try again re-runs the submission, which
+ * either reaches the network or queues once the obstacle is gone. What none of
+ * these say is that the receipt was saved, because it was not.
+ */
+export function outboxRefusalError(reason: EnqueueRefusal, message: string): CaptureError {
+  const title =
+    reason === "cap"
+      ? OUTBOX_CAP_TITLE
+      : reason === "quota"
+        ? OUTBOX_STORAGE_FULL_TITLE
+        : OUTBOX_UNAVAILABLE_TITLE;
+
+  return {
+    kind: "network",
+    code: `OUTBOX_${reason.toUpperCase()}`,
+    title,
+    message,
+    retryable: true,
+  };
 }
 
 export interface ReceiptCaptureProps {
@@ -232,7 +269,60 @@ export function ReceiptCapture({ businessId, showOcrStubNote }: ReceiptCapturePr
       router.push(`/scan/${outcome.receiptId}`);
       return;
     }
+
+    // Doc 41 section 3: a submission that failed for want of a CONNECTION goes
+    // to the outbox instead of erroring. A 4xx does not: it is an answer about
+    // this receipt, and queueing it would replay a refusal on a schedule.
+    if (outcome.error.kind === "network") {
+      await queueForLater(submission);
+      return;
+    }
+
     failWith(outcome.error);
+  }
+
+  /**
+   * Hand the capture to the durable queue, or say it was not kept.
+   *
+   * The Idempotency-Key stored here is `submission.key`, the SAME one the
+   * attempt above used. That is what makes the replay safe across a restart:
+   * one logical submission keeps one identity, so if that POST did reach the
+   * server before the connection died, the replay is answered with the original
+   * result rather than filing a second receipt.
+   *
+   * The row `id` is a separate UUID because the outbox key and the submission
+   * identity are different things; the same generator mints both.
+   */
+  async function queueForLater(submission: Submission): Promise<void> {
+    if (preview === null) return;
+
+    const queued = await enqueueCapturedReceipt({
+      id: newIdempotencyKey(),
+      image: preview.image.blob,
+      clientSha256: submission.clientSha256,
+      businessId,
+      capturedAt: new Date().toISOString(),
+      idempotencyKey: submission.key,
+    });
+
+    if (!queued.ok) {
+      failWith(outboxRefusalError(queued.reason, queued.message));
+      return;
+    }
+
+    // Doc 41 section 3 step 1. Feature-detected inside, and a `false` answer is
+    // the ordinary one on iOS: the launch and `online` replays cover it.
+    void registerOutboxSync(
+      typeof navigator === "undefined" ? undefined : navigator.serviceWorker,
+    );
+
+    // NOTHING IS CLEARED HERE, ON PURPOSE. The first draft also reset
+    // `submissionRef` and `error`, with a comment about a later Try again
+    // resending under the key the queued row now owns. That comment was wrong:
+    // the saved card offers no Try again, and its only in-app exit is Scan
+    // another receipt, which calls `restart()` and clears both. Two lines whose
+    // removal changed nothing observable, and a comment claiming otherwise.
+    setPhase("saved");
   }
 
   function restart(): void {
@@ -361,6 +451,42 @@ export function ReceiptCapture({ businessId, showOcrStubNote }: ReceiptCapturePr
             </div>
           ) : null}
         </div>
+      ) : null}
+
+      {/*
+        The offline confirmation (doc 41 sections 3 and 9: "offline actions
+        either queue with explicit 'saved on your phone' language ... or refuse
+        with an explanation"). It renders only after a row is committed to
+        IndexedDB, so the sentence is a report and not a hope. role="status"
+        rather than "alert": nothing went wrong.
+      */}
+      {phase === "saved" ? (
+        <Card
+          variant="filled"
+          role="status"
+          className="flex w-full flex-col items-center gap-2 p-6 text-center"
+        >
+          <span aria-hidden className="material-symbols-rounded text-[40px] text-primary">
+            cloud_done
+          </span>
+          <p className="text-title-m text-on-surface">Saved on your phone</p>
+          <p className="text-body-m text-on-surface-variant">{OUTBOX_SAVED_MESSAGE}</p>
+          <Button
+            type="button"
+            variant="filled"
+            size="touch"
+            className="mt-2 w-full"
+            onClick={restart}
+          >
+            Scan another receipt
+          </Button>
+          <Link
+            href="/receipts"
+            className={cn(buttonVariants({ variant: "text", size: "touch" }), "mt-1 w-full")}
+          >
+            See what is waiting
+          </Link>
+        </Card>
       ) : null}
 
       {phase === "error" && error !== null ? (
