@@ -12,20 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
-    // Service worker build output: @serwist/next compiles src/app/sw.ts into
-    // public/ on every build. It is minified third-party-shaped code we did not
-    // write and cannot fix, and linting it buries real findings under ~90
-    // warnings about a bundler's output. The SOURCE, src/app/sw.ts, is linted.
-    "public/sw.js",
-    "public/sw.js.map",
-    "public/swe-worker-*.js",
-    "public/swe-worker-*.js.map",
     // Agent worktrees are full checkouts of this repo living INSIDE it, so a
     // bare `eslint .` descends into every one of them and lints the whole
     // codebase again per worktree - ~20k problems while `eslint src scripts`
-    // reports 71. That made the lint gate unreadable and cost a task's review
-    // an incorrect baseline: the brief claimed "clean apart from one warning"
-    // and the implementer had to establish the real number themselves.
+    // reports 71. That made the lint gate unreadable.
     //
     // vitest.config.ts carries the identical exclusion for the identical
     // reason - without it a 3,936-test suite reported 7,840, globbing main

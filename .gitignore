@@ -40,16 +40,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# Service worker build output. @serwist/next compiles src/app/sw.ts into
-# public/ on every `next build`; the file embeds the precache manifest and the
-# build id, so a committed copy would be stale the moment anything else changes
-# and would be served in preference to nothing at all if a build ever skipped
-# the step. The SOURCE is src/app/sw.ts.
-public/sw.js
-public/sw.js.map
-public/swe-worker-*.js
-public/swe-worker-*.js.map
-
 # scratch / planning docs (not part of the shipped app)
 .superpowers/
 

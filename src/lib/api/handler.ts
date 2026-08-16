@@ -158,37 +158,10 @@ export interface HandlerConfig<
   ) => Promise<HandlerResult<TData>>;
 }
 
-/**
- * The shape App Router expects of an exported route handler.
- *
- * WHY THIS IS AN OVERLOAD SET AND NOT `(request, context?)`.
- *
- * `next build` (webpack mode) emits a type check per route into `.next/types`
- * that asserts the second parameter is assignable to
- * `RouteContext = { params: Promise<SegmentParams> }`. A single signature with
- * `context?` makes that parameter's type `{...} | undefined`, and `undefined`
- * is not a `RouteContext` - so all ten routes built on defineHandler fail the
- * generated check with TS2344. Turbopack does not emit that check, which is why
- * this was invisible until the PWA work made webpack mandatory (@serwist/next
- * has no Turbopack support; see next.config.ts).
- *
- * TypeScript resolves `Parameters<T>` - which is what Next's generated
- * `SecondArg<T>` is built on - against the LAST signature in an overload set.
- * So the two-argument signature is what the generated check sees, while the
- * one-argument signature keeps every direct caller compiling, including the
- * route tests that invoke `GET(request)` with no context.
- *
- * The runtime signature is unchanged: the implementation still reads
- * `context?.params`, because App Router really does omit the argument for
- * non-dynamic routes.
- */
-export interface RouteHandler {
-  (request: NextRequest): Promise<NextResponse>;
-  (
-    request: NextRequest,
-    context: { params: Promise<Record<string, string | string[] | undefined>> },
-  ): Promise<NextResponse>;
-}
+export type RouteHandler = (
+  request: NextRequest,
+  context?: { params?: Promise<unknown> },
+) => Promise<NextResponse>;
 
 interface SuccessPayload {
   status: number;
@@ -378,15 +351,7 @@ export function defineHandler<
 >(
   config: HandlerConfig<TData, TBody, TParams, TQuery, TRequireSession, TAuthContext>,
 ): RouteHandler {
-  // Annotated rather than inferred from `RouteHandler`: that is an overload set
-  // (see its comment), and contextual typing would pick only the last
-  // signature, leaving an implementation that cannot satisfy the first. App
-  // Router genuinely omits the second argument for non-dynamic routes, so
-  // optional is also what is true at runtime.
-  return async function route(
-    request: NextRequest,
-    context?: { params?: Promise<unknown> },
-  ): Promise<NextResponse> {
+  return async function route(request, context): Promise<NextResponse> {
     const requestId = resolveRequestId(request);
     // Accumulated across the pipeline so rate-limit headers land on error
     // responses too, not only on the happy path.
