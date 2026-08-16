@@ -11,6 +11,44 @@ You are picking up a multi-wave build-out of every module the docs specify and t
 
 **Waves 1, 2 and 3 are complete: 21 tasks, all merged, all pushed. You own Waves 4-7 — 22 tasks.** Start at §8.
 
+> ### ⚠️ Re-audited 2026-08-16 — read this before trusting anything below
+>
+> Work continued after this document was written: **27 commits**, taking
+> migrations from 0064 to **0077** and adding the ERP admin command center,
+> dedicated business signup/login, an admin verification gate, and business
+> purge/force-delete tooling. That work was **not** the missing-modules plan.
+>
+> Current verified baseline: `main` @ `5aaf2ff`, **283 test files / 4,963 tests
+> green**, `tsc` = the same 3 known pre-existing errors.
+>
+> **Waves 4-7 are still substantially unbuilt**, but not uniformly. Migrations
+> `0065`-`0071` landed for T4.3, T4.5, T6.2, T6.4, T6.5, T7.1 and T7.2 — and
+> almost none of them are wired to a surface. A migration existing is not
+> evidence of a feature.
+>
+> **The dominant pattern to watch for:** a route file exists, passes access
+> control, renders MD3-styled markup with **hardcoded sample data and inert
+> buttons**, and its test asserts only that a heading renders. `/admin/admins`,
+> `/admin/consumers`, `/admin/audit`, `/business/templates` and `/business/qr`
+> are all this shape. Treat "the page exists" as the start of the task.
+>
+> Per-task status: **DONE** — T4.4 only. **PARTIAL** — T4.1, T4.2, T4.3, T4.6,
+> T6.3, T6.4, T6.5, T7.4. **NOT STARTED** — T4.5's progression half, all of
+> Wave 5, T6.1, T6.2, T6.6, T6.7, T7.1, T7.2, T7.3, T7.5, T7.6.
+>
+> **Highest-value single gap: T4.5.** `loyalty_cards` has existed since
+> `0012_campaigns.sql` and **nothing has ever written to it**. The award path
+> carries the acknowledgement in two migrations —
+> `0018_award_receipt_points.sql:31` ("no loyalty_cards advancement (doc 35
+> section 3 step 11)") and `0031_admin_access.sql:205`. Consumers can see stamp
+> cards that can never fill.
+>
+> Also unwired and easy to miss: `ScanPreview` + its server action (T4.6) are
+> correct and tested but imported by no page. And `supabase/README.md`'s
+> migration ledger stops at `0067` — `0068`-`0077` are unrecorded, the same
+> drift that once hid a migration recorded as applied whose function never
+> landed (§7).
+
 The user drew this boundary deliberately. An earlier session set a standing goal of *"execute all missing modules from the docs"*, and that instruction is still quoted in the plan file — but the user has since decided the remaining waves go to a fresh owner. **Do not treat the plan's standing goal as authority to keep going past a task the user has not asked for.** Ask.
 
 Nothing is in flight. No worktree holds unfinished work. Every migration through 0064 is applied live and verified against the catalogue, not just against its file.
