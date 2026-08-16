@@ -672,10 +672,12 @@ begin
        where r.id = v_prog.reward_id;
 
       -- p_campaign_id is null: it is consumed only by the redeem ledger row,
-      -- which a zero-cost claim never writes. p_prev_balance likewise.
+      -- which a zero-cost claim never writes. p_prev_balance likewise. Both
+      -- nulls are cast so the call resolves on argument types rather than on
+      -- there happening to be exactly one candidate.
       perform private.write_reward_claim(
         p_business_id, v_prog.reward_id, p_consumer_id,
-        0, null, v_expiry_days, null, p_consumer_id);
+        0, null::integer, v_expiry_days, null::uuid, p_consumer_id);
 
       if v_prog.resets_on_completion then
         -- carryover is KEPT, not zeroed
