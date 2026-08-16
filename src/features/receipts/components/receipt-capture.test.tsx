@@ -27,6 +27,9 @@ vi.mock("../compress", async (importOriginal) => {
 
 import { ReceiptCapture } from "./receipt-capture";
 
+// The signed-in consumer. The capture screen stamps it on any row it queues,
+// so a shared phone cannot hand this receipt to the next person who signs in.
+const USER_A = "0d5a3f0c-1111-4111-8111-111111111111";
 const BUSINESS_ID = "3f1b0d9c-4444-4444-8444-444444444444";
 const IMAGE_PATH = "0d5a3f0c-1111-4111-8111-111111111111/2b8f0c1a-2222-4222-8222-222222222222.jpg";
 const UPLOAD_URL = "https://storage.example/object/upload/sign/receipts/x?token=abc";
@@ -95,7 +98,7 @@ describe("ReceiptCapture idle state", () => {
   it("starts idle with a gallery source when the browser has no camera API", () => {
     // jsdom has no navigator.mediaDevices, which is exactly the no-camera
     // branch: the screen must still be usable, never a dead end.
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
 
     expect(screen.getByText("Add your receipt")).toBeInTheDocument();
     expect(screen.getByText(/cannot open the camera/)).toBeInTheDocument();
@@ -105,7 +108,7 @@ describe("ReceiptCapture idle state", () => {
   });
 
   it("keeps the file input focusable rather than display:none", () => {
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
 
     const input = screen.getByLabelText(/Choose from gallery/);
     expect(input).toHaveClass("sr-only");
@@ -115,24 +118,24 @@ describe("ReceiptCapture idle state", () => {
   });
 
   it("mentions the pre-bound business when one was passed", () => {
-    render(<ReceiptCapture businessId={BUSINESS_ID} />);
+    render(<ReceiptCapture userId={USER_A} businessId={BUSINESS_ID} />);
 
     expect(screen.getByText(/sent to the store you came from/)).toBeInTheDocument();
   });
 
   it("renders the dev-only OCR stub note only when told to", () => {
-    const { unmount } = render(<ReceiptCapture />);
+    const { unmount } = render(<ReceiptCapture userId={USER_A} />);
     expect(screen.queryByText(/OCR stub active/)).not.toBeInTheDocument();
     unmount();
 
-    render(<ReceiptCapture showOcrStubNote />);
+    render(<ReceiptCapture userId={USER_A} showOcrStubNote />);
     expect(screen.getByText(/Dev only: OCR stub active/)).toBeInTheDocument();
   });
 });
 
 describe("ReceiptCapture capture to confirm", () => {
   it("moves to the confirm step with a retake option after a photo is picked", async () => {
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
 
     await captureAPhoto();
 
@@ -144,7 +147,7 @@ describe("ReceiptCapture capture to confirm", () => {
   });
 
   it("returns to the capture step on Retake", async () => {
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Retake" }));
@@ -154,7 +157,7 @@ describe("ReceiptCapture capture to confirm", () => {
   });
 
   it("rejects a file over 10MB before any compression work happens", async () => {
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
 
     pickFromGallery(photoFile("huge.jpg", "image/jpeg", 11 * 1024 * 1024));
 
@@ -166,7 +169,7 @@ describe("ReceiptCapture capture to confirm", () => {
   });
 
   it("rejects an unsupported file type with format guidance", async () => {
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
 
     pickFromGallery(photoFile("statement.pdf", "application/pdf"));
 
@@ -179,7 +182,7 @@ describe("ReceiptCapture capture to confirm", () => {
     compressMocks.compressReceiptFile.mockRejectedValueOnce(
       new ImageCaptureError("decode_failed", "no decoder"),
     );
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
 
     pickFromGallery(photoFile("IMG_0001.heic", "image/heic"));
 
@@ -193,7 +196,7 @@ describe("ReceiptCapture submission", () => {
       .mockResolvedValueOnce(ticket())
       .mockResolvedValueOnce(putOk())
       .mockResolvedValueOnce(accepted());
-    render(<ReceiptCapture businessId={BUSINESS_ID} />);
+    render(<ReceiptCapture userId={USER_A} businessId={BUSINESS_ID} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -219,7 +222,7 @@ describe("ReceiptCapture submission", () => {
             releaseSubmit = () => resolve(accepted());
           }),
       );
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -245,7 +248,7 @@ describe("ReceiptCapture submission", () => {
       .mockResolvedValueOnce(putOk())
       .mockResolvedValueOnce(jsonResponse(503, { error: { code: "DEPENDENCY_UNAVAILABLE" } }))
       .mockResolvedValueOnce(accepted());
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -268,7 +271,7 @@ describe("ReceiptCapture submission", () => {
       .mockResolvedValueOnce(putOk())
       .mockResolvedValueOnce(jsonResponse(503, { error: { code: "DEPENDENCY_UNAVAILABLE" } }))
       .mockResolvedValueOnce(accepted());
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -297,7 +300,7 @@ describe("ReceiptCapture submission", () => {
       .mockResolvedValueOnce(ticket())
       .mockResolvedValueOnce(putOk())
       .mockResolvedValueOnce(accepted());
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -320,7 +323,7 @@ describe("ReceiptCapture submission", () => {
       .mockResolvedValueOnce(
         jsonResponse(403, { error: { code: "CONSUMER_SCAN_BLOCKED" } }, { "Retry-After": "7200" }),
       );
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -337,7 +340,7 @@ describe("ReceiptCapture submission", () => {
       .mockResolvedValueOnce(ticket())
       .mockResolvedValueOnce(putOk())
       .mockResolvedValueOnce(jsonResponse(422, { error: { code: "RECEIPT_DUPLICATE" } }));
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -354,7 +357,7 @@ describe("ReceiptCapture submission", () => {
       .mockResolvedValueOnce(ticket())
       .mockResolvedValueOnce(putOk())
       .mockResolvedValueOnce(jsonResponse(401, { error: { code: "UNAUTHENTICATED" } }));
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -368,7 +371,7 @@ describe("ReceiptCapture submission", () => {
     // capture that says "saved on your phone" is the exact failure the outbox
     // rewrite exists to remove.
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -392,7 +395,7 @@ describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
 
   it("queues the receipt when the connection dies, and says exactly that", async () => {
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
-    render(<ReceiptCapture businessId={BUSINESS_ID} />);
+    render(<ReceiptCapture userId={USER_A} businessId={BUSINESS_ID} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -422,7 +425,7 @@ describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
       .mockResolvedValueOnce(ticket())
       .mockResolvedValueOnce(putOk())
       .mockRejectedValueOnce(new TypeError("Failed to fetch"));
-    render(<ReceiptCapture businessId={BUSINESS_ID} />);
+    render(<ReceiptCapture userId={USER_A} businessId={BUSINESS_ID} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -447,7 +450,7 @@ describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
       .mockResolvedValueOnce(ticket())
       .mockResolvedValueOnce(putOk())
       .mockRejectedValueOnce(new TypeError("Failed to fetch"));
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -462,7 +465,7 @@ describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
     // The other side of the boundary: nothing was uploaded, so the drain has to
     // presign for itself rather than replay a path that does not exist.
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -480,7 +483,7 @@ describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
     // the consumer a time they never took a photo at.
     vi.setSystemTime(new Date("2026-08-16T09:00:00.000Z"));
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     // Ten minutes pass on the confirm screen before they tap send.
@@ -499,7 +502,7 @@ describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
       .mockResolvedValueOnce(ticket())
       .mockResolvedValueOnce(putOk())
       .mockResolvedValueOnce(jsonResponse(422, { error: { code: "RECEIPT_DUPLICATE" } }));
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -514,6 +517,7 @@ describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
     for (let index = 0; index < 10; index += 1) {
       await putOutboxItem({
         id: `row-${index}`,
+        user_id: USER_A,
         image: new NodeBlob(["x"], { type: "image/jpeg" }) as unknown as Blob,
         client_sha256: null,
         business_id: null,
@@ -526,7 +530,7 @@ describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
       });
     }
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -544,7 +548,7 @@ describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
       serviceWorker: { ready: Promise.resolve({ sync: { register } }) },
     });
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));
@@ -558,7 +562,7 @@ describe("ReceiptCapture offline queueing (doc 41 section 3)", () => {
     // either way, so the confirmation must not depend on the registration.
     vi.stubGlobal("navigator", { onLine: true, serviceWorker: { ready: Promise.resolve({}) } });
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId={USER_A} />);
     await captureAPhoto();
 
     fireEvent.click(screen.getByRole("button", { name: "Use this photo" }));

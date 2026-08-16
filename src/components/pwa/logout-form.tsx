@@ -2,6 +2,7 @@
 
 import * as React from "react";
 
+import { forgetActiveUser } from "@/features/pwa/active-user";
 import { signOut } from "@/features/identity/actions";
 import { postUserCachePurge } from "@/lib/pwa/logout-purge";
 
@@ -51,6 +52,19 @@ export async function logOutAction(): Promise<void> {
   // is gone and the navigation to /login is under way; a purge posted after
   // that races a page that may already be unloading.
   postUserCachePurge(typeof navigator === "undefined" ? undefined : navigator.serviceWorker);
+
+  // And forget who was signed in, so the Background Sync replay - which runs
+  // with the app closed and has no session - drains nothing until somebody
+  // opens a consumer page again. See src/features/pwa/active-user.ts.
+  //
+  // NOT AWAITED, on purpose and for the same reason as the purge: this is
+  // storage, storage can be blocked or slow, and nothing on the way out of a
+  // session may be able to hold the consumer inside it. The write is issued
+  // synchronously and the navigation to /login is a soft one, so the
+  // transaction completes; and a record that survives is bounded, because the
+  // session it names is already gone and a drain under it can only 401, which
+  // the replay pauses on without spending an attempt.
+  void forgetActiveUser();
 
   // Bare, and it stays bare. See the note above about redirect().
   await signOut();

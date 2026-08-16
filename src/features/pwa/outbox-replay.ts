@@ -30,7 +30,7 @@ import {
 } from "../receipts/upload";
 import {
   deleteOutboxItem,
-  listOutboxItems,
+  listOutboxItemsForUser,
   updateOutboxItem,
   type OutboxItem,
 } from "./outbox";
@@ -297,6 +297,20 @@ export function createBackoffSchedule(): BackoffSchedule {
 export interface DrainDeps {
   /** `submitCapturedReceipt` in production. Never defaulted: see below. */
   readonly submit: SubmitReceipt;
+  /**
+   * WHOSE QUEUE THIS RUN MAY TOUCH. `auth.users.id` of the signed-in consumer.
+   *
+   * Required and never defaulted, because the failure it prevents destroys
+   * data. On a shared phone, consumer A queues a receipt offline and B signs in:
+   * an unscoped drain picks up A's row, sends it under B's session, and
+   * `assertOwnedImagePath` (src/features/receipts/server/submit.ts) answers 403
+   * FORBIDDEN because the storage path carries A's user id. FORBIDDEN is on the
+   * terminal allowlist above, so the row is DELETED - A's receipt, gone,
+   * because B logged in. A default of "" or undefined here would drain nothing
+   * and hide the mistake; a required argument makes every caller say who is
+   * signed in.
+   */
+  readonly userId: string;
   readonly now: () => number;
   readonly schedule: BackoffSchedule;
   /**
@@ -363,7 +377,10 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainResult> {
 
   let items: OutboxItem[];
   try {
-    items = await listOutboxItems();
+    // SCOPED READ, not a filter further down. Rows belonging to anybody else
+    // never enter this loop at all, so no later branch can be written that
+    // accidentally submits, patches or deletes one. See `DrainDeps.userId`.
+    items = await listOutboxItemsForUser(deps.userId);
   } catch {
     return { attempted, sent, removed, paused: false, pauseSeconds: null };
   }

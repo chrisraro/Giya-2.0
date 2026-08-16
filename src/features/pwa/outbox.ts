@@ -25,6 +25,27 @@
  *
  * CLIENT ONLY. IndexedDB does not exist on the server; nothing here may be
  * imported by a server component.
+ *
+ * WHAT LOGGING OUT DOES TO THIS QUEUE: NOTHING. THE ROWS STAY.
+ *
+ * The logout purge (src/lib/pwa/purge.ts) empties Cache Storage and does not
+ * touch this database, and that is a decision rather than an omission. Doc 41
+ * section 8's logout purge covers the IndexedDB SNAPSHOT - a cache of data the
+ * server already has - and says nothing about the outbox, which is different in
+ * kind: it holds the only copy of a photo the consumer was told was SAVED
+ * ("Saved on your phone. We will send it when you are back online."). Deleting
+ * it at logout would make that sentence false, in the direction the whole
+ * module exists to prevent, and would do it silently - the consumer taps Log
+ * out on a settings screen and never learns what they lost.
+ *
+ * The reason it was ever tempting was cross-user exposure, and `user_id` closes
+ * that without destroying anything: a signed-in consumer sees and drains only
+ * their own rows. So A's queued receipts are invisible to B, and are still
+ * there, still sendable, when A signs back in on the same phone.
+ *
+ * THE CONSEQUENCE THIS COMMITS TO: nothing anywhere may tell A that a queued
+ * receipt is gone when it is not. The copy in ./outbox-copy.ts says the receipt
+ * is on the phone, and after a logout it still is.
  */
 
 import {
@@ -61,6 +82,34 @@ export type OutboxStatus = "queued" | "uploading" | "failed";
 export interface OutboxItem {
   /** UUID; the store's key path. */
   readonly id: string;
+  /**
+   * WHOSE RECEIPT THIS IS. `auth.users.id` at the moment of capture.
+   *
+   * THE ELEVENTH FIELD, AND WHY DOC 41'S NINE ARE NOT ENOUGH EITHER.
+   * The row carries a user-scoped storage path (`${user.id}/${uuid}.jpg`) and
+   * `assertOwnedImagePath` in src/features/receipts/server/submit.ts answers 403
+   * when the prefix does not match the caller. On a shared phone - the norm in
+   * this market - consumer A queues a receipt offline, B signs in, and B's drain
+   * picked up A's row: FORBIDDEN, which the replay classifies terminal, which
+   * DELETES A'S RECEIPT. Terminal was the least-bad answer available, because
+   * the alternative (clear the path and retry) files A's purchase against B's
+   * account, which is a wrong award and worse than a loss.
+   *
+   * This field removes the choice. B's drain never sees A's rows, so neither
+   * outcome can happen.
+   *
+   * NULL MEANS NOBODY, NOT EVERYBODY. A null row is invisible to every drain and
+   * every queue card. That is deliberate and it is the safe direction: adopting
+   * an unattributed row is exactly the misfiling this field exists to prevent.
+   * The only rows that can be null are ones written by a build before this
+   * field existed, and no build with an outbox has ever been deployed - the
+   * outbox landed in T5.3a, in this same unreleased wave - so outside a
+   * developer's browser the population is empty.
+   *
+   * No schema version bump: IndexedDB rows are documents, not columns, and
+   * every reader normalises a missing value to null.
+   */
+  readonly user_id: string | null;
   /** The compressed JPEG, under 1.5MB by the doc 33 compression contract. */
   readonly image: Blob;
   /**
@@ -230,7 +279,14 @@ export async function putOutboxItem(item: OutboxItem): Promise<void> {
   );
 }
 
-/** Every row, FIFO by `captured_at` (doc 41 section 3). */
+/**
+ * EVERY row on this device, whoever queued it, FIFO by `captured_at`.
+ *
+ * NOT FOR THE DRAIN AND NOT FOR THE QUEUE CARD. Both must use the scoped reads
+ * below, or a shared phone hands one consumer's receipts to the next one who
+ * signs in. This unscoped read exists for the storage layer itself and for
+ * tests that need to see what is really on the device.
+ */
 export async function listOutboxItems(): Promise<OutboxItem[]> {
   return withStore<OutboxItem[]>(
     "readonly",
@@ -239,13 +295,53 @@ export async function listOutboxItems(): Promise<OutboxItem[]> {
   );
 }
 
-/** How many receipts are waiting. Used by the cap and by the queue card. */
+/**
+ * Does this row belong to the signed-in consumer?
+ *
+ * `null` belongs to nobody; see `OutboxItem.user_id`. Written as a function
+ * rather than inlined so both readers and the drain share one answer, and so a
+ * change of mind about null rows is one edit rather than three.
+ */
+export function isOutboxItemOwnedBy(item: OutboxItem, userId: string): boolean {
+  return item.user_id === userId;
+}
+
+/**
+ * One consumer's rows, FIFO by `captured_at` (doc 41 section 3).
+ *
+ * Filtered in JavaScript rather than through a compound index: adding one would
+ * be a schema version bump, the cap holds the queue to ten rows, and a wrong
+ * answer here is a receipt shown to the wrong person.
+ */
+export async function listOutboxItemsForUser(userId: string): Promise<OutboxItem[]> {
+  const all = await listOutboxItems();
+  return all.filter((item) => isOutboxItemOwnedBy(item, userId));
+}
+
+/** How many rows the device holds in total. */
 export async function countOutboxItems(): Promise<number> {
   return withStore<number>(
     "readonly",
     (store) => store.count(),
     (request) => (request?.result as number | undefined) ?? 0,
   );
+}
+
+/**
+ * How many receipts THIS consumer has waiting. What the cap counts.
+ *
+ * PER USER, NOT PER DEVICE, and the reason is the copy. Doc 41 section 3's cap
+ * refusal reads "Upload your pending receipts first." - a sentence that is
+ * simply false said to somebody whose own queue is empty because the previous
+ * consumer filled the device. Counting per user keeps the refusal true and
+ * keeps the fraud-velocity half of the cap intact, since that bound is about an
+ * account and not about a phone. The device-total half is given up knowingly:
+ * two consumers can now hold twenty rows between them, and the honest answer
+ * when that actually exhausts storage is already written - `putOutboxItem`
+ * rejects with QuotaExceededError and the consumer is told the phone is full.
+ */
+export async function countOutboxItemsForUser(userId: string): Promise<number> {
+  return (await listOutboxItemsForUser(userId)).length;
 }
 
 export async function readOutboxItem(id: string): Promise<OutboxItem | null> {
@@ -299,6 +395,14 @@ export async function deleteOutboxItem(id: string): Promise<void> {
 export interface EnqueueReceiptInput {
   /** The row key. Supplied by the caller so the capture screen owns identity. */
   readonly id: string;
+  /**
+   * The signed-in consumer, from the server component that rendered the capture
+   * screen. Required, never optional and never defaulted: an undefaulted
+   * required field is what forces every future caller to answer "whose receipt
+   * is this?" out loud, and a default would quietly write `null` - a row no
+   * drain will ever pick up. See `OutboxItem.user_id`.
+   */
+  readonly userId: string;
   readonly image: Blob;
   readonly clientSha256: string | undefined;
   readonly businessId: string | undefined;
@@ -341,6 +445,7 @@ function normaliseOptional(value: string | undefined): string | null {
 function toOutboxItem(input: EnqueueReceiptInput): OutboxItem {
   return {
     id: input.id,
+    user_id: input.userId,
     image: input.image,
     client_sha256: normaliseOptional(input.clientSha256),
     business_id: normaliseOptional(input.businessId),
@@ -437,7 +542,7 @@ export async function enqueueCapturedReceipt(input: EnqueueReceiptInput): Promis
   const item = toOutboxItem(input);
 
   try {
-    if ((await countOutboxItems()) >= OUTBOX_MAX_ITEMS) {
+    if ((await countOutboxItemsForUser(input.userId)) >= OUTBOX_MAX_ITEMS) {
       return { ok: false, reason: "cap", message: OUTBOX_FULL_MESSAGE };
     }
     await putOutboxItem(item);

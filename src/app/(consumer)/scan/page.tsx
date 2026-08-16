@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 
 import { ReceiptOutbox } from "@/components/pwa/receipt-outbox";
 import { ReceiptCapture } from "@/features/receipts/components/receipt-capture";
@@ -9,6 +10,7 @@ import {
   shouldShowOcrStubNote,
 } from "@/features/receipts/scan-entry";
 import { loadScanTargets } from "@/features/receipts/server/scan-targets";
+import { createClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
   title: "Scan a receipt | Giya",
@@ -59,6 +61,22 @@ export default async function ScanPage({
     );
   }
 
+  // WHOSE PHONE THIS IS. Both islands below are scoped to it: the queue card
+  // shows only this consumer's rows and drains only those, and the capture
+  // screen stamps it on anything it queues. Without it, a shared phone hands
+  // the previous consumer's queued receipts to the next one, and the drain
+  // deletes them on the 403 the user-scoped storage path guarantees. See
+  // src/features/pwa/outbox.ts.
+  //
+  // `notFound()`, matching /receipts: middleware already redirects a signed-out
+  // visitor away from /scan (src/middleware.ts), so this is the belt to that
+  // brace and not the gate.
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) notFound();
+
   // Read on the SERVER: OCR_SERVICE_URL is a server secret and must not be
   // inlined into the client bundle. Only the boolean crosses the boundary, and
   // it is false in production by construction (see shouldShowOcrStubNote).
@@ -84,9 +102,13 @@ export default async function ScanPage({
         component and renders nothing for an empty queue, so it costs a page
         with no backlog one IndexedDB read.
       */}
-      <ReceiptOutbox />
+      <ReceiptOutbox userId={user.id} />
 
-      <ReceiptCapture businessId={businessId} showOcrStubNote={showOcrStubNote} />
+      <ReceiptCapture
+        businessId={businessId}
+        userId={user.id}
+        showOcrStubNote={showOcrStubNote}
+      />
     </main>
   );
 }

@@ -141,7 +141,7 @@ describe("OfflineBanner", () => {
 
     const { ReceiptCapture } = await import("@/features/receipts/components/receipt-capture");
     const { listOutboxItems } = await import("@/features/pwa/outbox");
-    render(<ReceiptCapture />);
+    render(<ReceiptCapture userId="aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa" />);
 
     fireEvent.change(screen.getByLabelText(/Choose from gallery/), {
       target: { files: [photoFile()] },

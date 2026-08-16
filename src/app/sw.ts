@@ -1,5 +1,6 @@
 import { Serwist, type PrecacheEntry } from "serwist";
 
+import { readActiveUser } from "../features/pwa/active-user";
 import {
   createBackoffSchedule,
   drainOutbox,
@@ -139,8 +140,23 @@ self.addEventListener("sync", (event) => {
 });
 
 async function replayOutbox(): Promise<void> {
+  // WHOSE ROWS THIS RUN MAY TOUCH. A worker has no session and no props, so the
+  // answer comes from the durable record the app writes on every consumer page
+  // and clears on logout (../features/pwa/active-user.ts, which explains why a
+  // posted SET_USER could not do this job).
+  //
+  // `null` - nobody signed in, or storage unavailable - means DO NOTHING. On a
+  // shared phone the alternative is that consumer B's sync event picks up
+  // consumer A's row, and the server's 403 on the user-scoped storage path is
+  // classified terminal, which deletes A's only copy of the photo. Skipping a
+  // background drain costs a deferred upload; the next app launch drains it
+  // with a user it is sure of.
+  const userId = await readActiveUser();
+  if (userId === null) return;
+
   const result = await drainOutbox({
     submit: submitCapturedReceipt,
+    userId,
     now: () => Date.now(),
     schedule: outboxSchedule,
     // A `sync` event only fires because the browser decided connectivity is

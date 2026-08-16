@@ -14,7 +14,21 @@ vi.mock("server-only", () => ({}));
 const nav = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: nav.push }),
+  notFound: () => {
+    throw new Error("NEXT_NOT_FOUND");
+  },
 }));
+
+// The page now reads the signed-in consumer, because both islands it renders
+// are scoped to one: the queue card shows only that consumer's rows and the
+// capture screen stamps them on anything it queues. See
+// src/features/pwa/outbox.ts.
+const auth = vi.hoisted(() => ({ getUser: vi.fn() }));
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: async () => ({ auth: { getUser: auth.getUser } }),
+}));
+
+const USER_A = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
 
 const mocks = vi.hoisted(() => ({ loadScanTargets: vi.fn() }));
 vi.mock("@/features/receipts/server/scan-targets", () => ({
@@ -36,6 +50,7 @@ const CAPTURE_MARKER = "Add your receipt";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  auth.getUser.mockResolvedValue({ data: { user: { id: USER_A } } });
   mocks.loadScanTargets.mockResolvedValue({
     recent: [],
     businesses: [

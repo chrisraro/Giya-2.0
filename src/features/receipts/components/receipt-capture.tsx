@@ -173,11 +173,20 @@ export interface ReceiptCaptureProps {
    * verifies rather than guesses the merchant.
    */
   readonly businessId?: string | undefined;
+  /**
+   * The signed-in consumer, from the server component that renders this.
+   *
+   * Stamped on any row this screen queues, so that on a shared phone the next
+   * person to sign in neither sees nor drains it. Required, so a screen that
+   * cannot say whose receipt it is cannot queue one. See
+   * `OutboxItem.user_id`.
+   */
+  readonly userId: string;
   /** Renders the dev-only OCR stub note. The page decides; see scan-entry.ts. */
   readonly showOcrStubNote?: boolean | undefined;
 }
 
-export function ReceiptCapture({ businessId, showOcrStubNote }: ReceiptCaptureProps) {
+export function ReceiptCapture({ businessId, userId, showOcrStubNote }: ReceiptCaptureProps) {
   const router = useRouter();
   const submissionRef = React.useRef<Submission | null>(null);
   const inFlightRef = React.useRef(false);
@@ -309,6 +318,7 @@ export function ReceiptCapture({ businessId, showOcrStubNote }: ReceiptCapturePr
 
     const queued = await enqueueCapturedReceipt({
       id: newIdempotencyKey(),
+      userId,
       image: preview.image.blob,
       clientSha256: submission.clientSha256,
       businessId,

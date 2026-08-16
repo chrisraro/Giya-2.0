@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
 
 import { OUTBOX_SYNC_TAG, isOutboxSyncTag } from "@/features/pwa/outbox-replay";
 import { parseSwMessage } from "@/lib/pwa/messages";
@@ -85,6 +86,55 @@ describe("service worker outbox sync wiring (doc 41 sections 3 and 6)", () => {
     // the same narrowing the OUTBOX_CHANGED assertion needed after a mutant
     // that dropped the postMessage survived on the import line alone.
     expect(SW_CODE).toMatch(/drainOutbox\(\{[^}]*retryFailed: true/);
+  });
+
+  it("CRITICAL: drains for the recorded consumer, and for nobody when there is none", () => {
+    // A worker has no session. Without an answer to "who is signed in" the
+    // background replay would drain EVERY row on the device, and on a shared
+    // phone that means submitting consumer A's receipt under consumer B's
+    // session: 403 FORBIDDEN, which the replay classifies terminal, which
+    // deletes A's only copy of the photo.
+    //
+    // Tied to the drainOutbox call rather than matched anywhere in the file,
+    // the same narrowing the retryFailed assertion above needed.
+    expect(SW_CODE).toMatch(/drainOutbox\(\{[^}]*userId,/);
+    expect(SW_CODE).toContain("const userId = await readActiveUser();");
+    expect(SW_CODE).toContain("if (userId === null) return;");
+  });
+
+  it("and the record it reads really is empty until somebody signs in", async () => {
+    // The executable half. A source match alone would survive a
+    // `readActiveUser` that answered with a constant, which is the failure mode
+    // the guard exists to prevent - it would hand the drain a user id nobody is
+    // signed in as.
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    try {
+      const { readActiveUser, rememberActiveUser } = await import("@/features/pwa/active-user");
+      expect(await readActiveUser()).toBeNull();
+      await rememberActiveUser("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa");
+      expect(await readActiveUser()).toBe("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("and somebody actually writes that record, or the background replay is decoration", () => {
+    // The other direction of the same defect. With the guard above and nothing
+    // writing the record, `readActiveUser()` is always null, the background
+    // drain never runs, and `registerOutboxSync` goes back to being a call
+    // nothing answers - which is the exact bug the top of this file describes.
+    //
+    // The consumer LAYOUT, not /scan: B signs in, lands on /home, never opens
+    // the scan screen, and a sync event fires against A's leftover rows.
+    const layout = readFileSync(
+      join(process.cwd(), "src", "app", "(consumer)", "layout.tsx"),
+      "utf8",
+    )
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\{\/\*[\s\S]*?\*\/\}/g, "")
+      .replace(/\/\/.*$/gm, "");
+
+    expect(layout).toContain("<ActiveUserRecord userId={user.id} />");
   });
 
   it("says nothing to a tab when the drain removed no rows", () => {

@@ -12,7 +12,7 @@ import {
 } from "@/features/pwa/outbox-card-copy";
 import {
   deleteOutboxItem,
-  listOutboxItems,
+  listOutboxItemsForUser,
   updateOutboxItem,
   type OutboxItem,
 } from "@/features/pwa/outbox";
@@ -46,7 +46,20 @@ import { parseSwMessage } from "@/lib/pwa/messages";
 // It renders NOTHING for an empty queue, so both pages pay only an IndexedDB
 // read when there is nothing to show.
 
-export function ReceiptOutbox() {
+export interface ReceiptOutboxProps {
+  /**
+   * The signed-in consumer, from the server component that renders this.
+   *
+   * Both the card and the drain are scoped to it. On a shared phone - the norm
+   * in this market - an unscoped card shows the previous consumer's queued
+   * photos to the next one, and an unscoped drain files their receipt or, worse,
+   * deletes it on the 403 that the storage path guarantees. See
+   * `OutboxItem.user_id`.
+   */
+  readonly userId: string;
+}
+
+export function ReceiptOutbox({ userId }: ReceiptOutboxProps) {
   const [items, setItems] = React.useState<readonly OutboxItem[]>([]);
   const [notice, setNotice] = React.useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = React.useState<string | null>(null);
@@ -60,13 +73,13 @@ export function ReceiptOutbox() {
 
   const refresh = React.useCallback(async () => {
     try {
-      setItems(await listOutboxItems());
+      setItems(await listOutboxItemsForUser(userId));
     } catch {
       // No IndexedDB, or a database that will not open. There is no queue to
       // show and no honest card to draw, so the screen stays as it was.
       setItems([]);
     }
-  }, []);
+  }, [userId]);
 
   const drain = React.useCallback(
     async (retryFailed: boolean) => {
@@ -78,6 +91,7 @@ export function ReceiptOutbox() {
       try {
         await drainOutbox({
           submit: submitCapturedReceipt,
+          userId,
           now: () => Date.now(),
           schedule: scheduleRef.current,
           retryFailed,
@@ -88,7 +102,7 @@ export function ReceiptOutbox() {
         await refresh();
       }
     },
-    [refresh],
+    [refresh, userId],
   );
 
   // Doc 41 section 3: "replay attempts on app launch and on the `online` event".

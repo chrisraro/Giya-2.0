@@ -86,7 +86,7 @@ export default async function ReceiptsPage({ searchParams }: PageProps) {
         job is answering "what happened to the photos I took".
       */}
       <section className="mt-6">
-        <ReceiptOutbox />
+        <ReceiptOutbox userId={user.id} />
       </section>
 
       <section className="mt-6">

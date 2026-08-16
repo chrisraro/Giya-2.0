@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { ActiveUserRecord } from "@/components/pwa/active-user-record";
 import { InstallPrompt } from "@/components/pwa/install-prompt";
 import { OfflineBanner } from "@/components/pwa/offline-banner";
 import { RegisterServiceWorker } from "@/components/pwa/register-service-worker";
@@ -106,6 +107,15 @@ export default async function ConsumerLayout({ children }: { children: React.Rea
         holds that line.
       */}
       <RegisterServiceWorker />
+      {/*
+        Who is signed in, written where the service worker can read it. The
+        Background Sync replay runs with the app closed and has no session, so
+        without this it would drain every row on the device - including the
+        previous consumer's, whose receipt the server's 403 would then have the
+        replay delete. Renders nothing, and nothing for a signed-out visitor on
+        /b/[slug]. See src/features/pwa/active-user.ts.
+      */}
+      {user ? <ActiveUserRecord userId={user.id} /> : null}
       {/*
         Doc 41 section 9's ONE global offline pill. Same layout and the same
         reason as the registration above: the business and admin portals are

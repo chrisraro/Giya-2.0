@@ -15,9 +15,13 @@ import { ReceiptOutbox } from "./receipt-outbox";
 
 // A REAL IndexedDB again: every claim this card makes is a claim about what is
 // on the device, and a stand-in store would let all of them pass vacuously.
+const USER_A = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+const USER_B = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+
 function row(overrides: Partial<OutboxItem> = {}): OutboxItem {
   return {
     id: "row-1",
+    user_id: USER_A,
     image: new NodeBlob(["jpeg"], { type: "image/jpeg" }) as unknown as Blob,
     client_sha256: null,
     business_id: null,
@@ -52,7 +56,7 @@ afterEach(() => {
 
 describe("ReceiptOutbox card (doc 41 section 3)", () => {
   it("renders nothing at all when the queue is empty", async () => {
-    const { container } = render(<ReceiptOutbox />);
+    const { container } = render(<ReceiptOutbox userId={USER_A} />);
 
     await waitFor(() => expect(submitMock.submitCapturedReceipt).not.toHaveBeenCalled());
     expect(container).toBeEmptyDOMElement();
@@ -61,7 +65,7 @@ describe("ReceiptOutbox card (doc 41 section 3)", () => {
   it("counts the waiting receipts, and says receipt rather than receipts for one", async () => {
     await putOutboxItem(row());
 
-    render(<ReceiptOutbox />);
+    render(<ReceiptOutbox userId={USER_A} />);
 
     expect(await screen.findByText("1 receipt waiting to upload")).toBeInTheDocument();
   });
@@ -70,7 +74,7 @@ describe("ReceiptOutbox card (doc 41 section 3)", () => {
     await putOutboxItem(row({ id: "a", captured_at: "2026-08-16T09:00:00.000Z" }));
     await putOutboxItem(row({ id: "b", captured_at: "2026-08-16T09:30:00.000Z", status: "failed", attempts: 5 }));
 
-    render(<ReceiptOutbox />);
+    render(<ReceiptOutbox userId={USER_A} />);
 
     expect(await screen.findByText("2 receipts waiting to upload")).toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
@@ -89,7 +93,7 @@ describe("ReceiptOutbox card (doc 41 section 3)", () => {
     await putOutboxItem(row({ id: "waiting" }));
     await putOutboxItem(row({ id: "done", captured_at: "2026-08-16T09:30:00.000Z", status: "failed" }));
 
-    render(<ReceiptOutbox />);
+    render(<ReceiptOutbox userId={USER_A} />);
 
     await screen.findByText("2 receipts waiting to upload");
     // One Retry button, not two: a row still inside its backoff needs no tap.
@@ -102,7 +106,7 @@ describe("ReceiptOutbox replay (doc 41 sections 3 and 6)", () => {
     await putOutboxItem(row());
     submitMock.submitCapturedReceipt.mockResolvedValue(ACCEPTED);
 
-    render(<ReceiptOutbox />);
+    render(<ReceiptOutbox userId={USER_A} />);
 
     await waitFor(() => expect(submitMock.submitCapturedReceipt).toHaveBeenCalledTimes(1));
     // The row is gone from IndexedDB, not merely from the screen.
@@ -111,7 +115,7 @@ describe("ReceiptOutbox replay (doc 41 sections 3 and 6)", () => {
 
   it("drains again when the connection comes back", async () => {
     await putOutboxItem(row());
-    render(<ReceiptOutbox />);
+    render(<ReceiptOutbox userId={USER_A} />);
     await screen.findByText("1 receipt waiting to upload");
     expect(submitMock.submitCapturedReceipt).toHaveBeenCalledTimes(1);
 
@@ -129,7 +133,7 @@ describe("ReceiptOutbox replay (doc 41 sections 3 and 6)", () => {
     // attempts on a row that has none left - but `online` is, so the two runs
     // pass different answers and this test is what holds them apart.
     await putOutboxItem(row({ status: "failed", attempts: 5, last_error: "network" }));
-    render(<ReceiptOutbox />);
+    render(<ReceiptOutbox userId={USER_A} />);
     await screen.findByText("1 receipt waiting to upload");
     expect(submitMock.submitCapturedReceipt).not.toHaveBeenCalled();
 
@@ -144,7 +148,7 @@ describe("ReceiptOutbox replay (doc 41 sections 3 and 6)", () => {
     await putOutboxItem(row());
     submitMock.submitCapturedReceipt.mockResolvedValue(ACCEPTED);
 
-    render(<ReceiptOutbox />);
+    render(<ReceiptOutbox userId={USER_A} />);
 
     // And it OUTLIVES the row it is about. The queue is empty by now, so a card
     // that unmounted with its last row would have deleted the receipt, uploaded
@@ -169,7 +173,7 @@ describe("ReceiptOutbox replay (doc 41 sections 3 and 6)", () => {
       },
     });
     await putOutboxItem(row());
-    render(<ReceiptOutbox />);
+    render(<ReceiptOutbox userId={USER_A} />);
     await screen.findByText("1 receipt waiting to upload");
 
     await deleteEverything();
@@ -190,7 +194,7 @@ describe("ReceiptOutbox replay (doc 41 sections 3 and 6)", () => {
       },
     });
     await putOutboxItem(row());
-    render(<ReceiptOutbox />);
+    render(<ReceiptOutbox userId={USER_A} />);
     await screen.findByText("1 receipt waiting to upload");
 
     await deleteEverything();
@@ -207,7 +211,7 @@ describe("ReceiptOutbox replay (doc 41 sections 3 and 6)", () => {
 describe("ReceiptOutbox manual actions", () => {
   it("clears the attempt budget when the consumer retries by hand", async () => {
     await putOutboxItem(row({ status: "failed", attempts: 5, last_error: "network" }));
-    render(<ReceiptOutbox />);
+    render(<ReceiptOutbox userId={USER_A} />);
     await screen.findByRole("button", { name: "Retry" });
     // The mount drain left it alone: a `failed` row is the drain's way of
     // saying it is out of automatic attempts, so nothing has been submitted yet.
@@ -223,7 +227,7 @@ describe("ReceiptOutbox manual actions", () => {
 
   it("needs two taps to delete, because the queued photo is the only copy", async () => {
     await putOutboxItem(row());
-    render(<ReceiptOutbox />);
+    render(<ReceiptOutbox userId={USER_A} />);
     await screen.findByText("1 receipt waiting to upload");
 
     fireEvent.click(screen.getByRole("button", { name: "Delete this receipt" }));
@@ -236,6 +240,36 @@ describe("ReceiptOutbox manual actions", () => {
     fireEvent.click(confirm);
 
     await waitFor(async () => expect(await listOutboxItems()).toHaveLength(0));
+  });
+});
+
+describe("the queue card is scoped to the signed-in consumer (T5.3b)", () => {
+  it("CRITICAL: shows nothing of the previous consumer's queue", async () => {
+    // A shared phone - the norm in this market. A's photo is on the device;
+    // B is signed in. B must not see it, and B's drain must not touch it.
+    await putOutboxItem(row({ id: "a-1", user_id: USER_A }));
+
+    const { container } = render(<ReceiptOutbox userId={USER_B} />);
+
+    await waitFor(() => expect(submitMock.submitCapturedReceipt).not.toHaveBeenCalled());
+    expect(container).toBeEmptyDOMElement();
+    // Still on the device, waiting for A to sign back in. The card being empty
+    // must not mean the receipt was thrown away.
+    expect(await listOutboxItems()).toHaveLength(1);
+  });
+
+  it("counts only this consumer's receipts", async () => {
+    await putOutboxItem(row({ id: "a-1", user_id: USER_A }));
+    await putOutboxItem(
+      row({ id: "b-1", user_id: USER_B, captured_at: "2026-08-16T09:01:00.000Z" }),
+    );
+
+    render(<ReceiptOutbox userId={USER_B} />);
+
+    // "1 receipt", not "2 receipts". The other half of the assertion above: a
+    // scope that hid everything would pass an emptiness check and ship a card
+    // that never shows anybody their own queue.
+    expect(await screen.findByText("1 receipt waiting to upload")).toBeInTheDocument();
   });
 });
 

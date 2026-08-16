@@ -36,6 +36,7 @@ function receiptBlob(bytes = "jpeg-bytes"): Blob {
 function row(overrides: Partial<OutboxItem> = {}): OutboxItem {
   return {
     id: "row-1",
+    user_id: USER_A,
     image: receiptBlob(),
     client_sha256: "a".repeat(64),
     business_id: "3f1b0d9c-4444-4444-8444-444444444444",
@@ -72,6 +73,10 @@ function transportFailure(offline: boolean, imagePath: string | null = null): Re
   return { ok: false, error: networkError(offline), imagePath };
 }
 
+/** The signed-in consumer in every test below, unless it says otherwise. */
+const USER_A = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+const USER_B = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+
 const NOW = Date.parse("2026-08-16T10:00:00.000Z");
 
 function harness(outcomes: ReceiptSubmissionOutcome[], retryFailed = false) {
@@ -89,6 +94,7 @@ function harness(outcomes: ReceiptSubmissionOutcome[], retryFailed = false) {
     },
     deps: {
       submit: submit as SubmitReceipt,
+      userId: USER_A,
       now: () => clock,
       schedule,
       // Required, never defaulted: whether a run may touch rows that have
@@ -758,5 +764,100 @@ describe("background sync tag (doc 41 section 6)", () => {
     };
 
     expect(await registerOutboxSync(container as unknown as ServiceWorkerContainer)).toBe(false);
+  });
+});
+
+describe("the drain is scoped to one consumer (T5.3b)", () => {
+  // THE SHARED PHONE. A queues a receipt offline, B signs in, B's drain runs.
+  // Before this scope, B's drain submitted A's row: the storage path carries
+  // A's user id, `assertOwnedImagePath` answers 403 FORBIDDEN, FORBIDDEN is on
+  // the terminal allowlist, and the row - A's only copy of that photo - was
+  // deleted. A row that had never uploaded was worse: it was filed against B.
+  //
+  // The assertions are about what reached the network and what is left in the
+  // database afterwards, never about a filter being called.
+
+  it("CRITICAL: never submits another consumer's receipt", async () => {
+    // A's row is FIRST by capture time, so an unscoped FIFO drain reaches it
+    // before B's. Distinct keys, so the assertion below names which row went.
+    await putOutboxItem(
+      row({
+        id: "a-1",
+        user_id: USER_A,
+        captured_at: "2026-08-16T09:00:00.000Z",
+        idempotency_key: "key-belonging-to-a",
+      }),
+    );
+    await putOutboxItem(
+      row({
+        id: "b-1",
+        user_id: USER_B,
+        captured_at: "2026-08-16T09:01:00.000Z",
+        idempotency_key: "key-belonging-to-b",
+      }),
+    );
+    const { submit, deps } = harness([ACCEPTED]);
+
+    await drainOutbox({ ...deps, userId: USER_B });
+
+    // Exactly one submission, and it carried B's row. `submit` is the only path
+    // to the network in this module, so "was never called with it" is the whole
+    // of "was never sent".
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0]?.[0]?.idempotencyKey).toBe("key-belonging-to-b");
+  });
+
+  it("CRITICAL: leaves the other consumer's row exactly as it was", async () => {
+    await putOutboxItem(row({ id: "a-1", user_id: USER_A }));
+    const { deps } = harness([ACCEPTED]);
+
+    await drainOutbox({ ...deps, userId: USER_B });
+
+    // Not deleted, not marked failed, no attempt spent. The row is still
+    // waiting for A to sign back in on this phone.
+    const [survivor] = await listOutboxItems();
+    expect(survivor?.id).toBe("a-1");
+    expect(survivor?.status).toBe("queued");
+    expect(survivor?.attempts).toBe(0);
+    expect(survivor?.last_error).toBeNull();
+  });
+
+  it("CRITICAL: a FORBIDDEN drain cannot reach another consumer's row at all", async () => {
+    // The exact destruction path, run end to end. 403 FORBIDDEN is terminal -
+    // `classifyReplayOutcome` deletes the row for it, and that is correct for a
+    // receipt of YOUR OWN the server has refused. The scope is what keeps it
+    // from ever being applied to somebody else's.
+    await putOutboxItem(row({ id: "a-1", user_id: USER_A, image_path: `${USER_A}/x.jpg` }));
+    const { submit, deps } = harness([failure(403, "FORBIDDEN")]);
+
+    await drainOutbox({ ...deps, userId: USER_B });
+
+    expect(submit).not.toHaveBeenCalled();
+    expect(await listOutboxItems()).toHaveLength(1);
+  });
+
+  it("CRITICAL: never drains a row with no owner", async () => {
+    await putOutboxItem(row({ id: "orphan", user_id: null }));
+    const { submit, deps } = harness([ACCEPTED]);
+
+    const result = await drainOutbox({ ...deps, userId: USER_A });
+
+    expect(submit).not.toHaveBeenCalled();
+    expect(result.attempted).toBe(0);
+    expect(await listOutboxItems()).toHaveLength(1);
+  });
+
+  it("still drains this consumer's own rows, so the scope is not a global off switch", async () => {
+    // The other half of every scoping assertion: a filter that blocked
+    // everything would satisfy all four tests above and ship a queue that never
+    // uploads anything.
+    await putOutboxItem(row({ id: "a-1", user_id: USER_A }));
+    const { submit, deps } = harness([ACCEPTED]);
+
+    const result = await drainOutbox({ ...deps, userId: USER_A });
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(result.sent).toBe(1);
+    expect(await listOutboxItems()).toHaveLength(0);
   });
 });

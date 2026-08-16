@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { motion, useReducedMotion } from "motion/react";
 
 import { Button } from "@/components/ui/button";
+import { forgetActiveUser } from "@/features/pwa/active-user";
 import { postUserCachePurge } from "@/lib/pwa/logout-purge";
 
 import { revokeDevice } from "../actions";
@@ -78,6 +79,9 @@ export function DeviceList({ devices: initial }: DeviceListProps) {
         postUserCachePurge(
           typeof navigator === "undefined" ? undefined : navigator.serviceWorker,
         );
+        // And the same forget, so the background replay stops until somebody
+        // opens a consumer page again.
+        void forgetActiveUser();
         // `replace`, not `push`: there is nothing to go back to.
         router.replace("/login");
         return;

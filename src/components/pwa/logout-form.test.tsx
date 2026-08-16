@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
+import { Blob as NodeBlob } from "node:buffer";
 
 import { swMessageAction } from "@/lib/pwa/messages";
 
@@ -68,10 +70,15 @@ beforeEach(() => {
   signOutBehaviour = "resolve";
   signOut.mockClear();
   installServiceWorker(new FakeController());
+  // A REAL IndexedDB, same seam as outbox.test.ts: the two storage claims this
+  // file makes - the queue survives, the active user does not - are claims
+  // about what is on the device, and a stand-in store would pass either way.
+  vi.stubGlobal("indexedDB", new IDBFactory());
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function renderForm() {
@@ -164,6 +171,48 @@ describe("LogoutForm", () => {
       .replace(/\/\/.*$/gm, "");
 
     expect(code).toContain("<form action={logOutAction}");
+  });
+
+  it("CRITICAL: does not delete the queued receipts, which were promised to be kept", async () => {
+    // THE DECISION THIS PINS. Doc 41 section 8's logout purge covers the
+    // IndexedDB snapshot - a cache of data the server already has. The outbox
+    // is different in kind: it holds the only copy of a photo the consumer was
+    // told was SAVED ("Saved on your phone. We will send it when you are back
+    // online."). Deleting it here would make that sentence false, silently, on
+    // a tap that was about ending a session. `user_id` is what closes the
+    // cross-user exposure instead, so A's rows are invisible to B AND still
+    // there when A signs back in on this phone.
+    const { putOutboxItem, listOutboxItems } = await import("@/features/pwa/outbox");
+    await putOutboxItem({
+      id: "a-1",
+      user_id: "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+      image: new NodeBlob(["jpeg"], { type: "image/jpeg" }) as unknown as Blob,
+      client_sha256: null,
+      business_id: null,
+      captured_at: "2026-08-16T09:00:00.000Z",
+      idempotency_key: "22222222-2222-4222-8222-222222222222",
+      image_path: null,
+      attempts: 0,
+      last_error: null,
+      status: "queued",
+    });
+
+    await logOutAction();
+
+    expect(await listOutboxItems()).toHaveLength(1);
+  });
+
+  it("CRITICAL: forgets who was signed in, so a background drain stops", async () => {
+    // The Background Sync replay runs with the app closed and reads this
+    // record to decide whose rows it may touch. Leaving it set would let a
+    // sync event fire against the departed consumer's rows under whatever
+    // session comes next. See src/features/pwa/active-user.ts.
+    const { rememberActiveUser, readActiveUser } = await import("@/features/pwa/active-user");
+    await rememberActiveUser("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa");
+
+    await logOutAction();
+
+    await waitFor(async () => expect(await readActiveUser()).toBeNull());
   });
 
   it("renders the caller's own control, so the three logout surfaces keep their styling", () => {

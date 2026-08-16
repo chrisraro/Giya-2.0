@@ -9,7 +9,9 @@ import {
   OUTBOX_MAX_ITEMS,
   deleteOutboxItem,
   enqueueCapturedReceipt,
+  isOutboxItemOwnedBy,
   listOutboxItems,
+  listOutboxItemsForUser,
   openOutbox,
   putOutboxItem,
   updateOutboxItem,
@@ -48,8 +50,12 @@ function receiptBlob(bytes = "jpeg-bytes"): Blob {
   return new NodeBlob([bytes], { type: "image/jpeg" }) as unknown as Blob;
 }
 
+const USER_A = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+const USER_B = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+
 const CAPTURE: EnqueueReceiptInput = {
   id: "11111111-1111-4111-8111-111111111111",
+  userId: USER_A,
   image: receiptBlob(),
   clientSha256: "a".repeat(64),
   businessId: "3f1b0d9c-4444-4444-8444-444444444444",
@@ -65,6 +71,7 @@ function capture(overrides: Partial<EnqueueReceiptInput> = {}): EnqueueReceiptIn
 function storedRow(index: number): OutboxItem {
   return {
     id: `row-${index}`,
+    user_id: USER_A,
     image: receiptBlob(),
     client_sha256: `${index}`.repeat(4),
     business_id: null,
@@ -127,11 +134,18 @@ describe("outbox schema (doc 41 section 3)", () => {
     await enqueueCapturedReceipt(capture());
 
     const [item] = await listOutboxItems();
-    // Doc 41 section 3's nine, plus `image_path`. The tenth is not decoration:
-    // the uploads endpoint mints a fresh path per call, so without it every
-    // replay sends a different body under the same Idempotency-Key and the
-    // stored-response replay doc 41 calls "the primary replay guard" can never
-    // fire for an outbox item. See the field's own comment.
+    // Doc 41 section 3's nine, plus TWO the spec does not list.
+    //
+    // `image_path`: the uploads endpoint mints a fresh path per call, so
+    // without it every replay sends a different body under the same
+    // Idempotency-Key and the stored-response replay doc 41 calls "the primary
+    // replay guard" can never fire for an outbox item.
+    //
+    // `user_id`: whose receipt this is. Without it a shared phone lets the next
+    // consumer's drain pick up this row, and the server's 403 on the
+    // user-scoped storage path is classified terminal, which deletes it.
+    //
+    // Both have their own comments on the field.
     expect(Object.keys(item ?? {}).sort()).toEqual([
       "attempts",
       "business_id",
@@ -143,6 +157,7 @@ describe("outbox schema (doc 41 section 3)", () => {
       "image_path",
       "last_error",
       "status",
+      "user_id",
     ]);
     expect(item?.status).toBe("queued");
     expect(item?.attempts).toBe(0);
@@ -435,5 +450,92 @@ describe("outbox row updates", () => {
     vi.resetModules();
     const after = await import("./outbox");
     expect(await after.listOutboxItems()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// User scope (T5.3b)
+// ---------------------------------------------------------------------------
+//
+// THE FAILURE THESE PIN. Consumer A queues a receipt offline on a shared phone
+// - the norm in this market. Consumer B signs in. B's drain picks up A's row,
+// submits it under B's session, and `assertOwnedImagePath`
+// (src/features/receipts/server/submit.ts) answers 403 FORBIDDEN because the
+// storage path carries A's user id. FORBIDDEN is on the replay's terminal
+// allowlist, so the row is deleted: A's only copy of that photo, gone, because
+// somebody else logged in. If the row had never uploaded it is worse - the
+// drain presigns a fresh path under B and files A's purchase against B's
+// account.
+//
+// Every assertion below is about which ROWS a reader can reach, not about
+// whether a filter function was called.
+
+describe("outbox user scope (T5.3b)", () => {
+  it("stamps the capturing consumer on the row", async () => {
+    await enqueueCapturedReceipt(capture({ userId: USER_B }));
+
+    const [item] = await listOutboxItems();
+    expect(item?.user_id).toBe(USER_B);
+  });
+
+  it("CRITICAL: one consumer's read never reaches another's rows", async () => {
+    await enqueueCapturedReceipt(capture({ id: "a-1", userId: USER_A }));
+    await enqueueCapturedReceipt(capture({ id: "b-1", userId: USER_B }));
+
+    // Both rows really are on the device...
+    expect(await listOutboxItems()).toHaveLength(2);
+    // ...and each consumer sees exactly one of them.
+    expect((await listOutboxItemsForUser(USER_A)).map((item) => item.id)).toEqual(["a-1"]);
+    expect((await listOutboxItemsForUser(USER_B)).map((item) => item.id)).toEqual(["b-1"]);
+  });
+
+  it("keeps FIFO order by capture time within one consumer's rows", async () => {
+    await enqueueCapturedReceipt(
+      capture({ id: "a-late", userId: USER_A, capturedAt: "2026-08-16T09:05:00.000Z" }),
+    );
+    await enqueueCapturedReceipt(
+      capture({ id: "b-mid", userId: USER_B, capturedAt: "2026-08-16T09:03:00.000Z" }),
+    );
+    await enqueueCapturedReceipt(
+      capture({ id: "a-early", userId: USER_A, capturedAt: "2026-08-16T09:01:00.000Z" }),
+    );
+
+    expect((await listOutboxItemsForUser(USER_A)).map((item) => item.id)).toEqual([
+      "a-early",
+      "a-late",
+    ]);
+  });
+
+  it("CRITICAL: a row with no owner belongs to nobody, not to everybody", async () => {
+    // Rows written before `user_id` existed. Adopting one is precisely the
+    // misfiling this field prevents, so the safe direction is to leave it
+    // unreachable. No build with an outbox has ever been deployed, so outside a
+    // developer's browser this population is empty.
+    await putOutboxItem({ ...storedRow(1), id: "orphan", user_id: null });
+
+    expect(await listOutboxItems()).toHaveLength(1);
+    expect(await listOutboxItemsForUser(USER_A)).toEqual([]);
+    expect(await listOutboxItemsForUser(USER_B)).toEqual([]);
+    expect(await listOutboxItemsForUser("")).toEqual([]);
+  });
+
+  it("answers ownership as a shared predicate, so readers cannot drift apart", () => {
+    expect(isOutboxItemOwnedBy({ ...storedRow(1), user_id: USER_A }, USER_A)).toBe(true);
+    expect(isOutboxItemOwnedBy({ ...storedRow(1), user_id: USER_A }, USER_B)).toBe(false);
+    expect(isOutboxItemOwnedBy({ ...storedRow(1), user_id: null }, USER_A)).toBe(false);
+  });
+
+  it("counts the cap per consumer, so the refusal sentence stays true", async () => {
+    // "Upload your pending receipts first." is simply false said to somebody
+    // whose own queue is empty because the previous consumer filled the phone.
+    for (let index = 0; index < OUTBOX_MAX_ITEMS; index += 1) {
+      await putOutboxItem({ ...storedRow(index), id: `a-${index}`, user_id: USER_A });
+    }
+
+    const refused = await enqueueCapturedReceipt(capture({ id: "a-next", userId: USER_A }));
+    expect(refused).toEqual({ ok: false, reason: "cap", message: OUTBOX_FULL_MESSAGE });
+
+    const accepted = await enqueueCapturedReceipt(capture({ id: "b-first", userId: USER_B }));
+    expect(accepted.ok).toBe(true);
   });
 });
