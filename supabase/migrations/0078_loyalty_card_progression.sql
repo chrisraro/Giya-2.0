@@ -97,10 +97,42 @@
 --     This is the one guard in this file whose absence is unbounded, and
 --     `rpc_loyalty_progression_smoke.sql` assertion 31 pins it against a
 --     receipt the daily cap demonstrably was NOT refusing.
--- (d) The completion claim does NOT decrement `rewards.remaining` and does
---     NOT enforce `per_customer_limit`. Both of those are guards that RAISE
---     in `claim_reward`, and a raise here would roll back the ledger write
---     the consumer legitimately earned. doc 35 step 11 names neither.
+-- (d) The completion claim runs `claim_reward`'s LEDGER path with NONE of
+--     `claim_reward`'s GUARDS. Stated in full, because "reuses the claim
+--     writer" is otherwise read as "reuses the claim function":
+--
+--       1. reward liveness - `is_active`, `deleted_at is null`, and the
+--          owning campaign being `active` and inside its window. A merchant
+--          who deactivates the prize still has it minted for anyone who
+--          completes a card. (The PROGRAM's campaign is checked for liveness
+--          above; the REWARD's own campaign is not, and they can differ.)
+--       2. the reward's own `per_customer_limit`
+--       3. the campaign's `budget.per_customer_limit`
+--       4. the campaign's `budget.max_redemptions` - the merchant's hard cap
+--          on prizes a campaign may issue. Loyalty completions neither check
+--          it NOR count toward it, so a campaign can exceed a cap its owner
+--          set, and `claim_reward`'s own count (which reads `reward_claims`)
+--          WILL see these rows and treat them as consuming the budget.
+--       5. `rewards.remaining` - inventory is not decremented, so a
+--          completion prize is never out of stock and never draws down a
+--          finite one.
+--       6. the campaign row lock 0015 takes before any campaign-wide count.
+--
+--     Consumer blacklisting is NOT in this list: `award_receipt_points`
+--     already refuses a `blacklisted` pair (CUSTOMER_BLACKLISTED) several
+--     steps before step 11 runs, so that guard is covered upstream.
+--
+--     WHY. Every one of 1-5 is expressed in `claim_reward` as a RAISE, and a
+--     raise here would abort the whole award - the consumer's legitimately
+--     earned points ledger row included. doc 35 step 11 names none of them.
+--
+--     WHAT THIS DOES NOT CLAIM. Avoiding the rollback did not REQUIRE
+--     ignoring them: skipping the stamp when a guard fails, or completing
+--     the card and declining to issue the claim, both avoid it too. Those
+--     are product decisions about what a consumer who filled a card is owed
+--     when the prize behind it has been withdrawn, and this task does not
+--     own them. What ships is the permissive reading; the alternatives are
+--     recorded here so the next person chooses rather than discovers.
 -- (e) The clawback unwinds PROGRESS only. `completed_count` stands and the
 --     completion claim is not cancelled: doc 35 section 9 names progress, and
 --     the prize may already be in the consumer's hands or redeemed at a
@@ -287,10 +319,16 @@ create policy rewards_cardholder_select on public.rewards
 -- writing: the completion prize below must NOT be a second, parallel claim
 -- writer. This is `claim_reward`'s (0013/0015) steps 4, 5 and 6 lifted
 -- verbatim - the claim row, the redeem ledger row, the link back, and the
--- balance cache - with claim_reward's own GUARDS (reward liveness, blacklist,
--- per-customer limits, campaign budget, inventory, balance) left where they
--- are. Those guards raise; a raise inside the award path would roll back a
--- ledger write the consumer legitimately earned.
+-- balance cache.
+--
+-- IT IS THE LEDGER PATH, NOT THE GUARDS. `claim_reward`'s six guards (reward
+-- liveness, the reward's per_customer_limit, the campaign's
+-- per_customer_limit, the campaign's max_redemptions, inventory, and the
+-- campaign row lock) stay in `claim_reward` and DO NOT run for a loyalty
+-- completion. Decision (d) in this file's header lists all six by name, says
+-- which one is covered upstream instead (blacklisting, by
+-- award_receipt_points), and states plainly that skipping them was a choice
+-- with alternatives rather than the only way to avoid the rollback.
 --
 -- `p_points_cost = 0` (the loyalty completion) skips the whole ledger branch
 -- because 0012's points_transactions carries `check (points <> 0)`: a

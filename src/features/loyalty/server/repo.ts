@@ -20,13 +20,28 @@ import { createClient } from "@/lib/supabase/server";
 // the target and keeps the carryover in the same transaction), which is
 // correct - the consumer has started a new card and `completedCount` is where
 // the finished ones are counted.
+//
+// ---------------------------------------------------------------------------
+// BOTH READS THROW ON A QUERY ERROR. THEY DO NOT RETURN `[]` OR `null` FOR IT.
+// ---------------------------------------------------------------------------
+// `src/features/rewards/server/repo.ts` settled this exact question on this
+// exact money path and its reasoning transfers without amendment: `[]` here
+// does not render as "something went wrong", it renders as the /cards empty
+// state - "No stamp cards yet. Scan receipts at participating shops to start
+// collecting stamps." A consumer whose read just failed would be told, in
+// copy, that the stamps they have been collecting do not exist. Failing open
+// is not a safe default; failing loud is the caller's signal to degrade
+// deliberately.
+//
+// The split is between "the query failed" and "the answer is genuinely
+// nothing": no cards, and a card id that matches nothing, are both real,
+// common states and stay non-throwing.
 // ===========================================================================
 
 export type LoyaltyCardDTO = {
   id: string;
   businessId: string;
   businessName: string;
-  programId: string;
   programType: LoyaltyProgramType;
   /** `loyalty_cards.progress`, in the program's own unit. */
   stampsCount: number;
@@ -36,40 +51,21 @@ export type LoyaltyCardDTO = {
   prizeRewardName: string;
   completedCount: number;
   isCompleted: boolean;
-  lastStampAt: string | null;
   /** `loyalty_programs.stamp_icon` - a Material Symbols name, or null. */
   stampIcon: string | null;
 };
 
-/**
- * The row shape PostgREST returns for CARD_SELECT. Written out rather than
- * inferred because `src/lib/supabase/types.ts` still carries 0066's column
- * list for this table and would type-check the wrong schema.
- */
-type CardRow = {
-  id: string;
-  business_id: string;
-  program_id: string;
-  progress: number | null;
-  completed_count: number | null;
-  last_stamp_at: string | null;
-  businesses: { name: string } | null;
-  loyalty_programs: {
-    program_type: LoyaltyProgramType;
-    target_value: number;
-    stamp_icon: string | null;
-    resets_on_completion: boolean;
-    rewards: { name: string } | null;
-  } | null;
-};
-
+// No `as any` on either query. `src/lib/supabase/types.ts` carries 0012's
+// column list for this table (`progress`, `completed_count`, `consumer_id`)
+// and both composite FK relationships, so the generated types resolve
+// CARD_SELECT - including the two-level `loyalty_programs -> rewards` nest -
+// on their own. Casting the client would throw away the only static check
+// that can catch this embed breaking.
 const CARD_SELECT = `
   id,
   business_id,
-  program_id,
   progress,
   completed_count,
-  last_stamp_at,
   businesses (
     name
   ),
@@ -77,36 +73,55 @@ const CARD_SELECT = `
     program_type,
     target_value,
     stamp_icon,
-    resets_on_completion,
     rewards (
       name
     )
   )
-`;
+` as const;
+
+/**
+ * The row shape CARD_SELECT returns. Declared rather than inferred so the
+ * assignment below is a compile-time assertion that the query still returns
+ * what this module reads - if the embed ever stops resolving, or a column is
+ * renamed, `tsc` says so instead of `/cards` quietly emptying.
+ */
+type CardRow = {
+  id: string;
+  business_id: string;
+  progress: number;
+  completed_count: number;
+  businesses: { name: string } | null;
+  loyalty_programs: {
+    program_type: string;
+    target_value: number;
+    stamp_icon: string | null;
+    rewards: { name: string } | null;
+  } | null;
+};
 
 function toDTO(row: CardRow): LoyaltyCardDTO | null {
-  const program = row?.loyalty_programs;
+  const program = row.loyalty_programs;
   // The program is the source of the target; without it there is no card to
-  // show. 0078's `loyalty_programs_cardholder_select` policy is what keeps
+  // render. 0078's `loyalty_programs_cardholder_select` policy is what keeps
   // this from happening when a merchant pauses the campaign behind a card the
-  // consumer already holds.
+  // consumer already holds - but a soft-deleted program, or that policy ever
+  // being dropped, lands here, and a card with no target is not something to
+  // guess a denominator for.
   if (!program) return null;
 
-  const progress: number = row.progress ?? 0;
-  const target: number = program.target_value;
+  const progress = row.progress ?? 0;
+  const target = program.target_value;
 
   return {
     id: row.id,
     businessId: row.business_id,
     businessName: row.businesses?.name ?? "Shop",
-    programId: row.program_id,
-    programType: program.program_type,
+    programType: program.program_type as LoyaltyProgramType,
     stampsCount: progress,
     stampsTarget: target,
     prizeRewardName: program.rewards?.name ?? "Free prize",
     completedCount: row.completed_count ?? 0,
     isCompleted: progress >= target,
-    lastStampAt: row.last_stamp_at ?? null,
     stampIcon: program.stamp_icon ?? null,
   };
 }
@@ -119,16 +134,18 @@ export async function listMyLoyaltyCards(): Promise<LoyaltyCardDTO[]> {
 
   if (!user) return [];
 
-  const { data, error } = await (supabase as any)
+  const { data, error } = await supabase
     .from("loyalty_cards")
     .select(CARD_SELECT)
     .eq("consumer_id", user.id);
 
-  if (error || !data) return [];
+  if (error) {
+    throw new Error(`listMyLoyaltyCards: failed to load loyalty cards: ${error.message}`);
+  }
 
-  return (data as CardRow[])
-    .map(toDTO)
-    .filter((card): card is LoyaltyCardDTO => card !== null);
+  const rows: CardRow[] = data ?? [];
+
+  return rows.map(toDTO).filter((card): card is LoyaltyCardDTO => card !== null);
 }
 
 export async function getLoyaltyCard(cardId: string): Promise<LoyaltyCardDTO | null> {
@@ -139,7 +156,7 @@ export async function getLoyaltyCard(cardId: string): Promise<LoyaltyCardDTO | n
 
   if (!user) return null;
 
-  const { data, error } = await (supabase as any)
+  const { data, error } = await supabase
     .from("loyalty_cards")
     .select(CARD_SELECT)
     .eq("id", cardId)
@@ -149,7 +166,15 @@ export async function getLoyaltyCard(cardId: string): Promise<LoyaltyCardDTO | n
     .eq("consumer_id", user.id)
     .maybeSingle();
 
-  if (error || !data) return null;
+  if (error) {
+    throw new Error(`getLoyaltyCard: failed to load loyalty card: ${error.message}`);
+  }
 
-  return toDTO(data as CardRow);
+  // `null` past this point means the id matched nothing the caller owns - a
+  // genuine miss, which the page turns into notFound().
+  if (!data) return null;
+
+  const row: CardRow = data;
+
+  return toDTO(row);
 }

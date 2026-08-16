@@ -12,14 +12,12 @@ const stampCard = {
   id: "card-1",
   businessId: "biz-1",
   businessName: "Boba Haven",
-  programId: "prog-1",
   programType: "visit_count",
   stampsCount: 5,
   stampsTarget: 10,
   prizeRewardName: "Free Boba Milk Tea",
   completedCount: 0,
   isCompleted: false,
-  lastStampAt: "2026-09-10T16:00:00.000Z",
   stampIcon: null,
 };
 

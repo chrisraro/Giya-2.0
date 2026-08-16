@@ -24,8 +24,13 @@ export default async function CardDetailPage({
   const stampSlots = showGrid
     ? Array.from({ length: card.stampsTarget }, (_, i) => i < card.stampsCount)
     : [];
+  // Math.min is load-bearing: decision (b) in 0078 completes a card once per
+  // receipt and keeps the whole carryover, so a 350-point receipt against a
+  // 100-point target leaves progress at 250 and the bar at 250%.
   const pct = Math.min(100, Math.round((card.stampsCount / card.stampsTarget) * 100));
-  const remaining = Math.max(0, card.stampsTarget - card.stampsCount);
+  // No clamp on `remaining`: it renders only in the `!isCompleted` branch and
+  // `isCompleted` IS `progress >= target`, so it cannot be negative here.
+  const remaining = card.stampsTarget - card.stampsCount;
   const stampGlyph = card.stampIcon ?? "verified";
 
   return (

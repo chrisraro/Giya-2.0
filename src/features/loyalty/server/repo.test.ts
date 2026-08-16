@@ -19,16 +19,13 @@ function rowFor(overrides: Record<string, unknown> = {}) {
   return {
     id: "card-1",
     business_id: "biz-1",
-    program_id: "prog-1",
     progress: 3,
     completed_count: 0,
-    last_stamp_at: "2026-09-10T16:00:00.000Z",
     businesses: { name: "Boba Shop" },
     loyalty_programs: {
       program_type: "visit_count",
       target_value: 10,
       stamp_icon: "local_cafe",
-      resets_on_completion: true,
       rewards: { name: "Free Boba" },
     },
     ...overrides,
@@ -58,6 +55,28 @@ describe("Loyalty Server Repo", () => {
     expect(cards[0]!.programType).toBe("visit_count");
     expect(cards[0]!.stampIcon).toBe("local_cafe");
     expect(cards[0]!.completedCount).toBe(0);
+  });
+
+  it("actually asks PostgREST for the program embed", async () => {
+    // The mock answers whatever the select string says, so every assertion
+    // above passes with the `loyalty_programs ( ... )` block DELETED from
+    // CARD_SELECT - the fixture would still supply it. Only the request text
+    // pins that the join is really being asked for.
+    const eq = vi.fn().mockResolvedValue({ data: [rowFor()], error: null });
+    const select = vi.fn().mockReturnValue({ eq });
+    mockClient({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u-1" } } }) },
+      from: vi.fn().mockReturnValue({ select }),
+    });
+
+    await listMyLoyaltyCards();
+
+    const requested = select.mock.calls[0]![0] as string;
+    expect(requested).toContain("loyalty_programs (");
+    expect(requested).toContain("rewards (");
+    expect(requested).toContain("businesses (");
+    expect(requested).toContain("target_value");
+    expect(requested).toContain("program_type");
   });
 
   it("listMyLoyaltyCards scopes the read to the caller's consumer_id", async () => {
@@ -135,6 +154,118 @@ describe("Loyalty Server Repo", () => {
     expect(eqConsumer).toHaveBeenCalledWith("consumer_id", "u-1");
     expect(card!.stampsTarget).toBe(10);
     expect(card!.prizeRewardName).toBe("Free Boba");
+  });
+
+  // -------------------------------------------------------------------
+  // Failing loud. `[]` renders as "No stamp cards yet. Scan receipts at
+  // participating shops to start collecting stamps." - a consumer whose read
+  // FAILED would be told, in copy, that they have no cards. This module now
+  // takes the same posture `src/features/rewards/server/repo.ts` already
+  // settled on for the identical defect class on the same money path.
+  // -------------------------------------------------------------------
+
+  it("throws when the card query fails instead of reporting an empty wallet", async () => {
+    const eq = vi.fn().mockResolvedValue({
+      data: null,
+      error: { message: "connection reset by peer" },
+    });
+    mockClient({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u-1" } } }) },
+      from: vi.fn().mockReturnValue({ select: vi.fn().mockReturnValue({ eq }) }),
+    });
+
+    await expect(listMyLoyaltyCards()).rejects.toThrow(/connection reset by peer/);
+  });
+
+  it("throws even when the failed query also handed back a row array", async () => {
+    // PostgREST can return a non-null `data` alongside an error; keying the
+    // refusal on `error` and not on `!data` is the property.
+    const eq = vi.fn().mockResolvedValue({
+      data: [],
+      error: { message: "statement timeout" },
+    });
+    mockClient({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u-1" } } }) },
+      from: vi.fn().mockReturnValue({ select: vi.fn().mockReturnValue({ eq }) }),
+    });
+
+    await expect(listMyLoyaltyCards()).rejects.toThrow(/statement timeout/);
+  });
+
+  it("still returns an empty list when the consumer genuinely holds no cards", async () => {
+    // The other half of the split: no cards is a real, common state and must
+    // NOT throw, or the refusal above would just be "this function always
+    // throws".
+    const eq = vi.fn().mockResolvedValue({ data: [], error: null });
+    mockClient({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u-1" } } }) },
+      from: vi.fn().mockReturnValue({ select: vi.fn().mockReturnValue({ eq }) }),
+    });
+
+    await expect(listMyLoyaltyCards()).resolves.toEqual([]);
+  });
+
+  it("getLoyaltyCard throws on a query failure but returns null for a genuine miss", async () => {
+    const failing = vi.fn().mockResolvedValue({
+      data: null,
+      error: { message: "connection reset by peer" },
+    });
+    const chain = (maybeSingle: unknown) => ({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u-1" } } }) },
+      from: vi.fn().mockReturnValue({
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ maybeSingle }) }),
+        }),
+      }),
+    });
+
+    mockClient(chain(failing));
+    await expect(getLoyaltyCard("card-1")).rejects.toThrow(/connection reset by peer/);
+
+    mockClient(chain(vi.fn().mockResolvedValue({ data: null, error: null })));
+    await expect(getLoyaltyCard("card-1")).resolves.toBeNull();
+  });
+
+  // -------------------------------------------------------------------
+  // The paused-campaign path. `loyalty_programs_cardholder_select` (0078) is
+  // what normally keeps the embed populated after a merchant pauses the
+  // campaign; if it is ever dropped or a program is soft-deleted, the embed
+  // comes back null and there is no target to render against.
+  // -------------------------------------------------------------------
+
+  it("drops a card whose program embed came back empty rather than rendering a broken one", async () => {
+    const eq = vi.fn().mockResolvedValue({
+      data: [rowFor({ id: "card-visible" }), rowFor({ id: "card-orphan", loyalty_programs: null })],
+      error: null,
+    });
+    mockClient({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u-1" } } }) },
+      from: vi.fn().mockReturnValue({ select: vi.fn().mockReturnValue({ eq }) }),
+    });
+
+    const cards = await listMyLoyaltyCards();
+
+    // The orphan is gone AND the healthy sibling in the same response
+    // survived - without the second half, "length 1" is equally satisfied by
+    // a filter that dropped everything.
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.id).toBe("card-visible");
+  });
+
+  it("getLoyaltyCard returns null when the program embed came back empty", async () => {
+    const maybeSingle = vi
+      .fn()
+      .mockResolvedValue({ data: rowFor({ loyalty_programs: null }), error: null });
+    mockClient({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u-1" } } }) },
+      from: vi.fn().mockReturnValue({
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ maybeSingle }) }),
+        }),
+      }),
+    });
+
+    await expect(getLoyaltyCard("card-1")).resolves.toBeNull();
   });
 
   it("returns nothing when there is no signed-in user", async () => {

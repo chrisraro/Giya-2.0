@@ -562,10 +562,38 @@ one completion per qualifying receipt even when the carryover would
 immediately re-complete; a non-resetting card that has reached its target is
 **finished** and takes no further stamps (without that stop, "freezes at
 target" means every later receipt re-fires completion and mints another free
-prize); the completion claim does not decrement inventory or enforce
-`per_customer_limit`; and the clawback unwinds progress only —
-`completed_count` and any issued claim stand, because the prize may already be
-redeemed.
+prize); and the clawback unwinds progress only — `completed_count` and any
+issued claim stand, because the prize may already be redeemed.
+
+**Decision (d) deserves its own paragraph: a loyalty completion runs
+`claim_reward`'s ledger path with NONE of `claim_reward`'s guards.** All six
+that are skipped, by name:
+
+1. **reward liveness** — `is_active`, `deleted_at`, and the reward's own
+   campaign being active and in window. A merchant who retires the prize still
+   has it minted. (The *program's* campaign liveness IS checked; the
+   *reward's* is not, and the two can differ.)
+2. the reward's own `per_customer_limit`
+3. the campaign's `budget.per_customer_limit`
+4. **the campaign's `budget.max_redemptions`** — the merchant's hard cap on
+   prizes a campaign may issue. Completions neither check it nor count toward
+   it, yet `claim_reward`'s own count reads `reward_claims` and *will* see
+   these rows, so the cap can be exceeded from one side and consumed from the
+   other.
+5. `rewards.remaining` — inventory is never decremented.
+6. the campaign row lock 0015 takes before any campaign-wide count.
+
+Consumer **blacklisting is not** in that list: `award_receipt_points` refuses
+a `blacklisted` pair long before step 11 runs, so it is covered upstream.
+
+Why: each of 1–5 is a `raise` in `claim_reward`, and a raise inside the award
+transaction would roll back the consumer's legitimately earned ledger row. That
+explains why they were not copied verbatim — it does **not** establish that
+ignoring them was the only option. Skipping the stamp, or completing the card
+without issuing the claim, also avoid the rollback. Those are product decisions
+about what a consumer who filled a card is owed when the prize behind it has
+been withdrawn; T4.5 shipped the permissive reading and recorded the
+alternatives rather than leaving them to be rediscovered.
 
 Coverage: `supabase/tests/rpc_loyalty_progression_smoke.sql`, 70 assertions.
 
