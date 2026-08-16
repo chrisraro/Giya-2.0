@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { Logo } from "@/components/brand/logo";
@@ -14,7 +15,9 @@ import { getMyBalances } from "@/features/rewards/server/repo";
 import { filipinoGreeting, manilaDateCaption } from "@/lib/greeting";
 import { listPublicPromotions } from "@/features/promotions/server/repo";
 import { PromotionCard } from "@/features/promotions/components/promotion-card";
-import { HOME_DISCOVER_FETCH, HOME_DISCOVER_LIMIT } from "./limits";
+import { FavoritesRail } from "@/features/favorites/components/favorites-rail";
+import { listMyFavorites } from "@/features/favorites/server/repo";
+import { HOME_DISCOVER_FETCH, HOME_DISCOVER_LIMIT, HOME_FAVORITES_LIMIT } from "./limits";
 
 // Every read on this page is RLS-scoped to the signed-in consumer or is the
 // public business catalog, and the greeting depends on the current Manila hour,
@@ -26,17 +29,39 @@ export default async function HomePage() {
   const profile = await getMyConsumerProfile();
   if (!profile) redirect(`/login?next=${encodeURIComponent("/home")}`);
 
-  const [balances, activeBusinesses, unreadNotifications, promotions] = await Promise.all([
-    getMyBalances(),
-    listActiveBusinesses({ limit: HOME_DISCOVER_FETCH }),
-    getMyUnreadNotificationCount(),
-    listPublicPromotions(5).catch(() => []),
-  ]);
+  const [balances, activeBusinesses, unreadNotifications, promotions, favorites] =
+    await Promise.all([
+      getMyBalances(),
+      listActiveBusinesses({ limit: HOME_DISCOVER_FETCH }),
+      getMyUnreadNotificationCount(),
+      listPublicPromotions(5).catch(() => []),
+      // THE RAIL DEGRADES; THE PAGE DOES NOT FAIL.
+      //
+      // `listMyFavorites` throws on a query error rather than returning [],
+      // deliberately (see the comment on it, and the same call in
+      // rewards/loyalty repos). That hands this page the choice, and this page
+      // takes the rail down rather than itself: /home's job is the points
+      // total, the balance strip and the discover grid, none of which has
+      // anything to do with favourites, and losing the whole first screen after
+      // sign-in over an accelerator is the worse outcome. The same read on
+      // /favorites is NOT caught, because there the list is the page and the
+      // empty state would be a lie about the consumer's own data.
+      //
+      // Logged rather than swallowed: a rail that quietly stops appearing is
+      // otherwise indistinguishable from a consumer who saved nothing, which is
+      // the exact confusion the throw exists to prevent.
+      listMyFavorites().catch((error: unknown) => {
+        console.error("[home] favourites rail read failed; rendering /home without it", error);
+        return [];
+      }),
+    ]);
 
   const now = new Date();
   const firstName = firstNameFrom(profile.displayName);
   const greeting = filipinoGreeting(now);
   const totalPoints = balances.reduce((sum, balance) => sum + balance.pointsBalance, 0);
+
+  const railFavorites = favorites.slice(0, HOME_FAVORITES_LIMIT);
 
   const collectedIds = new Set(balances.map((balance) => balance.businessId));
   const discover = activeBusinesses
@@ -93,6 +118,27 @@ export default async function HomePage() {
           </section>
         </>
       )}
+
+      {/* Nothing at all when the consumer has saved nothing. A heading over an
+          empty row would be a section telling them about a feature rather than
+          giving them their shops, and /favorites already owns the "here is how
+          to save one" empty state. */}
+      {railFavorites.length > 0 ? (
+        <section className="mt-8">
+          <div className="flex items-baseline justify-between gap-3">
+            <h2 className="text-title-m text-on-surface">Your favorites</h2>
+            <Link
+              href="/favorites"
+              className="shrink-0 rounded-md3-xs text-label-l text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary"
+            >
+              See all favorites
+            </Link>
+          </div>
+          <div className="mt-3">
+            <FavoritesRail favorites={railFavorites} />
+          </div>
+        </section>
+      ) : null}
 
       {promotions.length > 0 ? (
         <section className="mt-8">

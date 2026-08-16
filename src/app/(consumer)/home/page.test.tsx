@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   listActiveBusinesses: vi.fn(),
   getMyUnreadNotificationCount: vi.fn(),
   listPublicPromotions: vi.fn().mockResolvedValue([]),
+  listMyFavorites: vi.fn().mockResolvedValue([]),
   redirect: vi.fn(),
 }));
 
@@ -37,6 +38,9 @@ vi.mock("@/features/notifications/server/repo", () => ({
 }));
 vi.mock("@/features/promotions/server/repo", () => ({
   listPublicPromotions: mocks.listPublicPromotions,
+}));
+vi.mock("@/features/favorites/server/repo", () => ({
+  listMyFavorites: mocks.listMyFavorites,
 }));
 vi.mock("next/navigation", () => ({
   // The real redirect() signals by throwing; throwing here is what stops the
@@ -109,6 +113,73 @@ beforeEach(() => {
   mocks.getMyBalances.mockResolvedValue([]);
   mocks.listActiveBusinesses.mockResolvedValue([]);
   mocks.getMyUnreadNotificationCount.mockResolvedValue(0);
+  mocks.listPublicPromotions.mockResolvedValue([]);
+  mocks.listMyFavorites.mockResolvedValue([]);
+});
+
+// T4.3 shipped 0065_favorites.sql, /favorites and the heart on /b/[slug], and
+// then left /home with ZERO references to favorites - the one screen a consumer
+// opens first. These pin the rail, and pin that the PAGE reaches it: a test that
+// rendered <FavoritesRail /> on its own would have passed the whole time the
+// rail was unreachable, which was the defect.
+describe("/home favourites rail", () => {
+  const favorite = {
+    id: "fav-1",
+    businessId: "biz-1",
+    slug: "kalesa-coffee",
+    name: "Kalesa Coffee",
+    logoUrl: null,
+    cityName: null,
+    businessTypeName: null,
+  };
+
+  it("CRITICAL: the page renders the rail, linking each saved shop to its page", async () => {
+    mocks.listMyFavorites.mockResolvedValue([favorite]);
+    await renderHome();
+
+    expect(screen.getByRole("heading", { name: "Your favorites" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Kalesa Coffee/ })).toHaveAttribute(
+      "href",
+      "/b/kalesa-coffee",
+    );
+  });
+
+  it("offers the full list, since the rail only shows the first few", async () => {
+    mocks.listMyFavorites.mockResolvedValue([favorite]);
+    await renderHome();
+
+    expect(screen.getByRole("link", { name: "See all favorites" })).toHaveAttribute(
+      "href",
+      "/favorites",
+    );
+  });
+
+  it("shows nothing at all when the consumer has saved none, rather than an empty shell", async () => {
+    await renderHome();
+
+    expect(screen.queryByRole("heading", { name: "Your favorites" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "See all favorites" })).not.toBeInTheDocument();
+  });
+
+  // The deliberate call the brief asks to be named: on THIS page the rail
+  // degrades and the page survives. /home's job is the points total, the
+  // balance strip and the discover grid, and none of those has anything to do
+  // with favourites; taking the whole screen down over an accelerator would be
+  // a worse outcome than losing the accelerator. /favorites makes the opposite
+  // call, because there the list IS the page.
+  it("CRITICAL: a favourites read that throws costs the rail, not the rest of the page", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.listMyFavorites.mockRejectedValue(new Error("permission denied for table favorites"));
+    mocks.getMyBalances.mockResolvedValue([balance()]);
+
+    await renderHome();
+
+    expect(screen.getByText("across 1 business")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Panaderia Mercedes/ })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Your favorites" })).not.toBeInTheDocument();
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
 });
 
 // The notifications slice put the inbox affordance in this header rather than
