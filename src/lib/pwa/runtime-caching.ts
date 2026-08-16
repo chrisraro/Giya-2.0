@@ -65,17 +65,42 @@ const PUBLIC_API_PATH = /^\/api\/v1\/(?:businesses|cms|banners)(?:\/|$)/;
 /** Self-hosted font files, for the case where they are not under /_next/static. */
 const FONT_FILE = /\.(?:woff2?|ttf|otf|eot)$/;
 
+/**
+ * The merchant and admin portals, which must never be document-cached.
+ *
+ * Doc 41's preamble excludes `app/(business)` and `app/(admin)` from service
+ * worker scope: staff decisions are made against live rows, and a tenant
+ * document in Cache Storage outlives the shift that fetched it.
+ *
+ * THIS MATCHER IS THE ONLY THING THAT ENFORCES THAT, and it is worth being
+ * exact about why. Mounting the registration component solely in the consumer
+ * layout does NOT bound which URLs the worker sees: scope is a property of
+ * `register(url, {scope})`, the scope is "/" - it has to be, or the `/offline`
+ * fallback cannot answer a navigation to a URL we have never rendered - and
+ * `clientsClaim` means one consumer page registering puts EVERY navigation on
+ * the origin through this worker. Without this exclusion, NetworkFirst writes
+ * `/business/dashboard` into the pages cache, and on the >3s connection this
+ * module exists for, a merchant is served a stale tenant page.
+ *
+ * Whole path segments only: `/businesses` is the public directory a consumer
+ * browses and must keep its offline fallback.
+ */
+const PORTAL_PATH = /^\/(?:business|admin)(?:\/|$)/;
+
 export function giyaRouteSpecs(buildId: string): readonly GiyaRouteSpec[] {
   return [
-    // 1. Documents. NetworkFirst with a 3s timeout: an RSC page is server
-    //    rendered, so the cache is a fallback for a dead connection rather than
-    //    the primary path (doc 41's decision log). The `/offline` fallback is
-    //    attached by the Serwist `fallbacks` option in sw.ts.
+    // 1. CONSUMER document navigations. NetworkFirst with a 3s timeout: an RSC
+    //    page is server rendered, so the cache is a fallback for a dead
+    //    connection rather than the primary path (doc 41's decision log). The
+    //    `/offline` fallback is attached by the Serwist `fallbacks` option in
+    //    sw.ts. Portal paths are excluded - see PORTAL_PATH above for why the
+    //    exclusion has to live here and not at the registration site.
     {
       cacheName: cacheName("pages", buildId),
       strategy: "NetworkFirst",
       networkTimeoutSeconds: 3,
-      matches: ({ sameOrigin, request }) => sameOrigin && request.mode === "navigate",
+      matches: ({ url, sameOrigin, request }) =>
+        sameOrigin && request.mode === "navigate" && !PORTAL_PATH.test(url.pathname),
     },
     // 2. Framework chunks and fonts. Content-hashed already, so
     //    StaleWhileRevalidate costs nothing and removes them from the critical

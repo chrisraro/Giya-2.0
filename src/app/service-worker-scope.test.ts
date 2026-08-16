@@ -17,13 +17,24 @@ import { describe, expect, it } from "vitest";
 // terminal is shared by the whole shift, and an admin document sitting in Cache
 // Storage outlives the session that fetched it.
 //
-// The property proved here is structural, because the alternative is a
-// convention that survives exactly as long as everyone remembers it. If the
-// registration component is mounted in EXACTLY ONE place in the whole app, and
-// that place is the consumer layout, then no business or admin route can be
-// under a worker this app registered - there is nowhere else it could come
-// from. That also fences the two tasks that follow: T5.2 mounts the offline
-// banner and T5.3 the outbox, and neither should widen this.
+// WHAT THIS FILE PROVES, AND WHAT IT DOES NOT.
+//
+// It proves one thing: the registration call happens in exactly one place, and
+// that place is the consumer layout. That is worth pinning - it means no
+// merchant or admin visit can be the visit that INSTALLS a worker, and it
+// fences the two tasks that follow, since T5.2 mounts the offline banner and
+// T5.3 the outbox and neither should widen this.
+//
+// It does NOT prove that portal routes go uncached, and an earlier version of
+// this comment claimed it did. Scope is a property of `register(url, {scope})`,
+// not of which component called it, and the scope is "/" - it has to be, or the
+// `/offline` fallback cannot answer a navigation to a URL we have never
+// rendered. Add `clientsClaim` and one consumer page registering puts EVERY
+// navigation on the origin through the worker, a merchant's included. The thing
+// that actually keeps `/business/*` and `/admin/*` out of the document cache is
+// the PORTAL_PATH clause in the pages route matcher, and it is proved where it
+// lives: src/lib/pwa/runtime-caching.test.ts, "merchant and admin documents are
+// never written to the pages cache".
 
 const ROOT = process.cwd();
 const SRC = join(ROOT, "src");

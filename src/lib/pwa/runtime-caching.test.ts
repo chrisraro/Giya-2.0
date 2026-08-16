@@ -146,6 +146,38 @@ describe("what deliberately gets no route, and is therefore NetworkOnly", () => 
     expect(match(`${SUPABASE}/storage/v1/object/public/products/a1b2/photo.jpg`)).toBeNull();
   });
 
+  it("CRITICAL: merchant and admin documents are never written to the pages cache", () => {
+    // Doc 41 section 1 row 1 is "consumer route navigations", and the preamble
+    // excludes the portals from SW scope entirely.
+    //
+    // Mounting the registration component only in the consumer layout does NOT
+    // bound this. Scope is a property of `register(url, {scope})`, and the scope
+    // is "/" - it has to be, because the `/offline` fallback must answer a
+    // navigation to any URL. Combined with `clientsClaim`, one consumer page
+    // registering puts every navigation on the origin through this worker,
+    // including a merchant's. Without this clause, NetworkFirst writes
+    // /business/dashboard into giya-pages-{buildId}, and on the >3s connection
+    // this whole module exists for, a merchant validating a redemption is shown
+    // a stale tenant document. The matcher is the only thing that can prevent
+    // it.
+    expect(match(`${ORIGIN}/business/dashboard`, { mode: "navigate" })).toBeNull();
+    expect(match(`${ORIGIN}/business/receipts/9f2c`, { mode: "navigate" })).toBeNull();
+    expect(match(`${ORIGIN}/business/login`, { mode: "navigate" })).toBeNull();
+    expect(match(`${ORIGIN}/business`, { mode: "navigate" })).toBeNull();
+    expect(match(`${ORIGIN}/admin/receipts`, { mode: "navigate" })).toBeNull();
+    expect(match(`${ORIGIN}/admin`, { mode: "navigate" })).toBeNull();
+  });
+
+  it("still caches consumer routes whose names merely start like a portal one", () => {
+    // The exclusion is on whole path segments. `/businesses` is the public
+    // directory a consumer browses, and losing its offline fallback to a prefix
+    // match would be a silent regression in the opposite direction.
+    expect(match(`${ORIGIN}/businesses`, { mode: "navigate" })).toBe("giya-pages-5aaf2ff");
+    expect(match(`${ORIGIN}/administration-guide`, { mode: "navigate" })).toBe(
+      "giya-pages-5aaf2ff",
+    );
+  });
+
   it("CRITICAL: a cross-origin API path is not treated as ours", () => {
     // `https://evil.example/api/v1/businesses` matches the path pattern and
     // nothing else. Without the same-origin condition it lands in the cache our
