@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+
 import type { NextConfig } from "next";
 import withSerwistInit from "@serwist/next";
 
@@ -22,6 +26,60 @@ const BUILD_ID =
   process.env.VERCEL_GIT_COMMIT_SHA ??
   process.env.GITHUB_SHA ??
   "dev";
+
+/**
+ * The precache entries for everything in `public/`, plus the `/offline`
+ * document.
+ *
+ * WHY THIS IS COMPUTED HERE RATHER THAN LEFT TO @serwist/next.
+ *
+ * The plugin globs `public/` itself and joins each result with the PLATFORM
+ * path separator, so a build on Windows emits precache URLs like
+ * `/brand\icon-192.png`. One 404 in a precache list fails the whole `install`
+ * event, which means the service worker never installs at all - so the PWA
+ * would be untestable on a Windows dev machine while CI on Linux looked fine.
+ * `manifestTransforms` cannot fix it: @serwist/build appends the plugin's
+ * entries as the LAST transform, after ours. Supplying the list is the only
+ * hook that comes first, and it also happens to be where `/offline` belongs.
+ *
+ * `/offline` is not in `public/` and is not a build asset - it is a rendered
+ * document - so nothing would precache it automatically, and the navigation
+ * fallback in src/app/sw.ts would have nothing to fall back TO.
+ *
+ * Never throws: this module is imported by src/features/identity/avatar.test.ts.
+ */
+function precacheEntries(): { url: string; revision: string }[] {
+  const publicDir = join(process.cwd(), "public");
+
+  // The compiled worker and its sourcemap live in public/ after a build. A
+  // service worker that precaches itself is a worker that can never be
+  // replaced.
+  const skip = /^(sw\.js(\.map)?|swe-worker-.*)$/;
+
+  function walk(dir: string, prefix: string): { url: string; revision: string }[] {
+    const out: { url: string; revision: string }[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (skip.test(entry.name)) continue;
+      const full = join(dir, entry.name);
+      // Forward slashes, always: this is a URL, not a path.
+      const url = `${prefix}/${entry.name}`;
+      if (entry.isDirectory()) out.push(...walk(full, url));
+      else {
+        out.push({
+          url,
+          revision: createHash("md5").update(readFileSync(full)).digest("hex"),
+        });
+      }
+    }
+    return out;
+  }
+
+  try {
+    return [...walk(publicDir, ""), { url: "/offline", revision: BUILD_ID }];
+  } catch {
+    return [{ url: "/offline", revision: BUILD_ID }];
+  }
+}
 
 const nextConfig: NextConfig = {
   experimental: {
@@ -76,18 +134,10 @@ const withSerwist = withSerwistInit({
   // mid-scan discards a capture.
   reloadOnOnline: false,
   disable: process.env.NODE_ENV === "development",
-  manifestTransforms: [
-    // The precache manifest is built from build output and `public/`, neither
-    // of which contains a rendered document. `/offline` has to be added by hand
-    // or the navigation fallback has nothing to fall back TO - and Serwist's
-    // `fallbacks` option expects its entries to be precached already.
-    // `size` is reporting metadata for the build log, not something the worker
-    // reads; a rendered document has no asset to measure.
-    async (entries) => ({
-      manifest: [...entries, { url: "/offline", revision: BUILD_ID, size: 0 }],
-      warnings: [],
-    }),
-  ],
+  // Everything in public/, plus the /offline document. Supplying this replaces
+  // the plugin's own glob of public/ - see precacheEntries() for why that glob
+  // cannot be left in place, and why a manifestTransform cannot repair it.
+  additionalPrecacheEntries: precacheEntries(),
 });
 
 export default withSerwist(nextConfig);
