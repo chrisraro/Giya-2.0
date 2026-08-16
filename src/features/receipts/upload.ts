@@ -38,19 +38,6 @@ export interface CaptureError {
   readonly kind: CaptureErrorKind;
   /** The API error code, or a client-side pseudo-code. Shown as a small caption. */
   readonly code: string;
-  /**
-   * The HTTP status the server answered with, or `undefined` where there was no
-   * answer at all (transport failure, offline, a photo rejected on device).
-   *
-   * The capture screen does not read this; the offline outbox does. Doc 41
-   * section 3 makes 4xx domain errors TERMINAL on replay - "retrying a
-   * RECEIPT_DUPLICATE forever burns the 60/day budget and can never succeed" -
-   * and that is a statement about the status class, not about any one code.
-   * Classifying by `kind` alone would silently retry an unmapped 400 five times
-   * before giving up, because `mapSubmitError`'s fallback branch is written for
-   * a UI that offers a Try again button, not for an unattended drain.
-   */
-  readonly status?: number | undefined;
   readonly title: string;
   readonly message: string;
   /**
@@ -113,7 +100,6 @@ export function mapSubmitError(
     return {
       kind: "blocked",
       code: CONSUMER_SCAN_BLOCKED,
-      status,
       title: "Scan limit reached",
       // Doc 33: never expose fraud internals, never name the signal that
       // tripped. "Try again later" is the whole truth the consumer is owed.
@@ -127,7 +113,6 @@ export function mapSubmitError(
     return {
       kind: "duplicate",
       code: RECEIPT_DUPLICATE,
-      status,
       title: "Already scanned",
       message: "You have already scanned this receipt. Try a different one.",
       retryable: false,
@@ -138,7 +123,6 @@ export function mapSubmitError(
     return {
       kind: "invalid_image",
       code: RECEIPT_INVALID_IMAGE,
-      status,
       title: "We could not read that photo",
       message: "Take another photo with the whole receipt inside the frame.",
       retryable: false,
@@ -149,7 +133,6 @@ export function mapSubmitError(
     return {
       kind: "rate_limited",
       code: code ?? "RATE_LIMITED",
-      status,
       title: "Scan limit reached",
       message: `You have reached the scan limit. Please try again ${formatRetryAfter(retryAfterSeconds)}.`,
       retryable: false,
@@ -161,7 +144,6 @@ export function mapSubmitError(
     return {
       kind: "unauthenticated",
       code: code ?? "UNAUTHENTICATED",
-      status,
       title: "Please sign in again",
       message: "Your session has expired. Sign in again to scan this receipt.",
       retryable: false,
@@ -172,7 +154,6 @@ export function mapSubmitError(
     return {
       kind: "in_progress",
       code: "IDEMPOTENCY_IN_PROGRESS",
-      status,
       title: "Still working on it",
       message: "Your receipt is still being submitted. Please try again in a moment.",
       retryable: true,
@@ -183,7 +164,6 @@ export function mapSubmitError(
     return {
       kind: "unavailable",
       code: code ?? "DEPENDENCY_UNAVAILABLE",
-      status,
       title: "Scanning is unavailable",
       message: "Receipt scanning is temporarily unavailable. Please try again in a moment.",
       retryable: true,
@@ -193,7 +173,6 @@ export function mapSubmitError(
   return {
     kind: "unknown",
     code: code ?? "UNKNOWN",
-    status,
     title: "That did not work",
     message: message ?? "Something went wrong. Please try again.",
     retryable: true,
@@ -367,12 +346,6 @@ export async function submitCapturedReceipt(
         // leave `imagePath` set: the next attempt has to mint a fresh ticket.
         // The submit body has not been sent yet, so nothing depends on the old
         // path and the Idempotency-Key is still unused.
-        // NO `status` HERE, DELIBERATELY. The status belongs to the storage
-        // host, not to our API, and the outbox reads `status` as "the server
-        // gave a 4xx answer about this receipt, so replaying is pointless".
-        // A 403 from an expired signed URL is the opposite of that: the very
-        // next attempt mints a fresh ticket and succeeds. Passing it through
-        // would make a routine expiry delete a consumer's queued receipt.
         return {
           ok: false,
           error: {

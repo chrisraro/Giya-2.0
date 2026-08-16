@@ -33,9 +33,19 @@ import { parseSwMessage } from "@/lib/pwa/messages";
 
 const SW = readFileSync(join(process.cwd(), "src", "app", "sw.ts"), "utf8");
 
+/**
+ * The same file with comments removed.
+ *
+ * Every assertion below is about CODE, and this file is heavily commented -
+ * including comments that quote the very identifiers being asserted. A mutant
+ * that turned `retryFailed: true` into `retryFailed: false, // retryFailed: true`
+ * survived a match against the raw source for exactly that reason.
+ */
+const SW_CODE = SW.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+
 describe("service worker outbox sync wiring (doc 41 sections 3 and 6)", () => {
   it("listens for sync events", () => {
-    expect(SW).toMatch(/addEventListener\(\s*"sync"/);
+    expect(SW_CODE).toMatch(/addEventListener\(\s*"sync"/);
   });
 
   it("gates on the shared tag predicate, so the two sides cannot drift", () => {
@@ -43,15 +53,15 @@ describe("service worker outbox sync wiring (doc 41 sections 3 and 6)", () => {
     // renaming the tag on the registration side would leave both halves
     // compiling, both tests passing, and no receipt ever drained in the
     // background. Sharing `isOutboxSyncTag` makes that a type error instead.
-    expect(SW).toContain("isOutboxSyncTag(event.tag)");
-    expect(SW).not.toMatch(/event\.tag\s*===\s*"/);
+    expect(SW_CODE).toContain("isOutboxSyncTag(event.tag)");
+    expect(SW_CODE).not.toMatch(/event\.tag\s*===\s*"/);
     // And the predicate the worker shares is the one the app registers with.
     expect(isOutboxSyncTag(OUTBOX_SYNC_TAG)).toBe(true);
   });
 
   it("runs the drain inside waitUntil, so the browser does not kill the worker mid-upload", () => {
-    expect(SW).toMatch(/event\.waitUntil\(replayOutbox\(\)\)/);
-    expect(SW).toMatch(/drainOutbox\(/);
+    expect(SW_CODE).toMatch(/event\.waitUntil\(replayOutbox\(\)\)/);
+    expect(SW_CODE).toMatch(/drainOutbox\(/);
   });
 
   it("tells open tabs the queue changed, using a message the app recognises", () => {
@@ -61,7 +71,7 @@ describe("service worker outbox sync wiring (doc 41 sections 3 and 6)", () => {
     // The POST, not the import. A first draft asserted only that the constant
     // appeared somewhere in the file, and a mutant that dropped the
     // postMessage call survived it: the import line still named the constant.
-    expect(SW).toMatch(/\.postMessage\(OUTBOX_CHANGED_MESSAGE\)/);
+    expect(SW_CODE).toMatch(/\.postMessage\(OUTBOX_CHANGED_MESSAGE\)/);
     expect(parseSwMessage({ type: "OUTBOX_CHANGED" })?.type).toBe("OUTBOX_CHANGED");
   });
 
@@ -71,13 +81,16 @@ describe("service worker outbox sync wiring (doc 41 sections 3 and 6)", () => {
     // `retryFailed: false` the one replay path that runs with the app CLOSED
     // would skip exactly the receipts that most need it - and doc 41 section 8
     // gives an iOS outbox about seven days before eviction.
-    expect(SW).toContain("retryFailed: true");
+    // Tied to the drainOutbox call rather than matched anywhere in the file -
+    // the same narrowing the OUTBOX_CHANGED assertion needed after a mutant
+    // that dropped the postMessage survived on the import line alone.
+    expect(SW_CODE).toMatch(/drainOutbox\(\{[^}]*retryFailed: true/);
   });
 
   it("says nothing to a tab when the drain removed no rows", () => {
     // An idempotent handler is required (doc 41 section 6: "safe to fire with
     // an empty outbox"). Waking every open tab to tell it nothing happened is
     // the cheap kind of wrong that shows up as battery.
-    expect(SW).toContain("if (result.removed === 0) return;");
+    expect(SW_CODE).toContain("if (result.removed === 0) return;");
   });
 });

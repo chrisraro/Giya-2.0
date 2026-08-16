@@ -111,13 +111,66 @@ export type ReplayDisposition =
   | { readonly kind: "already-sent" }
   /** A 4xx answer on the merits. Delete the row; retrying can never work. */
   | { readonly kind: "terminal"; readonly error: string }
-  /** Spend an attempt and back off. `pauseSeconds` also stops the drain. */
-  | { readonly kind: "retry"; readonly error: string; readonly pauseSeconds?: number | undefined }
+  /**
+   * Spend an attempt and back off. `pauseSeconds` also stops the drain;
+   * `clearPath` forgets the row's `image_path` so the next attempt presigns.
+   */
+  | {
+      readonly kind: "retry";
+      readonly error: string;
+      readonly pauseSeconds?: number | undefined;
+      readonly clearPath?: boolean | undefined;
+    }
   /** Stop the drain WITHOUT spending an attempt; nothing here can succeed yet. */
   | { readonly kind: "pause"; readonly error: string; readonly pauseSeconds?: number | undefined };
 
 /** Doc 41 section 3 step 4 treats both of these as success-already-processed. */
 const ALREADY_SENT_CODES = new Set(["RECEIPT_DUPLICATE", "IDEMPOTENCY_REPLAYED"]);
+
+/**
+ * THE ONLY FAILURES THAT DELETE A CONSUMER'S RECEIPT.
+ *
+ * An ALLOWLIST, and the direction is the whole point. This started as
+ * "any 4xx is terminal", read off doc 41 section 3's examples, and that rule
+ * was already wrong for a code that exists today: `submit.ts` throws
+ * `409 CONFLICT` with the message "This receipt could not be saved. Please try
+ * again." on an unexpected unique-constraint violation. `mapSubmitError` has no
+ * branch for it, so it arrived as kind "unknown" carrying status 409, matched
+ * `>= 400 && < 500`, and the drain destroyed the only copy of a photo the
+ * server had just invited us to resend.
+ *
+ * A denylist has to be complete to be safe, and this one could not be: every
+ * future 4xx that means "wait" rather than "no" - a maintenance window, a
+ * per-business pause, a verification hold - would silently start deleting
+ * receipts on the day it shipped, and nothing in this repo would fail.
+ * Allowlisting inverts the cost of being wrong, from PERMANENT UNRECOVERABLE
+ * LOSS to a row sitting in the queue with a Retry button next to it. Doc 41
+ * section 8 puts the outbox on the short list of things that are not safe to
+ * lose; this is what that sentence means in code.
+ *
+ * Each entry is a judgement that no amount of waiting changes:
+ *
+ *   RECEIPT_INVALID_IMAGE  the server could not read these bytes (but see the
+ *                          stale-path exception in classifyReplayOutcome)
+ *   VALIDATION_FAILED      the body is malformed; the same body always will be
+ *   FORBIDDEN              this caller may not do this
+ *
+ * Adding a code here is a decision to destroy data. Removing one costs a retry.
+ */
+const TERMINAL_CODES = new Set(["RECEIPT_INVALID_IMAGE", "VALIDATION_FAILED", "FORBIDDEN"]);
+
+/**
+ * `submit.ts` also throws `400 RECEIPT_INVALID_IMAGE` ("We could not find your
+ * uploaded photo. Please try again.") when the object at `image_path` is
+ * missing from storage - a different failure wearing the same code.
+ *
+ * That became reachable from the outbox only when rows started carrying
+ * `image_path`: the drain now skips the presign and the PUT for a row that has
+ * one, so a vanished object is answered with a code on the allowlist above
+ * while the bytes are still sitting in IndexedDB and one fresh ticket would
+ * have sent them.
+ */
+const STALE_PATH_CODE = "RECEIPT_INVALID_IMAGE";
 
 /**
  * How long to wait when the server told us to slow down without a usable
@@ -162,15 +215,22 @@ const WAIT_AND_RETRY_CODES = new Set(["CONSUMER_SCAN_BLOCKED"]);
  *   429 next, because it is a 4xx that IS worth retrying, and because doc 41
  *   makes it pause the whole drain.
  *
- *   409 IDEMPOTENCY_IN_PROGRESS next, the other 4xx that waiting fixes.
+ *   Then the TERMINAL ALLOWLIST, and nothing else deletes anything. Everything
+ *   that reaches the bottom of this function is retried, spends an attempt, and
+ *   after five of them lands in `failed` - which keeps the row and hands it to
+ *   the Retry button the queue card draws. See `TERMINAL_CODES` for why the
+ *   default has to be that way round.
  *
- *   Then the generic rule: any remaining 4xx is an ANSWER, not a missing
- *   connection, and is terminal. This branch is why `CaptureError` carries a
- *   status at all. Classifying by `kind` would send an unmapped 400 round the
- *   retry loop five times, because `mapSubmitError`'s fallback is written for a
- *   screen with a Try again button rather than for an unattended drain.
+ * `reusedStoredPath` says whether this attempt sent the `image_path` already on
+ * the row (true) or presigned a fresh one for itself (false). It changes the
+ * meaning of exactly one code; see `STALE_PATH_CODE`. It is a required
+ * parameter rather than an option with a default, because the safe answer
+ * differs between the two and a default would silently pick one.
  */
-export function classifyReplayOutcome(outcome: ReceiptSubmissionOutcome): ReplayDisposition {
+export function classifyReplayOutcome(
+  outcome: ReceiptSubmissionOutcome,
+  reusedStoredPath: boolean,
+): ReplayDisposition {
   if (outcome.ok) return { kind: "sent" };
 
   const error: CaptureError = outcome.error;
@@ -190,12 +250,19 @@ export function classifyReplayOutcome(outcome: ReceiptSubmissionOutcome): Replay
   }
 
   if (ALREADY_SENT_CODES.has(error.code)) return { kind: "already-sent" };
-  if (error.kind === "in_progress") return { kind: "retry", error: "in_progress" };
 
-  if (error.status !== undefined && error.status >= 400 && error.status < 500) {
-    return { kind: "terminal", error: error.code };
+  // The stale-path exception, checked before the allowlist because it wears an
+  // allowlisted code. The bytes are in IndexedDB and the object they were
+  // uploaded to is gone, so the remedy is a fresh ticket, not a funeral.
+  if (error.code === STALE_PATH_CODE && reusedStoredPath) {
+    return { kind: "retry", error: "stale_image_path", clearPath: true };
   }
 
+  if (TERMINAL_CODES.has(error.code)) return { kind: "terminal", error: error.code };
+
+  // Everything else - unmapped codes, 5xx, transport failures, and every 4xx
+  // nobody has written down yet. Retrying costs a row in the queue; guessing
+  // terminal costs the receipt.
   return { kind: "retry", error: error.kind };
 }
 
@@ -308,6 +375,11 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainResult> {
     await updateOutboxItem(item.id, { status: "uploading" });
     attempted += 1;
 
+    // Whether this attempt is about to reuse a path from an earlier one. Read
+    // before the submit, because the outcome carries whatever path the attempt
+    // ENDED with and that cannot tell the two cases apart.
+    const reusedStoredPath = (item.image_path ?? null) !== null;
+
     const outcome = await deps.submit({
       blob: item.image,
       idempotencyKey: item.idempotency_key,
@@ -322,7 +394,7 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainResult> {
       imagePath: item.image_path ?? null,
     });
 
-    const disposition = classifyReplayOutcome(outcome);
+    const disposition = classifyReplayOutcome(outcome, reusedStoredPath);
 
     if (disposition.kind === "sent" || disposition.kind === "already-sent") {
       await deleteOutboxItem(item.id);
@@ -371,7 +443,8 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainResult> {
       // Persisted on EVERY surviving row: an attempt that presigned and
       // uploaded before it failed leaves its path here, and an attempt whose
       // PUT itself failed leaves null so the next one mints a fresh ticket.
-      image_path: outcome.imagePath,
+      // `clearPath` forces null for a path the server says points at nothing.
+      image_path: disposition.clearPath === true ? null : outcome.imagePath,
     });
 
     // Held even when exhausted, so ten `online` events in a minute cost the

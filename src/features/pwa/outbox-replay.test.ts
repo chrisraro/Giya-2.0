@@ -109,42 +109,65 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// `false` = this attempt presigned a fresh path for itself. `true` = it reused
+// the path stored on the row. The distinction only matters for one code; see
+// the stale-path tests.
+const FRESH_PATH = false;
+const REUSED_PATH = true;
+
 describe("replay classification (doc 41 section 3)", () => {
   it("treats a 202 as sent", () => {
-    expect(classifyReplayOutcome(ACCEPTED).kind).toBe("sent");
+    expect(classifyReplayOutcome(ACCEPTED, FRESH_PATH).kind).toBe("sent");
   });
 
   it("treats RECEIPT_DUPLICATE as already sent, never as a failure", () => {
     // Doc 41 section 3 step 4: the server dedupes on an authoritative
     // server-computed sha256, so a double submit cannot award twice and a
     // duplicate on replay means the receipt is already filed.
-    expect(classifyReplayOutcome(failure(422, "RECEIPT_DUPLICATE")).kind).toBe("already-sent");
+    expect(classifyReplayOutcome(failure(422, "RECEIPT_DUPLICATE"), FRESH_PATH).kind).toBe(
+      "already-sent",
+    );
   });
 
   it("treats IDEMPOTENCY_REPLAYED as already sent", () => {
-    // The drain re-presigns, so a replay whose original POST did reach the
-    // server carries a different image_path under the same key and is answered
-    // 409 IDEMPOTENCY_REPLAYED. That answer only exists because the original
-    // submission exists, so it is success-already-processed too.
-    expect(classifyReplayOutcome(failure(409, "IDEMPOTENCY_REPLAYED")).kind).toBe("already-sent");
+    // Defensive only, now that the row carries image_path and the replayed body
+    // is byte-identical: a same-key same-body request is answered with the
+    // stored response, or with IDEMPOTENCY_IN_PROGRESS. This branch is what
+    // catches a body that drifted for a reason nobody predicted.
+    expect(classifyReplayOutcome(failure(409, "IDEMPOTENCY_REPLAYED"), FRESH_PATH).kind).toBe(
+      "already-sent",
+    );
   });
 
-  it("makes a PERMANENT 4xx judgement about the receipt terminal immediately", () => {
-    // Both exemplars are judgements about THIS PHOTO that no amount of waiting
-    // changes: the image cannot be read, or the body is malformed. They are the
-    // shape doc 41 section 3 names ("RECEIPT_DUPLICATE, VALIDATION_FAILED").
+  it("CRITICAL: deletes a row ONLY for a code on the terminal allowlist", () => {
+    // Terminality is ALLOWLISTED, not inferred from the status class. Every
+    // entry is a judgement about THIS PHOTO or THIS CALLER that no amount of
+    // waiting changes.
+    expect(classifyReplayOutcome(failure(422, "RECEIPT_INVALID_IMAGE"), FRESH_PATH).kind).toBe(
+      "terminal",
+    );
+    expect(classifyReplayOutcome(failure(400, "VALIDATION_FAILED"), FRESH_PATH).kind).toBe(
+      "terminal",
+    );
+    expect(classifyReplayOutcome(failure(403, "FORBIDDEN"), FRESH_PATH).kind).toBe("terminal");
+  });
+
+  it("CRITICAL: keeps the receipt for any 4xx that is not on the allowlist", () => {
+    // The rule this replaces was "any 4xx is terminal", and it was already
+    // wrong for a code that exists today: submit.ts throws 409 CONFLICT with
+    // the message "This receipt could not be saved. PLEASE TRY AGAIN." on an
+    // unexpected unique-constraint violation. mapSubmitError has no CONFLICT
+    // branch, so it arrived as kind "unknown" with status 409, matched
+    // `>= 400 && < 500`, and the drain deleted the only copy of a photo the
+    // server had just invited us to resend.
     //
-    // 403 CONSUMER_SCAN_BLOCKED used to be the exemplar here and it was the
-    // wrong one: it is a temporary judgement about the ACCOUNT, it auto-expires,
-    // and it ships a Retry-After naming the second it lifts. Deleting a
-    // consumer's only copy of a receipt over a cooldown is the worst thing this
-    // module can do, and these two tests were asserting it. See the pause test
-    // below.
-    expect(classifyReplayOutcome(failure(422, "RECEIPT_INVALID_IMAGE")).kind).toBe("terminal");
-    // An unmapped 400. This is the case a kind-only classifier gets wrong:
-    // mapSubmitError falls back to kind "unknown" with retryable: true, which
-    // is right for a Try again button and wrong for an unattended drain.
-    expect(classifyReplayOutcome(failure(400, "VALIDATION_FAILED")).kind).toBe("terminal");
+    // Inverting the default changes the cost of guessing wrong from silent,
+    // permanent, unrecoverable loss to a row in the queue with a Retry button.
+    // That is the asymmetry doc 41 section 8 asks for.
+    expect(classifyReplayOutcome(failure(409, "CONFLICT"), FRESH_PATH).kind).toBe("retry");
+    expect(classifyReplayOutcome(failure(418, "SOMETHING_NEW"), FRESH_PATH).kind).toBe("retry");
+    expect(classifyReplayOutcome(failure(400, "A_CODE_NOBODY_HAS_WRITTEN_YET"), FRESH_PATH).kind)
+      .toBe("retry");
   });
 
   it("CRITICAL: never destroys a receipt over an auto-expiring scan cooldown", () => {
@@ -152,9 +175,10 @@ describe("replay classification (doc 41 section 3)", () => {
     // ladder. Its own comment calls the block "automatic, auto-expiring,
     // audited"; the consumer is told "Please try again later"; and the response
     // carries a Retry-After holding the exact number of seconds until it lifts.
-    // Treating it as terminal deletes a photo that was never uploaded and that
-    // nothing on the server can restore.
-    const disposition = classifyReplayOutcome(failure(403, "CONSUMER_SCAN_BLOCKED", 7200));
+    const disposition = classifyReplayOutcome(
+      failure(403, "CONSUMER_SCAN_BLOCKED", 7200),
+      FRESH_PATH,
+    );
 
     expect(disposition.kind).not.toBe("terminal");
     expect(disposition.kind).toBe("retry");
@@ -162,38 +186,64 @@ describe("replay classification (doc 41 section 3)", () => {
   });
 
   it("pauses on a scan cooldown that arrived without a Retry-After", () => {
-    const disposition = classifyReplayOutcome(failure(403, "CONSUMER_SCAN_BLOCKED"));
+    const disposition = classifyReplayOutcome(failure(403, "CONSUMER_SCAN_BLOCKED"), FRESH_PATH);
 
     expect(disposition.kind).toBe("retry");
     expect(disposition.kind === "retry" && disposition.pauseSeconds).toBe(60);
   });
 
-  it("retries a 409 IDEMPOTENCY_IN_PROGRESS even though it is a 4xx", () => {
+  it("CONSUMER_SCAN_BLOCKED pauses rather than merely being off the allowlist", () => {
+    // Leaving it off the allowlist alone would already stop the deletion, but
+    // it would also spend five attempts against a block that is still in force
+    // and land the receipt in `failed`. The pause is what makes the drain wait
+    // out the window the server named.
+    const disposition = classifyReplayOutcome(
+      failure(403, "CONSUMER_SCAN_BLOCKED", 7200),
+      FRESH_PATH,
+    );
+    expect(disposition.kind === "retry" && disposition.pauseSeconds).toBe(7200);
+    // A plain unlisted 4xx does NOT pause; it just backs off normally.
+    const plain = classifyReplayOutcome(failure(409, "CONFLICT"), FRESH_PATH);
+    expect(plain.kind === "retry" && plain.pauseSeconds).toBeUndefined();
+  });
+
+  it("CRITICAL: a stale stored image_path is retried with a fresh one, not deleted", () => {
+    // submit.ts throws 400 RECEIPT_INVALID_IMAGE ("We could not find your
+    // uploaded photo. Please try again.") when the object at image_path is
+    // missing. Carrying the path on the row - the fix that stabilised the
+    // replayed body - is what made that reachable from the outbox: the drain
+    // now skips the presign and the PUT, so a missing object is answered with
+    // one of the two terminal exemplars while the bytes sit safe in IndexedDB
+    // and a fresh presign would have worked.
+    const disposition = classifyReplayOutcome(failure(400, "RECEIPT_INVALID_IMAGE"), REUSED_PATH);
+
+    expect(disposition.kind).toBe("retry");
+    expect(disposition.kind === "retry" && disposition.clearPath).toBe(true);
+  });
+
+  it("still calls an unreadable photo terminal when the path was freshly presigned", () => {
+    // The other side of the boundary. This attempt uploaded the bytes itself
+    // and the server still could not read them, so it is a verdict on the
+    // photo and no re-presign changes it.
+    const disposition = classifyReplayOutcome(failure(400, "RECEIPT_INVALID_IMAGE"), FRESH_PATH);
+
+    expect(disposition.kind).toBe("terminal");
+  });
+
+  it("retries a 409 IDEMPOTENCY_IN_PROGRESS", () => {
     // The first request under this key has not finished. Waiting is exactly
-    // what works, so this must not fall into the 4xx-is-terminal branch.
-    expect(classifyReplayOutcome(failure(409, "IDEMPOTENCY_IN_PROGRESS")).kind).toBe("retry");
+    // what works.
+    expect(classifyReplayOutcome(failure(409, "IDEMPOTENCY_IN_PROGRESS"), FRESH_PATH).kind).toBe(
+      "retry",
+    );
   });
 
   it("retries a 5xx and a transport failure", () => {
-    expect(classifyReplayOutcome(failure(503, "DEPENDENCY_UNAVAILABLE")).kind).toBe("retry");
-    expect(classifyReplayOutcome(transportFailure(false)).kind).toBe("retry");
-  });
-
-  it("CRITICAL: retries a plain 500, the upper boundary of the terminal rule", () => {
-    // The terminal branch is `status >= 400 && status < 500`, and it DELETES
-    // the row. 503 alone does not pin the top of that range: widening the
-    // comparison to `<= 500` left the whole suite green while making a bare 500
-    // destroy a receipt. 400 below pins the bottom the same way.
-    expect(classifyReplayOutcome(failure(500, "INTERNAL")).kind).toBe("retry");
-    expect(classifyReplayOutcome(failure(499, "SOMETHING_ODD")).kind).toBe("terminal");
-    // And the lower bound. Nothing below 400 reaches this branch through
-    // `submitCapturedReceipt` today (fetch follows redirects, so a non-ok
-    // Response is always >= 400) - but `classifyReplayOutcome` is an exported
-    // pure function whose whole job is deciding whether to destroy a receipt,
-    // and "only a CLIENT error is an answer about this receipt" is the rule it
-    // encodes. Dropping `>= 400` left the suite green until this line.
-    expect(classifyReplayOutcome(failure(302, "SOMETHING_ODDER")).kind).toBe("retry");
-    expect(classifyReplayOutcome(failure(400, "VALIDATION_FAILED")).kind).toBe("terminal");
+    expect(classifyReplayOutcome(failure(503, "DEPENDENCY_UNAVAILABLE"), FRESH_PATH).kind).toBe(
+      "retry",
+    );
+    expect(classifyReplayOutcome(failure(500, "INTERNAL"), FRESH_PATH).kind).toBe("retry");
+    expect(classifyReplayOutcome(transportFailure(false), FRESH_PATH).kind).toBe("retry");
   });
 
   it("pauses without spending an attempt when the device is offline", () => {
@@ -201,18 +251,18 @@ describe("replay classification (doc 41 section 3)", () => {
     // attempt was made. Counting it would burn all five attempts over five
     // launches with no signal and mark every receipt failed without one of them
     // ever having been sent.
-    const disposition = classifyReplayOutcome(transportFailure(true));
+    const disposition = classifyReplayOutcome(transportFailure(true), FRESH_PATH);
     expect(disposition.kind).toBe("pause");
   });
 
   it("pauses without spending an attempt when the session has expired", () => {
     // Nothing in the queue can succeed signed out, and spending attempts on it
     // would delete the consumer's queue for a session they can just renew.
-    expect(classifyReplayOutcome(failure(401, "UNAUTHENTICATED")).kind).toBe("pause");
+    expect(classifyReplayOutcome(failure(401, "UNAUTHENTICATED"), FRESH_PATH).kind).toBe("pause");
   });
 
   it("spends an attempt on RATE_LIMITED and carries its Retry-After", () => {
-    const disposition = classifyReplayOutcome(failure(429, "RATE_LIMITED", 90));
+    const disposition = classifyReplayOutcome(failure(429, "RATE_LIMITED", 90), FRESH_PATH);
     expect(disposition.kind).toBe("retry");
     expect(disposition.kind === "retry" && disposition.pauseSeconds).toBe(90);
   });
@@ -356,7 +406,7 @@ describe("drain", () => {
     expect(h.events[0]?.message).toBe(OUTBOX_ALREADY_SENT_MESSAGE);
   });
 
-  it("removes a permanent 4xx refusal without ever retrying it", async () => {
+  it("removes an allowlisted terminal refusal without ever retrying it", async () => {
     await putOutboxItem(row());
     const h = harness([failure(422, "RECEIPT_INVALID_IMAGE")]);
 
@@ -366,6 +416,92 @@ describe("drain", () => {
     expect(await listOutboxItems()).toHaveLength(0);
     expect(h.events[0]?.type).toBe("terminal");
     expect(h.events[0]?.message).toBe(OUTBOX_TERMINAL_MESSAGE);
+  });
+
+  it("CRITICAL: keeps the receipt on a 409 CONFLICT, which the server tells us to retry", async () => {
+    // submit.ts:216 throws this on an unexpected unique-constraint violation
+    // with the message "This receipt could not be saved. Please try again."
+    // Under the old any-4xx-is-terminal rule the drain deleted the only copy of
+    // a photo the server had just invited us to resend.
+    await putOutboxItem(row());
+    const h = harness([failure(409, "CONFLICT"), ACCEPTED]);
+
+    await drainOutbox(h.deps);
+
+    const [item] = await listOutboxItems();
+    expect(item).toBeDefined();
+    expect(item?.attempts).toBe(1);
+    expect(item?.status).toBe("queued");
+    expect(h.events.filter((event) => event.type === "terminal")).toHaveLength(0);
+
+    h.setNow(NOW + 31_000);
+    await drainOutbox(h.deps);
+    expect(await listOutboxItems()).toHaveLength(0);
+  });
+
+  it("CRITICAL: a stale stored image_path is re-presigned, not thrown away", async () => {
+    // The drain now skips the presign when the row carries a path, so an object
+    // that is missing from storage is answered 400 RECEIPT_INVALID_IMAGE while
+    // the bytes are still in IndexedDB. Deleting the row there would destroy a
+    // receipt that one fresh ticket would have sent.
+    await putOutboxItem(row({ image_path: "user-1/vanished.jpg" }));
+    // The outcome carries the path BACK, which is what submitCapturedReceipt
+    // really does when the submit step fails: it returns the path it used, so
+    // a caller can feed it in again. An earlier version of this fixture used
+    // the helper's default `imagePath: null`, and a mutant that ignored
+    // `clearPath` entirely survived - the row came out null either way.
+    const h = harness([
+      {
+        ok: false,
+        error: mapSubmitError(400, "RECEIPT_INVALID_IMAGE", undefined),
+        imagePath: "user-1/vanished.jpg",
+      },
+      ACCEPTED,
+    ]);
+
+    await drainOutbox(h.deps);
+
+    const [item] = await listOutboxItems();
+    expect(item).toBeDefined();
+    // The path is cleared, so the next attempt mints a fresh ticket and uploads
+    // the bytes again rather than pointing at the same missing object forever.
+    expect(item?.image_path).toBeNull();
+    expect(item?.status).toBe("queued");
+
+    h.setNow(NOW + 31_000);
+    await drainOutbox(h.deps);
+
+    const second = h.submit.mock.calls[1]?.[0] as { imagePath: string | null | undefined };
+    expect(second.imagePath ?? null).toBeNull();
+    expect(await listOutboxItems()).toHaveLength(0);
+  });
+
+  it("still deletes an unreadable photo that this attempt uploaded itself", async () => {
+    // No stored path, so this attempt presigned and PUT the bytes and the
+    // server still could not read them. That is a verdict on the photo.
+    await putOutboxItem(row({ image_path: null }));
+    const h = harness([failure(400, "RECEIPT_INVALID_IMAGE")]);
+
+    await drainOutbox(h.deps);
+
+    expect(await listOutboxItems()).toHaveLength(0);
+    expect(h.events[0]?.type).toBe("terminal");
+  });
+
+  it("keeps a path the attempt presigned even when the drain then pauses", async () => {
+    // A 401 arrives after the presign and the PUT have already landed. Losing
+    // the path here would make the next attempt mint a new one, and the body
+    // would drift under the unchanged Idempotency-Key.
+    await putOutboxItem(row({ image_path: null }));
+    const h = harness([
+      { ok: false, error: mapSubmitError(401, "UNAUTHENTICATED", undefined), imagePath: "user-1/uploaded.jpg" },
+    ]);
+
+    await drainOutbox(h.deps);
+
+    const [item] = await listOutboxItems();
+    expect(item?.image_path).toBe("user-1/uploaded.jpg");
+    expect(item?.attempts).toBe(0);
   });
 
   it("CRITICAL: a scan cooldown keeps the receipt and pauses the drain", async () => {

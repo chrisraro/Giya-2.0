@@ -132,6 +132,12 @@ export function ReceiptOutbox() {
     scheduleRef.current.drainDueAt = 0;
     await updateOutboxItem(item.id, { status: "queued", attempts: 0, last_error: null });
     setNotice(null);
+    // `true` is belt and braces, and it is worth saying so rather than letting
+    // a reader assume it is load-bearing: the write above has already put the
+    // row back to `queued`, so an ordinary drain would reach it anyway. The
+    // argument only matters if that write failed - a full disk, a database that
+    // closed under us - in which case the row is still `failed` and this is
+    // what keeps the consumer's tap from doing nothing at all.
     await drain(true);
   }
 
