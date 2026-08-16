@@ -4,12 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
     "test:watch": "vitest",
-    "gen:tokens": "tsx scripts/generate-md3-tokens.ts"
+    "gen:tokens": "tsx scripts/generate-md3-tokens.ts",
+    "gen:icons": "tsx scripts/generate-pwa-icons.ts"
   },
   "dependencies": {
     "@hcaptcha/react-hcaptcha": "^2.0.2",
@@ -32,11 +33,13 @@
     "react-dom": "19.2.4",
     "react-hook-form": "^7.83.0",
     "server-only": "^0.0.1",
+    "serwist": "^9.5.12",
     "sharp": "^0.35.3",
     "tailwind-merge": "^3.6.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@serwist/next": "^9.5.12",
     "@tailwindcss/postcss": "^4",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^7.0.0",
