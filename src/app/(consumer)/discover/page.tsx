@@ -7,6 +7,7 @@ import {
   listRefBusinessTypes,
   listRefCities,
 } from "@/features/businesses/server/public-repo";
+import { DiscoverMap } from "@/features/discovery/components/discover-map";
 
 export const dynamic = "force-dynamic";
 
@@ -100,6 +101,19 @@ export default async function DiscoverPage({
           </button>
         </div>
       </form>
+
+      {/*
+        The map of these results, or nothing at all.
+
+        It renders itself away in the two cases that matter and does so before
+        emitting any frame or heading, so there is no wrapper here to leave an
+        orphan behind: no MapTiler key configured (the current state of this
+        branch), and no result carrying coordinates.
+
+        Businesses without coordinates are NOT removed from `businesses`. They
+        are absent from the picture and present in the list below.
+      */}
+      <DiscoverMap businesses={businesses} className="mt-6" />
 
       {/* Results Section */}
       <section className="mt-6 space-y-3">
