@@ -250,6 +250,42 @@ describe("the row it writes", () => {
 });
 
 describe("the orphan rule", () => {
+  it("CRITICAL: writes no row when the upload itself failed", async () => {
+    // THE DIRECTION THIS SUITE WAS MISSING. Every other assertion here lets the
+    // upload succeed, so deleting the `if (uploadError)` branch outright left
+    // the whole suite green while the action inserted a business_documents row
+    // and answered ok:true for an object that was never stored - a row claiming
+    // a document that is not there, which is the exact thing the ordering rule
+    // exists to prevent and the exact thing the compensating delete below
+    // exists to undo. The cleanup was pinned in both directions; the failure it
+    // compensates for was pinned in neither.
+    mocks.upload.mockResolvedValue({
+      data: null,
+      error: { message: "Bucket not found" },
+    });
+
+    const result = await uploadVerificationDocument(documentForm());
+
+    expect(result.ok).toBe(false);
+    expect(mocks.insert).not.toHaveBeenCalled();
+    // Nothing landed, so there is nothing to compensate for either.
+    expect(mocks.remove).not.toHaveBeenCalled();
+  });
+
+  it("does not leak the storage error to the merchant either", async () => {
+    // "Bucket not found" is the literal message a caller gets today if 0079 has
+    // not been applied. It names our infrastructure and is not something a
+    // merchant can act on.
+    mocks.upload.mockResolvedValue({ data: null, error: { message: "Bucket not found" } });
+
+    const result = await uploadVerificationDocument(documentForm());
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).not.toContain("Bucket");
+    expect(consoleError).toHaveBeenCalled();
+  });
+
   it("CRITICAL: removes the uploaded object when the row write fails", async () => {
     mocks.insert.mockReturnValue({
       select: () => ({

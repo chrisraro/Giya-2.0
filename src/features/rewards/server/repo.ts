@@ -19,23 +19,84 @@ import type {
 // then shapes rows into DTOs; it never widens what RLS already allows.
 
 /**
+ * One row of the claimable-rewards read, with the business joined in.
+ *
+ * Declared by hand because the generated Database types do not model PostgREST
+ * embedded resources - the same reason src/features/promotions/server/repo.ts
+ * shapes its embedded rows manually.
+ */
+type ClaimableRewardRow = {
+  id: string;
+  campaign_id: string;
+  name: string;
+  description: string | null;
+  points_cost: number;
+  // Nullability copied from the generated Database types, not guessed:
+  // `remaining` is nullable (unlimited), `per_customer_limit` is not. Widening
+  // the second to `| null` here is what made this row type stop matching
+  // ClaimableRewardDTO - a hand-written type has to agree with the schema it
+  // stands in for, or it is just a differently-shaped lie.
+  remaining: number | null;
+  per_customer_limit: number;
+  business_id: string;
+  businesses: { name: string; slug: string; status: string } | null;
+};
+
+/**
  * Rewards a consumer can currently claim: active, non-deleted rewards whose
- * owning campaign is 'active' AND inside its schedule window. RLS
- * (rewards_public_select / campaigns_public_select) only enforces
- * is_active/status - not the starts_at/ends_at window - so that window is
- * re-checked here at the app layer, same as the promotions/rewards public
- * read comments in 0012_campaigns.sql call out.
+ * owning campaign is 'active' AND inside its schedule window, AND whose owning
+ * business is approved.
+ *
+ * THAT LAST CLAUSE IS NEW AND IT IS THE POINT. `rewards_public_select` is
+ * `is_active = true AND deleted_at IS NULL` and `campaigns_public_select` is
+ * `status = 'active' AND deleted_at IS NULL` - verified live. NEITHER LOOKS AT
+ * THE OWNING BUSINESS'S STATUS. This read used to filter on exactly those two
+ * things and nothing else, so a business that had not been approved could
+ * create an active campaign with rewards and have them render on `/rewards`,
+ * the public catalogue.
+ *
+ * That was always wrong and it became reachable-by-design when the portal was
+ * deliberately opened to unapproved merchants: `draft` and
+ * `pending_verification` businesses now build their menu, promos and rewards
+ * while they wait for review, and rewards was the one of the three whose public
+ * read had no business-status gate. The symptom was not even a clean leak - the
+ * separate business lookup returned nothing for those rows, so the cards
+ * rendered headless, with a reward name, description and points cost and no
+ * shop attached.
+ *
+ * THE GATE IS `businesses!inner`, NOT A FILTER WE WROTE. The embed is an INNER
+ * join, so PostgREST evaluates `businesses_public_select`
+ * (`status = 'active' AND deleted_at IS NULL`) against the joined row and drops
+ * any reward whose business the caller cannot see - server-side, before a byte
+ * is returned. This is the same construct `listPublicPromotions` already uses
+ * for the same reason. No migration was needed: the policy already does the
+ * work once the join is inner.
+ *
+ * The explicit `.eq("businesses.status", "active")` and the app-layer check in
+ * the map below are defense-in-depth, matching the documented convention in
+ * src/features/businesses/server/public-repo.ts ("the extra filters are
+ * defense-in-depth ... not the sole gate"). An outer join, a policy edit, or a
+ * future embed spelled without `!inner` would each be caught by one of the
+ * three.
+ *
+ * RLS enforces neither the campaign's starts_at/ends_at window nor the business
+ * status, so both are re-checked here at the app layer, as the promotions and
+ * rewards public-read comments in 0012_campaigns.sql call out.
  */
 export async function listClaimableRewards(): Promise<ClaimableRewardDTO[]> {
   const supabase = await createClient();
 
-  const { data: rewards, error } = await supabase
+  const { data, error } = await supabase
     .from("rewards")
     .select(
-      "id, campaign_id, name, description, points_cost, remaining, per_customer_limit, business_id",
+      `id, campaign_id, name, description, points_cost, remaining, per_customer_limit, business_id,
+       businesses!inner ( name, slug, status )`,
     )
     .eq("is_active", true)
-    .is("deleted_at", null);
+    .is("deleted_at", null)
+    .eq("businesses.status", "active");
+
+  const rewards = data as unknown as ClaimableRewardRow[] | null;
 
   if (error || !rewards || rewards.length === 0) return [];
 
@@ -58,31 +119,37 @@ export async function listClaimableRewards(): Promise<ClaimableRewardDTO[]> {
       .map((c) => c.id),
   );
 
-  const liveRewards = rewards.filter((r) => liveCampaignIds.has(r.campaign_id));
+  const liveRewards = rewards.filter(
+    (r) =>
+      liveCampaignIds.has(r.campaign_id) &&
+      // The third fence, and the only one a unit test can exercise without a
+      // real PostgREST. A row that arrives with no business attached, or with a
+      // business that is not approved, is dropped rather than rendered with an
+      // empty shop name - which is exactly how this leak presented before the
+      // join was made inner: headless cards carrying a reward name, description
+      // and points cost for a shop consumers were not supposed to know existed.
+      r.businesses !== null &&
+      r.businesses.status === "active",
+  );
   if (liveRewards.length === 0) return [];
 
-  const businessIds = Array.from(new Set(liveRewards.map((r) => r.business_id)));
-  const { data: businesses } = await supabase
-    .from("businesses")
-    .select("id, name, slug")
-    .in("id", businessIds);
-  const businessById = new Map((businesses ?? []).map((b) => [b.id, b]));
-
-  return liveRewards.map((r) => {
-    const business = businessById.get(r.business_id);
-    return {
-      rewardId: r.id,
-      campaignId: r.campaign_id,
-      name: r.name,
-      description: r.description,
-      pointsCost: r.points_cost,
-      remaining: r.remaining,
-      perCustomerLimit: r.per_customer_limit,
-      businessId: r.business_id,
-      businessName: business?.name ?? "",
-      businessSlug: business?.slug ?? "",
-    };
-  });
+  // No second round trip for the business names: the inner join above already
+  // carried them, and it had to run anyway to apply the gate. The read this
+  // replaces was `.in("id", businessIds)` against `businesses`, whose own RLS
+  // silently returned nothing for an unapproved shop - which is why the reward
+  // still rendered while its heading vanished.
+  return liveRewards.map((r) => ({
+    rewardId: r.id,
+    campaignId: r.campaign_id,
+    name: r.name,
+    description: r.description,
+    pointsCost: r.points_cost,
+    remaining: r.remaining,
+    perCustomerLimit: r.per_customer_limit,
+    businessId: r.business_id,
+    businessName: r.businesses?.name ?? "",
+    businessSlug: r.businesses?.slug ?? "",
+  }));
 }
 
 /**

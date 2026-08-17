@@ -97,18 +97,21 @@ describe("toOpeningHoursEntries", () => {
     const result = toOpeningHoursEntries({ ...GOOD, weekendClose: "25:00" });
 
     expect(result.ok).toBe(false);
-    if (result.ok) return;
-    // The value that would have been fabricated, spelled out: if this ever
-    // starts passing with 21:00 stored, the read-path normalizer has been
-    // wired into the write path again.
-    expect(result.message).not.toBe("21:00");
   });
 
-  it("names the pair that is wrong so the wizard can say something useful", () => {
+  it("gives the wizard a sentence that shows the expected format", () => {
+    // Retitled, because the old title ("names the pair that is wrong") claimed
+    // something no assertion pinned and the code does not do: the message comes
+    // from openingHoursSchema and reads "Use a 24-hour time like 09:00" /
+    // "...like 21:00", which identifies the FORMAT, never weekday vs weekend.
+    // An assertion of `message.length > 0` under that title was a test whose
+    // name was the strongest claim in the file. Pinning what is actually true
+    // instead - and see the concern in the report about whether naming the pair
+    // is worth building.
     const result = toOpeningHoursEntries({ ...GOOD, weekdayClose: "7pm" });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.message.length).toBeGreaterThan(0);
+    expect(result.message).toMatch(/^Use a 24-hour time like \d{2}:\d{2}$/);
   });
 });

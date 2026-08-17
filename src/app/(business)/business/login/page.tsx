@@ -74,19 +74,30 @@ export default function BusinessLoginPage() {
         console.error("[identity] device registration threw during business login", devErr);
       }
 
-      const { data: staff } = await supabase
-        .from("business_staff")
-        .select("business_id, businesses(status)")
-        .eq("user_id", data.user.id)
-        .maybeSingle();
-
-      const status = (staff as any)?.businesses?.status;
-
-      if (status === "pending") {
-        router.push("/business/pending-approval");
-      } else {
-        router.push("/business/dashboard");
-      }
+      // Straight into the portal. This used to run a `business_staff` +
+      // `businesses(status)` read whose ONLY purpose was
+      //
+      //   if (status === "pending") router.push("/business/pending-approval");
+      //
+      // and "pending" is not a status this system has: `businesses_status_check`
+      // allows exactly ('draft','pending_verification','active','suspended',
+      // 'closed'). The branch could never fire, so the query was doing nothing
+      // but adding a round trip, an `any` cast and an embedded select nothing
+      // tested - the same dead construct that sat in the portal layout.
+      //
+      // It is deleted rather than corrected, for the reason the layout's comment
+      // gives at length: an unapproved business (`draft`, which is what
+      // `register_business` creates, or `pending_verification`) is SUPPOSED to
+      // reach the portal and build its profile, menu, promos and rewards while
+      // it waits. Approval gates the storefront, not the portal.
+      //
+      // Nothing is lost by dropping the read. The portal layout is the
+      // authoritative gate and resolves membership from `business_staff` itself:
+      // no membership sends the caller to /business/onboarding, and `suspended`
+      // sends them to /suspended. Deciding it twice, in a client component, from
+      // a claim-free read this page then acted on incorrectly, was strictly
+      // worse than deciding it once on the server.
+      router.push("/business/dashboard");
     } catch (err: any) {
       setFormError(err?.message || "Failed to sign in to merchant portal.");
     } finally {
