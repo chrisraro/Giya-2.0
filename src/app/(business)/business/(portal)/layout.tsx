@@ -69,6 +69,23 @@ export default async function PortalLayout({ children }: { children: ReactNode }
   // unapproved merchant out of the product. It is deleted instead, and
   // layout.test.tsx goes red if anyone reinstates it in either spelling.
   //
+  // `closed` ALSO keeps full portal access, and that is a decision rather than
+  // an omission. It is the one status left without a stated rule after the
+  // above, so: `closed` is the merchant's own end state - they shut the shop -
+  // while `suspended` is a platform sanction. Locking an owner out of their own
+  // records the moment they close would be a data-access problem dressed as a
+  // safety feature, and they still need the portal to read history and export.
+  // The consumer side is already handled: `closed` fails the storefront's
+  // `status = 'active'` filter exactly like `draft` does, which
+  // storefront-visibility.test.ts asserts for all five statuses.
+  //
+  // This is not a new posture, it is the one the product already assumed.
+  // src/features/businesses/activation/presenter.ts renders "This business is
+  // closed and is not shown to customers" and go-live-card.tsx renders a "Not
+  // shown to customers" panel for it - both PORTAL surfaces, both unreachable
+  // if this layout turned `closed` away. That was the same latent
+  // contradiction `/business/pending-approval` was in.
+  //
   // Doc 30 section 2.8: `suspended` is the one status that does block the whole
   // portal, for every staff role. `portal.business.status` was already resolved
   // above via `resolveOwnerBusiness` (0004's staff-scoped read), so this is a

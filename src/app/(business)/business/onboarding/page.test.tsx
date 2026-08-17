@@ -27,6 +27,13 @@ const mocks = vi.hoisted(() => ({
   push: vi.fn(),
   registerBusiness: vi.fn(),
   refreshSession: vi.fn(),
+  uploadVerificationDocument: vi.fn(),
+  /** Records the ORDER of the two, which is load-bearing. See the refresh test. */
+  calls: [] as string[],
+}));
+
+vi.mock("@/features/businesses/onboarding/actions", () => ({
+  uploadVerificationDocument: mocks.uploadVerificationDocument,
 }));
 
 vi.mock("next/navigation", () => ({
@@ -41,12 +48,33 @@ vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({ auth: { refreshSession: mocks.refreshSession } }),
 }));
 
+/** A picked file, the way the hidden <input type="file"> delivers one. */
+function pickedFile(name = "mayors-permit.pdf", type = "application/pdf"): File {
+  return new File(["%PDF-1.7" as unknown as BlobPart], name, { type });
+}
+
+/** Drives the hidden file input, which the visible button proxies for. */
+function pickDocuments(...files: File[]): void {
+  const input = document.querySelector('input[type="file"]');
+  if (input === null) throw new Error("the verification step has no file input");
+  Object.defineProperty(input, "files", { value: files, configurable: true });
+  fireEvent.change(input);
+}
+
 const OnboardingPage = (await import("./page")).default;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.calls = [];
   mocks.registerBusiness.mockResolvedValue({ ok: true, hoursSaved: true });
-  mocks.refreshSession.mockResolvedValue({ data: {}, error: null });
+  mocks.refreshSession.mockImplementation(async () => {
+    mocks.calls.push("refreshSession");
+    return { data: {}, error: null };
+  });
+  mocks.uploadVerificationDocument.mockImplementation(async () => {
+    mocks.calls.push("upload");
+    return { ok: true, documentId: "doc-1", storagePath: "biz/doc.pdf" };
+  });
 });
 
 function fillBasics(): void {
@@ -130,6 +158,110 @@ describe("the hours step reaches the server (G1 section 2)", () => {
     const passed = mocks.registerBusiness.mock.calls[0]?.[0] as { hours: Record<string, string> };
     expect(passed.hours.weekendOpen).toBe("11:00");
     expect(passed.hours.weekendClose).toBe("16:30");
+  });
+});
+
+describe("the verification step really uploads (G1 section 2)", () => {
+  it("CRITICAL: sends every picked document to the upload action", async () => {
+    render(<OnboardingPage />);
+    await advanceToFinish();
+    pickDocuments(pickedFile("mayors-permit.pdf"), pickedFile("dti.pdf"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to dashboard" }));
+
+    await waitFor(() => expect(mocks.uploadVerificationDocument).toHaveBeenCalledTimes(2));
+  });
+
+  it("CRITICAL: uploads nothing when the merchant picked nothing", async () => {
+    // The negative half. Without it an implementation that posted an empty
+    // FormData per render would satisfy the assertion above.
+    render(<OnboardingPage />);
+    await advanceToFinish();
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to dashboard" }));
+
+    await waitFor(() => expect(mocks.push).toHaveBeenCalled());
+    expect(mocks.uploadVerificationDocument).not.toHaveBeenCalled();
+  });
+
+  it("CRITICAL: refreshes the session BEFORE uploading, not after", async () => {
+    // Ordering is the assertion. 0067's row policy on business_documents is
+    // claims-based (private.is_staff_of), and the token the merchant is holding
+    // predates the business_staff row register_business just wrote. Uploading
+    // first would write objects whose rows the database then refuses.
+    render(<OnboardingPage />);
+    await advanceToFinish();
+    pickDocuments(pickedFile());
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to dashboard" }));
+
+    await waitFor(() => expect(mocks.uploadVerificationDocument).toHaveBeenCalled());
+    expect(mocks.calls).toEqual(["refreshSession", "upload"]);
+  });
+
+  it("CRITICAL: sends the doc_type the merchant chose, not a hardcoded one", async () => {
+    render(<OnboardingPage />);
+    await advanceToFinish();
+    pickDocuments(pickedFile());
+
+    fireEvent.change(screen.getByLabelText("What kind of document is this?"), {
+      target: { value: "mayors_permit" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Go to dashboard" }));
+
+    await waitFor(() => expect(mocks.uploadVerificationDocument).toHaveBeenCalled());
+    const payload = mocks.uploadVerificationDocument.mock.calls[0]?.[0] as FormData;
+    expect(payload.get("docType")).toBe("mayors_permit");
+    expect(payload.get("document")).toBeInstanceOf(File);
+  });
+
+  it("defaults a freshly picked document to `other` rather than guessing", async () => {
+    // `other` is a real value in business_documents_doc_type_check. Guessing
+    // `mayors_permit` would put a claim in the admin verification queue that
+    // the merchant never made.
+    render(<OnboardingPage />);
+    await advanceToFinish();
+    pickDocuments(pickedFile("something.pdf"));
+
+    expect(screen.getByLabelText("What kind of document is this?")).toHaveValue("other");
+  });
+
+  it("CRITICAL: never sends a businessId the action could be tempted to trust", async () => {
+    render(<OnboardingPage />);
+    await advanceToFinish();
+    pickDocuments(pickedFile());
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to dashboard" }));
+
+    await waitFor(() => expect(mocks.uploadVerificationDocument).toHaveBeenCalled());
+    const payload = mocks.uploadVerificationDocument.mock.calls[0]?.[0] as FormData;
+    expect(payload.get("businessId")).toBeNull();
+  });
+
+  it("still reaches the dashboard when a document failed to upload", async () => {
+    // The business exists and register_business is not idempotent, so a failed
+    // document must not strand the merchant on a button that would create a
+    // second shop. Settings is where it gets re-added.
+    mocks.uploadVerificationDocument.mockResolvedValue({ ok: false, message: "nope" });
+    render(<OnboardingPage />);
+    await advanceToFinish();
+    pickDocuments(pickedFile());
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to dashboard" }));
+
+    await waitFor(() => expect(mocks.push).toHaveBeenCalledWith("/business/dashboard"));
+  });
+
+  it("removes a picked document from the list before it is ever uploaded", async () => {
+    render(<OnboardingPage />);
+    await advanceToFinish();
+    pickDocuments(pickedFile("wrong-file.pdf"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove wrong-file.pdf" }));
+    fireEvent.click(screen.getByRole("button", { name: "Go to dashboard" }));
+
+    await waitFor(() => expect(mocks.push).toHaveBeenCalled());
+    expect(mocks.uploadVerificationDocument).not.toHaveBeenCalled();
   });
 });
 

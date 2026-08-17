@@ -1448,6 +1448,45 @@ plus two overlapping staff select policies (`business_docs_staff_select` via
 0002's as amended by 0011) are live. An owner or manager can insert directly —
 no SECURITY DEFINER RPC is needed.
 
+### ⚠️ `is_staff_of` reads CLAIMS; `is_active_staff` reads the TABLE
+
+These two are not synonyms and the difference has already decided one design.
+Verified live 2026-08-17:
+
+```sql
+private.is_staff_of(bid, min_roles)   -- STABLE, *not* security definer
+  -> private.jwt_biz_role(bid)
+  -> auth.jwt()->'app_metadata'->'biz'->>bid::text
+     (falls back to a business_staff read ONLY when app_metadata.biz_overflow
+      is true, and that read is un-elevated, so business_staff's own RLS applies)
+
+private.is_active_staff(bid, roles)   -- STABLE SECURITY DEFINER, search_path=''
+  -> exists(select 1 from public.business_staff
+             where business_id = bid and user_id = auth.uid()
+               and status = 'active' and role = any(roles))
+```
+
+Doc 12's "claims are hints, tables are truth" is exactly this. It bites hardest
+right after registration: `register_business` writes the `businesses` row **and**
+the `business_staff` owner row, but the caller's access token was minted at
+sign-up, **before** that row existed, so it carries no `biz` claim for the
+business they just created. Anything gated on `is_staff_of` refuses them until
+the token is refreshed and the custom access token hook has stamped the claim.
+
+`0079_business_documents_storage.sql` therefore fences the **storage objects** on
+`is_active_staff`, matching `src/app/(business)/business/(portal)/layout.tsx`,
+which resolves membership from `business_staff` for the same stated reason.
+
+**Owed follow-up:** `business_docs_staff_insert` on the TABLE (from 0067, one of
+the statements of that file that *did* land, since it is unguarded) still uses
+`is_staff_of`. So the object write and the row write have different admission
+rules for the same upload. The upload path works around it by refreshing the
+session before it writes anything, and its orphan rule (object first, row
+second, object removed if the row fails) makes a claims-lag failure safe rather
+than corrupting. Aligning that policy onto `is_active_staff` would remove the
+dependency entirely and is a one-policy migration; it was deliberately not done
+from underneath a task scoped to the storage bucket.
+
 ### ⚠️ The `business-documents` BUCKET does not exist, verified live 2026-08-17
 
 `0002_identity.sql:332` says "Bucket: business-documents", doc 11 lists it, doc
@@ -1465,15 +1504,18 @@ the four `avatars_objects_owner_*` and the two `receipts_objects_consumer_*`.
 `0019_receipts_storage.sql` created `receipts` and `0064_avatars_storage.sql`
 created `avatars`; nothing did the same for this one.
 
-**Consequence: document upload cannot be built without a migration.** The table
-is ready and writable, but a `business_documents` row records a `storage_path`
-into a bucket that does not exist, so writing the row without the bucket would
-produce records pointing at nothing. G1 stopped at this line rather than ship
-that. What is owed is one migration in the shape of 0019/0064: the
-`storage.buckets` insert (private, `file_size_limit` 20971520 to match
-`business_documents_size_bytes_check`, PDF/JPEG/PNG mime allowlist) plus
-`storage.objects` policies scoped by `private.is_staff_of(business_id, ...)` on
-the `{business_id}/` path prefix, and a pgTAP smoke suite alongside it.
+**RESOLVED by `0079_business_documents_storage.sql`** (written, not yet applied
+at the time of writing — see the ledger note for its status). 0079 creates the
+private bucket with `file_size_limit` set to agree with
+`business_documents_size_bytes_check` rather than to a second opinion, a
+PDF/JPEG/PNG allowlist, and three `storage.objects` policies (insert, select,
+delete — deliberately no UPDATE) scoped to owner/manager of the tenant named by
+the `{business_id}/` path prefix, via `private.is_active_staff`. Its pgTAP suite
+is `supabase/tests/rls_business_documents_storage_smoke.sql`, 35 assertions.
+
+Until it is applied, `select id from storage.buckets` still returns only
+`avatars` and `receipts`, and any upload path is writing into a bucket that is
+not there.
 
 ### ⚠️ Ledger divergence, verified live 2026-08-16
 
