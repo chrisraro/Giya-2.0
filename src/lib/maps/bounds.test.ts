@@ -135,6 +135,26 @@ describe("fitBounds", () => {
     expect(result?.zoom).toBe(2);
   });
 
+  it("never zooms in past the ceiling the caller set, for shops metres apart", () => {
+    // Two units in the same building. 0.0001 degrees is 7.111e-5px at zoom 0,
+    // so the span alone would allow log2(512 / 7.111e-5) = 22.78 -> zoom 22,
+    // which is past MAP_MAX_ZOOM and past anything the provider serves. Only
+    // the zero-span case exercised this clamp before, and that arrives through
+    // the Infinity branch rather than through the comparison.
+    const result = fitBounds({
+      points: [
+        { lat: 10.3156, lng: 123.8854 },
+        { lat: 10.3156, lng: 123.8855 },
+      ],
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+      minZoom: 2,
+      maxZoom: 15,
+    });
+
+    expect(result?.zoom).toBe(15);
+  });
+
   it("never zooms out past the floor the caller set, however far apart the shops are", () => {
     // lng -170 to 170 spans 248.888px at zoom 0, which wants zoom 1. A browse
     // map of the whole planet is not more useful than a map that crops.

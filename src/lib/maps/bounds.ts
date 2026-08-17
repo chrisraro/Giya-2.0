@@ -51,10 +51,16 @@ export interface FitBoundsResult {
  * because the first means draw no map and the second means draw one.
  *
  * KNOWN LIMIT, stated rather than hidden: the longitude span is measured on the
- * unwrapped projection, so a result set straddling the antimeridian is treated
- * as spanning almost the whole planet and clamps to `minZoom`. Giya's catalog
- * is Philippine and sits between 116E and 127E, nowhere near that seam; the
- * failure is a map that is too far out, never a map centred in the wrong place.
+ * unwrapped projection, so a result set straddling the antimeridian takes the
+ * long way round the planet. Measured at lng 179 and -179, two points 2 degrees
+ * apart, this returns centre 0.0000, 0.0000 and offsets of 1274.3 and -762.3:
+ * a map of the Gulf of Guinea, 180 degrees from both shops, with neither shop
+ * in the frame. It is centred in the wrong place, not merely too far out.
+ *
+ * That is accepted rather than fixed because Giya's catalog is Philippine and
+ * sits between 116E and 127E, so the branch that would handle it is unreachable
+ * from real data and therefore untestable. If this function is ever pointed at
+ * a catalog that crosses the seam, this is the thing to fix first.
  */
 export function fitBounds({
   points,

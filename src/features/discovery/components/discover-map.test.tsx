@@ -353,6 +353,45 @@ describe("with a tile key and pinned results", () => {
     );
   });
 
+  it("anchors each pin by its point, not by the centre of its box", () => {
+    withKey();
+
+    render(<DiscoverMap businesses={[business()]} />);
+
+    // MAP_PIN_CLASS is a square rotated 45 degrees, so after the rotation the
+    // visual point is the BOTTOM-CENTRE of the element's box. map-chrome.tsx
+    // warns about this in capitals and discover-map.tsx repeats the warning,
+    // and until now nothing checked it. Centring the box on the coordinate
+    // instead puts every pin half a pin-height north of its shop.
+    expect(pinItems()[0]?.style.transform).toBe("translate(-50%, -100%)");
+  });
+
+  it("clamps a mis-geocoded outlier to the zoom floor rather than the whole globe", () => {
+    withKey();
+
+    // REACHABLE, not hypothetical: toPublicCoordinates validates only that the
+    // pair is inside +/-90 and +/-180, so a merchant typo lands anywhere on
+    // Earth and passes. Cebu plus a row typed into London spans 124 degrees of
+    // longitude, which wants zoom 1 and is held at DISCOVER_MAP_MIN_ZOOM.
+    const { container } = render(
+      <DiscoverMap
+        businesses={[
+          business({ coordinates: { lat: 10.3157, lng: 123.8854 } }),
+          business({ id: "typo", slug: "typo", coordinates: { lat: 51.5072, lng: -0.1276 } }),
+        ]}
+      />,
+    );
+
+    // 3, the literal. What the floor buys is a bounded basemap; it does NOT
+    // buy a picture with the shops in it, and the constant's comment no longer
+    // claims otherwise. Both pins are off-frame here and the list is what the
+    // consumer reads.
+    for (const image of container.querySelectorAll("img")) {
+      expect(image.getAttribute("src")).toMatch(/\/3\/\d+\/\d+\.png/);
+    }
+    expect(container.querySelectorAll("img").length).toBeGreaterThan(0);
+  });
+
   it("renders the attribution, because it is a licence condition", () => {
     withKey();
 

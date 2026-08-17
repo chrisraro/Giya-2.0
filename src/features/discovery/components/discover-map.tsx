@@ -90,9 +90,20 @@ export const DISCOVER_MAP_MAX_ZOOM = 15;
 
 /**
  * The furthest out. A Philippine catalog spanning Batanes to Tawi-Tawi still
- * fits inside this, so it never clips a real result set; it exists so that one
- * mis-geocoded row on the far side of the planet renders a wide regional map
- * rather than the entire globe as a smear.
+ * fits well inside this, so it never clips a real result set.
+ *
+ * WHAT IT DOES AND DOES NOT BUY, since the earlier comment here claimed more
+ * than the code delivers. It bounds the basemap, and nothing else. It does not
+ * rescue a result set containing a mis-geocoded outlier: `toPublicCoordinates`
+ * validates only that a pair is inside +/-90 and +/-180, so a merchant typo
+ * lands anywhere on Earth and passes, and Cebu plus a row typed into London
+ * renders a basemap of eastern Iran with both pins off-frame. The floor stops
+ * that being the whole globe as a smear; it does not make it a useful picture.
+ *
+ * That is survivable only because the map is decoration and the LIST is what
+ * the consumer reads: both shops are still in the results, including the
+ * mis-geocoded one. Fixing it properly means outlier rejection, which would
+ * hide a shop from the map on a heuristic and is a worse trade at this size.
  */
 export const DISCOVER_MAP_MIN_ZOOM = 3;
 
