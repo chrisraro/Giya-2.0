@@ -414,7 +414,15 @@ export default function BusinessOnboardingPage() {
     // sign-up/sign-in predates this business_staff row and won't carry it.
     const supabase = createClient();
     await supabase.auth.refreshSession();
-    router.push("/business/pending-approval");
+    // Into the portal, which is what the button has always said. This used to
+    // push to /business/pending-approval - a waiting room offering a "check
+    // status" button and no way to do anything - and that was the real lockout
+    // for an unapproved merchant. The portal layout's own approval guard could
+    // never fire (see its comment), so this line was the only thing actually
+    // keeping a brand new `draft` business out of the product it just signed up
+    // for. A business builds its profile, menu, promos and rewards WHILE it
+    // waits for review; only its public storefront waits on approval.
+    router.push("/business/dashboard");
   }
 
   function goNext() {

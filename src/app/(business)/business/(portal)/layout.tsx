@@ -45,19 +45,39 @@ export default async function PortalLayout({ children }: { children: ReactNode }
     redirect("/business/onboarding");
   }
 
-  // Doc 30 section 2.8: a suspended business (`businesses.status='suspended'`)
-  // blocks its whole portal, for every staff role. `portal.business.status` is
-  // already resolved above via `resolveOwnerBusiness` (0004's staff-scoped
-  // read), so this is a comparison, not a second query - the same table-truth
-  // read the dashboard's verification banner already relies on, just acted on
-  // here too. Like the consumer layout's equivalent gate, this redirect is a
-  // courtesy: the actual control is `validateRedemption`'s BUSINESS_SUSPENDED
-  // refusal (src/lib/auth/suspension.ts), which does not depend on this
-  // layout ever rendering.
-  if (portal.business.status === "pending") {
-    redirect("/business/pending-approval");
-  }
-
+  // THIS LAYOUT IS NOT AN APPROVAL GATE, AND THAT IS DELIBERATE.
+  //
+  // A business nobody has approved yet - `draft`, which is what
+  // `register_business` creates, or `pending_verification`, which is what
+  // submitting for review sets - gets the WHOLE portal. The portal is where a
+  // merchant builds its profile, menu, promos and rewards while it waits, so
+  // gating it on approval would mean handing a new merchant an empty product
+  // and asking them to come back in a few days. What approval actually
+  // controls is the STOREFRONT, and that control is the `status = 'active'`
+  // filter in src/features/businesses/server/public-repo.ts - a consumer-side
+  // read, nothing to do with this file.
+  //
+  // WHAT USED TO BE HERE, so nobody re-derives it as a bug fix:
+  //
+  //   if (portal.business.status === "pending") redirect("/business/pending-approval");
+  //
+  // "pending" is not a status this system has. `businesses_status_check` allows
+  // exactly ('draft','pending_verification','active','suspended','closed'), so
+  // that branch could never fire - unapproved merchants reached the portal by
+  // accident rather than by decision, and `/business/pending-approval` was
+  // unreachable from here. Correcting the comparison would have locked every
+  // unapproved merchant out of the product. It is deleted instead, and
+  // layout.test.tsx goes red if anyone reinstates it in either spelling.
+  //
+  // Doc 30 section 2.8: `suspended` is the one status that does block the whole
+  // portal, for every staff role. `portal.business.status` was already resolved
+  // above via `resolveOwnerBusiness` (0004's staff-scoped read), so this is a
+  // comparison and not a second query - the same table-truth read the
+  // dashboard's verification banner relies on, just acted on here too. Like the
+  // consumer layout's equivalent gate this redirect is a courtesy: the actual
+  // control is `validateRedemption`'s BUSINESS_SUSPENDED refusal
+  // (src/lib/auth/suspension.ts), which does not depend on this layout ever
+  // rendering.
   if (portal.business.status === "suspended") {
     redirect("/suspended?type=business");
   }
