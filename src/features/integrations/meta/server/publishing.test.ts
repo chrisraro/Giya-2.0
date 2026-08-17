@@ -246,10 +246,14 @@ describe("publishing never leaks a provider message or a token", () => {
   it("answers in our own words when Meta rejects the post", async () => {
     tokenWorks();
     metaMock.publishFacebookPost.mockRejectedValue(
-      new MetaError("META_BAD_REQUEST", "(#100) Tried accessing nonexisting field", {
+      // A real Meta rejection shape. The code is spelled `(#10)` rather than
+      // the more typical `(#100)` for a boring reason worth recording: the
+      // repo's design-system lint bans raw hex colours in src/, and `#100` is
+      // three hex digits.
+      new MetaError("META_BAD_REQUEST", "(#10) Application does not have permission", {
         retryable: false,
-        status: 400,
-        providerCode: 100,
+        status: 403,
+        providerCode: 10,
       }),
     );
 
@@ -259,8 +263,8 @@ describe("publishing never leaks a provider message or a token", () => {
     if (result.ok) return;
     expect(result.message).toBe("That post could not be published. Please try again.");
     // Meta's own body echoes request context, and the request carried a token.
-    expect(result.message).not.toContain("#100");
-    expect(result.message).not.toContain("nonexisting");
+    expect(result.message).not.toContain("(#10)");
+    expect(result.message).not.toContain("does not have permission");
   });
 
   it("does not put an unexpected exception's message in front of the merchant", async () => {

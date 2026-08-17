@@ -7,6 +7,8 @@ import { z } from "zod";
 import { resolveStaffContext } from "@/features/businesses/server/resolve-owner-business";
 import { BUSINESS_SETTINGS_ROLES } from "@/features/businesses/settings/roles";
 
+import { BUSINESS_MARKETING_ROLES } from "./roles";
+import { publishCampaignToMeta } from "./server/publishing";
 import * as service from "./server/service";
 import type { ActionResult } from "./types";
 
@@ -132,4 +134,74 @@ export async function disconnectMeta(input: unknown): Promise<ActionResult<null>
 
   revalidatePath(SETTINGS_PATH);
   return { ok: true, data: null };
+}
+
+const MARKETING_PATH = "/business/marketing";
+
+const NOT_ALLOWED_TO_PUBLISH: ActionResult<never> = {
+  ok: false,
+  message: "Only an owner, manager or marketing seat can post to a connected Page.",
+};
+
+/**
+ * The campaign announcement composer's payload.
+ *
+ * `message` is bounded at 5000: Facebook's own feed limit is around 63k, but
+ * nothing a merchant should type into a portal textarea approaches that, and an
+ * unbounded string is an unbounded request body from one form post.
+ *
+ * `linkUrl` is validated as a URL and OPTIONAL, and an empty string is
+ * normalized away rather than rejected - a merchant who clears the field is not
+ * making a mistake, they are posting without a link.
+ */
+const publishSchema = z.object({
+  connectionId: z.uuid(),
+  message: z.string().trim().min(1).max(5000),
+  linkUrl: z.union([z.url(), z.literal("")]).optional(),
+});
+
+/**
+ * Post a campaign announcement to one connected Facebook Page.
+ *
+ * THE ONLY WRITE THIS PLATFORM MAKES TO A MERCHANT'S META ACCOUNT.
+ *
+ * The tenancy is resolved from `business_staff` under the caller's own session
+ * first, exactly as the three actions above do: no business id is accepted from
+ * the client, so a forged `connectionId` has nothing to point at - the repo
+ * read pins `business_id` as well as the row id.
+ *
+ * The SCOPE gate is not here. It lives in server/publishing.ts, against what
+ * Meta says the token carries, because an action that checked
+ * `META_V1_SCOPES` would be checking what we asked for rather than what we
+ * hold. See that file's header and doc 42's scope amendment.
+ */
+export async function publishMetaCampaign(
+  input: unknown,
+): Promise<ActionResult<{ postId: string }>> {
+  const context = await resolveStaffContext(BUSINESS_MARKETING_ROLES);
+  if (context === null) return NOT_ALLOWED_TO_PUBLISH;
+
+  const parsed = publishSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, message: "Write a message, and check the link is a full web address." };
+  }
+
+  const result = await publishCampaignToMeta({
+    businessId: context.businessId,
+    connectionId: parsed.data.connectionId,
+    actorId: context.userId,
+    actorRole: context.role,
+    message: parsed.data.message,
+    // An empty field is "no link", not a link that is empty.
+    linkUrl: parsed.data.linkUrl === "" ? undefined : parsed.data.linkUrl,
+  });
+
+  if (!result.ok) return { ok: false, message: result.message };
+
+  // The capability panel above the composer reads a live token state, so the
+  // screen is revalidated even on success: a publish that consumed the last of
+  // a rate budget, or landed just as a token expired, should not leave a stale
+  // "ready" next to it.
+  revalidatePath(MARKETING_PATH);
+  return { ok: true, data: { postId: result.postId } };
 }

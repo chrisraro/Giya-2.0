@@ -1,5 +1,4 @@
 import { Card } from "@/components/ui/card";
-import { cn } from "@/lib/utils";
 
 import { INSIGHTS_PAGE_COPY, INSIGHTS_SURFACE_COPY, TILE_UNREPORTED_LABEL } from "../copy";
 import type { MetaInsightTile, MetaInsightsView, MetaPageInsights } from "../types";

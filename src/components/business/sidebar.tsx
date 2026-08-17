@@ -14,6 +14,7 @@ const NAV_ITEMS = [
   { href: "/business/redeem", label: "Redeem", icon: "qr_code_scanner" },
   { href: RECEIPTS_HREF, label: "Receipts", icon: "receipt_long" },
   { href: "/business/campaigns", label: "Campaigns", icon: "campaign" },
+  { href: "/business/marketing", label: "Marketing", icon: "ads_click" },
   { href: "/business/menu", label: "Menu", icon: "restaurant_menu" },
   { href: "/business/customers", label: "Customers", icon: "group" },
   { href: "/business/rewards", label: "Rewards", icon: "redeem" },

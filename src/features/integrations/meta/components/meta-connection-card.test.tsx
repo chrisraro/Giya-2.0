@@ -71,7 +71,6 @@ describe("when the integration is dormant", () => {
   it("still explains what the feature is, so the card is not a mystery", () => {
     renderCard({ view: view({ configured: false }) });
     expect(screen.getByText(/Connect your Facebook Page/i)).toBeInTheDocument();
-    expect(screen.getByText(/never posts on your behalf/i)).toBeInTheDocument();
   });
 
   it("distinguishes missing app credentials from missing token storage", () => {
@@ -149,9 +148,39 @@ describe("when the integration is live", () => {
     expect(screen.getByText(/Ask an owner or manager/i)).toBeInTheDocument();
   });
 
-  it("says plainly that insights tiles are not in this release", () => {
+  it("points at the screen where the figures and the composer actually are", () => {
     renderCard();
-    expect(screen.getByText(/not part of this release/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Your audience and engagement figures, and the announcement composer, are on the Marketing screen.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("CRITICAL: no longer promises that Giya never posts on the merchant's behalf", () => {
+    // It DOES post now. `pages_manage_posts` is requested and the composer on
+    // /business/marketing uses it. This card carried "Giya never posts on your
+    // behalf" until that shipped, and a settings screen still saying it would
+    // be the most consequential false claim in the product: a merchant who
+    // read it would have no reason to expect anything on their Page.
+    //
+    // Asserted as an ABSENCE, permanently, so a well-meaning restoration of
+    // reassuring copy cannot bring the lie back.
+    renderCard();
+    expect(screen.queryByText(/never posts on your behalf/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/not part of this release/i)).not.toBeInTheDocument();
+  });
+
+  it("states the real boundary instead: a post happens only on a press", () => {
+    // The pairing half. Deleting the false sentence without replacing it would
+    // leave a merchant with no statement at all about whether we can post,
+    // which is a different failure with the same cause.
+    renderCard();
+    expect(
+      screen.getByText(
+        "Connect your Facebook Page so Giya can read your audience and engagement figures. Giya posts to your Page only when you write an announcement and press Post.",
+      ),
+    ).toBeInTheDocument();
   });
 });
 
