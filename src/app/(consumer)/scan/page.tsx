@@ -73,8 +73,13 @@ export default async function ScanPage({
   //
   // Both reads exist only to feed the "~N pts at <shop>" preview, and both
   // degrade to "no preview" rather than take down the capture flow, which is
-  // the money path this page exists for. The rule read throws on a query error
-  // (house convention) and is caught here, deliberately, for that reason.
+  // the money path this page exists for. BOTH throw on a query error (house
+  // convention) and BOTH are caught here, deliberately, for that reason.
+  //
+  // The catalog read is caught on THIS path only. On the chooser path above,
+  // the catalog is the page, and an empty list of shops during an outage would
+  // tell the consumer there is nowhere to scan; there the throw is correct and
+  // is left alone.
   //
   // ---------------------------------------------------------------------------
   // AUTHORIZATION FIRST, PRIVILEGED READ SECOND. THESE ARE SEQUENTIAL ON PURPOSE.
@@ -95,7 +100,17 @@ export default async function ScanPage({
   //
   // Cost: one extra round trip, on the estimate path only, on a page that is
   // already force-dynamic and whose capture flow waits on neither read.
-  const boundBusiness = (await listActiveBusinesses({ ids: [businessId], limit: 1 }))[0] ?? null;
+  //
+  // A failed read lands here as `null`, which is the same value a shop the
+  // consumer may not see produces. That is the right collapse: both mean "no
+  // shop to name", the estimate is dropped, and the privileged rule read below
+  // stays unreachable. A failed read is emphatically NOT permission to run it.
+  const boundBusiness = await listActiveBusinesses({ ids: [businessId], limit: 1 })
+    .then((found) => found[0] ?? null)
+    .catch((error: unknown) => {
+      console.error("[scan] catalog read failed; rendering /scan without the estimate", error);
+      return null;
+    });
 
   // One value rather than a business and a rule checked separately at render:
   // after the sequencing above, "no business" and "no rule" are not independent
