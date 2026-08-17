@@ -1,5 +1,33 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
+import { Blob as NodeBlob } from "node:buffer";
+
+// The scan flow's canvas pipeline cannot run in jsdom, so only the compression
+// step is stubbed for the one test that drives it. Everything else about that
+// flow, including the enqueue this banner's second clause depends on, is real.
+vi.mock("@/features/receipts/compress", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/features/receipts/compress")>();
+  return {
+    ...actual,
+    clientSha256: vi.fn().mockResolvedValue(undefined),
+    compressReceiptFile: vi.fn().mockResolvedValue({
+      blob: new NodeBlob(["jpeg"], { type: "image/jpeg" }) as unknown as Blob,
+      width: 2048,
+      height: 1536,
+      quality: 0.8,
+      byteSize: 900_000,
+      reducedBeyondDefault: false,
+    }),
+  };
+});
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+
+function photoFile(): File {
+  const file = new File(["x"], "receipt.jpg", { type: "image/jpeg" });
+  Object.defineProperty(file, "size", { value: 2048 });
+  return file;
+}
 
 // motion/react resolves `prefers-reduced-motion` through its own media-query
 // cache, seeded once at module load, so stubbing `window.matchMedia` from a
@@ -21,34 +49,38 @@ const { OfflineBanner } = await import("./offline-banner");
 // Doc 41 section 9: one global, non-blocking "Offline" pill driven by
 // `useOnlineStatus()`; individual screens never invent their own banners.
 //
-// The copy is the reason most of this file exists. The banner shipped (unmounted)
-// with "You are offline. Scanned receipts will be queued in your outbox." - a
-// sentence describing T5.3. `src/features/pwa/outbox.ts` has no callers today:
-// nothing in the scan or submit flow enqueues anything, so a consumer who read
-// that, scanned in a basement, and closed the tab would lose the receipt AND
-// have been told we kept it. This project has shipped that defect twice
-// (/suspended's "you cannot redeem" while redemption was ungated; the device
-// list's "does not sign that browser out" while it did). The assertions below
-// are a fence against a third.
+// The copy is the reason most of this file exists. The banner shipped
+// (unmounted) with "You are offline. Scanned receipts will be queued in your
+// outbox." - a sentence describing T5.3 while `src/features/pwa/outbox.ts` had
+// no callers, so a consumer who read that, scanned in a basement and closed the
+// tab would lose the receipt AND have been told we kept it. This project has
+// shipped that defect twice (/suspended's "you cannot redeem" while redemption
+// was ungated; the device list's "does not sign that browser out" while it
+// did). T5.2 cut the sentence back to what T5.1 had actually shipped and left
+// T5.3 the right to widen it once the enqueue call existed.
+//
+// T5.3a WIDENED IT. The second clause is now about the outbox, and the test
+// below named "the queue clause has a caller" is what keeps that honest: it
+// fails if the enqueue call the sentence describes is ever removed, which is
+// exactly how the original defect got in.
 //
 // WHAT THIS FILE PROVES, AND WHAT IT DOES NOT.
 //
 // It proves the rendered sentence is exactly the one string a reviewer read and
-// agreed was true at merge, and that it contains no queue/send/sync vocabulary.
-// The expected string is a literal here, not an import - an assertion that
-// compares the component's constant against the component's constant agrees
-// with itself no matter what either says.
+// agreed was true at merge. The expected string is a literal here, not an
+// import - an assertion that compares the component's constant against the
+// component's constant agrees with itself no matter what either says.
 //
-// It does NOT prove the sentence is true. Nothing a unit test can do proves
-// that. What makes it true today is that the pill promises only the two things
-// T5.1 actually shipped: the connection is down, and the NetworkFirst pages
-// route in src/lib/pwa/runtime-caching.ts serves an already-cached document
-// when the network does not answer. It deliberately does not name /cards or
-// /rewards, because a page the consumer has never opened on this device (or has
-// not opened since the last deploy - cache names are build-id scoped) is not in
-// Cache Storage and will fall through to /offline.
+// It does NOT prove the sentence is true. What makes it true is that both
+// clauses describe present state that this codebase produces: the NetworkFirst
+// pages route serves an already-cached document, and every row in
+// `receipt_outbox` is bytes in IndexedDB on this device. Neither clause is in
+// the future tense, which is what keeps the sentence true on the two paths
+// where an enqueue is REFUSED (the 10-item cap, a full disk): a capture that
+// was turned away never became a queued receipt, so nothing here speaks for it.
 
-const EXPECTED_COPY = "You're offline. Pages saved on this device still work.";
+const EXPECTED_COPY =
+  "You're offline. Pages saved on this device still work, and queued receipts are still on this phone.";
 
 function setOnline(value: boolean): void {
   Object.defineProperty(navigator, "onLine", { get: () => value, configurable: true });
@@ -81,7 +113,7 @@ describe("OfflineBanner", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("CRITICAL: says exactly what is true today, and nothing about a queue", () => {
+  it("CRITICAL: says exactly what is true today, including the queue clause", () => {
     setOnline(false);
     render(<OfflineBanner />);
 
@@ -89,24 +121,70 @@ describe("OfflineBanner", () => {
     expect(announcedText(status)).toBe(EXPECTED_COPY);
   });
 
-  it("CRITICAL: makes no promise that anything is being kept, sent or synced", () => {
-    // Stated separately from the exact-string check above because it is the
-    // rule, and it must survive a legitimate rewording. T5.3 is what earns the
-    // right to say "queued"; until an enqueue call exists, every one of these
-    // words is a lie the consumer cannot check.
+  it("CRITICAL: the queue clause is backed by a receipt that actually lands in storage", async () => {
+    // The banner may mention the outbox only because a capture that failed for
+    // want of a connection is genuinely written to IndexedDB. That behaviour
+    // lives in another module, so nothing about RENDERING this pill notices if
+    // it disappears - which is exactly how the original defect shipped: the
+    // sentence outlived the behaviour it described and every test here stayed
+    // green.
+    //
+    // So this file drives the real scan flow, offline, against a real
+    // IndexedDB, and reads the row back. A first draft asserted the source text
+    // of receipt-capture.tsx instead; a mutant that left the enqueue function
+    // in place but stopped CALLING it survived that, because the words were
+    // still on the page. Words were the original bug.
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    vi.stubGlobal("navigator", { onLine: true });
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { ReceiptCapture } = await import("@/features/receipts/components/receipt-capture");
+    const { listOutboxItems } = await import("@/features/pwa/outbox");
+    render(<ReceiptCapture />);
+
+    fireEvent.change(screen.getByLabelText(/Choose from gallery/), {
+      target: { files: [photoFile()] },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Use this photo" }));
+
+    await waitFor(async () => expect(await listOutboxItems()).toHaveLength(1));
+    vi.unstubAllGlobals();
+  });
+
+  it("CRITICAL: promises nothing about a receipt that is not already queued", () => {
+    // The rule behind the exact-string check, stated so it survives a
+    // legitimate rewording. Every one of these would extend the sentence to
+    // captures the 10-item cap or a full disk will REFUSE, which are the two
+    // paths where a consumer is told the receipt was not kept. A pill saying
+    // otherwise at the same moment would be the fourth time this project
+    // shipped copy that outran behaviour.
     setOnline(false);
     const { container } = render(<OfflineBanner />);
     const text = container.textContent ?? "";
 
     for (const forbidden of [
-      /\bqueue/i,
-      /\boutbox\b/i,
-      /\bsync/i,
-      /\bsend|\bsent\b/i,
-      /\bupload/i,
+      /\bwill be\b/i,
       /\bwe'?ll\b/i,
+      /\bevery receipt\b/i,
+      /\bany receipt\b/i,
+      /\banything you scan\b/i,
       /\bautomatic/i,
     ]) {
+      expect(text, `matched ${forbidden}`).not.toMatch(forbidden);
+    }
+  });
+
+  it("CRITICAL: promises no durability the platform cannot give", () => {
+    // Doc 41 section 8: iOS evicts storage after about seven days of Safari
+    // non-use, and "if eviction still claims the outbox, the receipt is gone
+    // and we never pretend otherwise". "Still on this phone" is a present-tense
+    // fact and survives that; "safe", "never lose" and friends do not.
+    setOnline(false);
+    const { container } = render(<OfflineBanner />);
+    const text = container.textContent ?? "";
+
+    for (const forbidden of [/\bsafe\b/i, /\bnever\b/i, /\bwon'?t lose\b/i, /\bguarantee/i]) {
       expect(text, `matched ${forbidden}`).not.toMatch(forbidden);
     }
   });
