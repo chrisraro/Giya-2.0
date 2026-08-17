@@ -1,5 +1,8 @@
-import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -172,6 +175,111 @@ describe("precacheEntries", () => {
       expect(entry.revision, entry.url).toMatch(/^[0-9a-z]+$/);
     }
   });
+});
+
+describe("precacheEntries with no public/ directory", () => {
+  // THE ENVIRONMENT EVERY OTHER TEST IN THIS FILE CANNOT REACH.
+  //
+  // Every assertion above runs with `baseDir` defaulting to `process.cwd()`,
+  // which under Vitest is the repo root, where `public/` always exists. That is
+  // the one environment in which a missing `public/` cannot be observed - so
+  // the whole block above passes with the `catch` in precacheEntries deleted,
+  // and passed with a comment above the function asserting "Never throws" on
+  // the strength of exactly those tests. A test that only runs where the
+  // failure is impossible is not evidence about the failure.
+  //
+  // What is at stake is not a build. precacheEntries() is called at MODULE
+  // SCOPE while building the Serwist options, so it runs every time
+  // next.config.ts is loaded - and `next start` loads it too. A throw there is
+  // a server that will not boot: dynamically rendered pages 500 while
+  // prerendered ones keep answering from the CDN.
+  //
+  // `baseDir` rather than process.chdir(): Vitest workers share a process with
+  // the pool, so chdir is visible to every other file running in it.
+
+  /** A directory that exists and contains no `public/` - the deployed artifact
+   *  that shipped `.next` without the static folder. */
+  function dirWithoutPublic(): string {
+    const dir = mkdtempSync(join(tmpdir(), "giya-no-public-"));
+    // Asserted, not assumed: if mkdtemp ever produced something containing a
+    // `public/`, the two tests below would be measuring nothing.
+    expect(existsSync(join(dir, "public"))).toBe(false);
+    return dir;
+  }
+
+  it("CRITICAL: does not throw when public/ is missing - the boot that 500'd every dynamic page", () => {
+    const dir = dirWithoutPublic();
+    try {
+      expect(() => precacheEntries(dir)).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("CRITICAL: still returns both generated routes when public/ is missing", () => {
+    // Not-throwing alone is satisfied by returning `[]`, which is a worker that
+    // precaches no `/offline` document - so the navigation fallback has nothing
+    // to fall back to and the offline screen silently never answers. The
+    // degraded result has to still be the useful one.
+    const dir = dirWithoutPublic();
+    try {
+      expect(precacheEntries(dir)).toEqual([
+        { url: "/offline", revision: PLACEHOLDER_BUILD_ID },
+        { url: "/manifest.webmanifest", revision: PLACEHOLDER_BUILD_ID },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("CRITICAL: does not throw when public/ exists but cannot be read", () => {
+    // The other half of the same guard. `public` here is a FILE, so readdirSync
+    // fails with ENOTDIR rather than ENOENT - an existsSync check would pass it
+    // straight through to the throw, which is why the guard is a catch.
+    const dir = dirWithoutPublic();
+    try {
+      writeFileSync(join(dir, "public"), "not a directory");
+      expect(() => precacheEntries(dir)).not.toThrow();
+      expect(precacheEntries(dir).map((entry) => entry.url)).toEqual([
+        "/offline",
+        "/manifest.webmanifest",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("CRITICAL: loading next.config.ts from a cwd with no public/ does not throw", () => {
+    // The assertion one level up from the function: it is the CONFIG MODULE
+    // that must survive boot, and it is the config module - not any caller in
+    // the app - that calls precacheEntries() with no argument. A guard on the
+    // function that the module then bypassed would pass every test above.
+    //
+    // Run in a child process because `process.chdir` inside a Vitest worker
+    // would leak into every other test file sharing it, and because a fresh
+    // process is what "server boot" actually is. NODE_ENV=production so
+    // SERVICE_WORKER_ENABLED is true and the Serwist wrapper - the thing that
+    // takes precacheEntries() as an argument - is really constructed.
+    const dir = dirWithoutPublic();
+    try {
+      const script =
+        `process.chdir(${JSON.stringify(dir)});` +
+        `import(${JSON.stringify(pathToFileURL(join(ROOT, "next.config.ts")).href)})` +
+        `.then(m => { if (typeof m.default !== "object") throw new Error("no config"); ` +
+        `console.log("BOOTED"); }, e => { console.log("THREW: " + e.message); process.exit(3); });`;
+
+      const result = spawnSync(
+        process.execPath,
+        ["--import", "tsx", "--input-type=module", "-e", script],
+        { cwd: ROOT, encoding: "utf8", env: { ...process.env, NODE_ENV: "production" } },
+      );
+
+      expect(result.stdout + result.stderr).toContain("BOOTED");
+      expect(result.status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
 
 describe("the build-id check fires during a BUILD, not at config load", () => {

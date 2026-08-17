@@ -108,11 +108,29 @@ const SERVICE_WORKER_ENABLED = shouldEnableServiceWorker(process.env);
  * navigation fallback in src/app/sw.ts has nothing to fall back TO - and
  * Serwist's `fallbacks` option expects its entries to be precached already.
  *
- * Never throws: this module is imported by src/features/identity/avatar.test.ts
- * and by next.config.test.ts, which is where its output is pinned.
+ * TOTAL BY CONSTRUCTION: a missing or unreadable `public/` yields the two
+ * generated entries rather than throwing. That matters because this runs at
+ * MODULE LOAD, and next.config.ts is loaded by `next start` as well as by
+ * `next build` - a throw here is not a failed build, it is a server that cannot
+ * boot, which reads as every dynamically rendered page 500ing while the
+ * prerendered ones keep serving from the CDN.
+ *
+ * The claim above is guaranteed by the `catch` at the end of this function and
+ * by NOTHING ELSE - not by the `public/` directory happening to exist. The
+ * previous version of this comment offered "this module is imported by
+ * next.config.test.ts, which is where its output is pinned" as its evidence.
+ * Those tests run with `cwd` at the repo root, where `public/` always exists,
+ * which is the one environment in which the failure being claimed against
+ * cannot occur. The test that actually holds this line is
+ * `precacheEntries with no public/ directory` in next.config.test.ts, which
+ * points `baseDir` at an empty temp directory; delete the `catch` and it fails.
+ *
+ * @param baseDir the directory `public/` is resolved against. Parameterised
+ *   solely so that test can supply a directory with no `public/` in it -
+ *   nothing in the app ever passes it.
  */
-export function precacheEntries(): { url: string; revision: string }[] {
-  const publicDir = join(process.cwd(), "public");
+export function precacheEntries(baseDir: string = process.cwd()): { url: string; revision: string }[] {
+  const publicDir = join(baseDir, "public");
 
   // The compiled worker and its sourcemap live in public/ after a build. A
   // service worker that precaches itself is a worker that can never be
@@ -144,6 +162,12 @@ export function precacheEntries(): { url: string; revision: string }[] {
     { url: "/manifest.webmanifest", revision: BUILD_ID },
   ];
 
+  // THE GUARD. A build-time asset list is not worth a boot-time crash: with no
+  // readable `public/` the worker precaches the two generated routes and
+  // nothing else, which degrades the offline shell rather than the server.
+  // Covers readdirSync's ENOENT/EACCES on the directory and readFileSync's on
+  // any file inside it - a file deleted between the walk and the hash is the
+  // same class of problem and gets the same answer.
   try {
     return [...walk(publicDir, ""), ...generated];
   } catch {
@@ -232,29 +256,56 @@ export function defineBuildConstants(config: { plugins?: unknown[] }, { webpack,
   return config;
 }
 
-const withSerwist = withSerwistInit({
-  swSrc: "src/app/sw.ts",
-  swDest: "public/sw.js",
-  // The worker is registered from the consumer layout only (doc 41's preamble:
-  // the business and admin portals are excluded from SW scope). Serwist's own
-  // auto-registration runs on every app-router page, which is precisely the
-  // thing that must not happen.
-  register: false,
-  // Serwist would otherwise reload the page the moment connectivity returns.
-  // Doc 41 section 9 says offline actions never surprise the user, and a reload
-  // mid-scan discards a capture.
-  reloadOnOnline: false,
-  // Belt and braces: in development the wrapper is not applied at all (see
-  // shouldEnableServiceWorker), so this never gets the chance to matter.
-  disable: !SERVICE_WORKER_ENABLED,
-  // Everything in public/, plus /offline and /manifest.webmanifest. Supplying
-  // this replaces the plugin's own glob of public/ - see precacheEntries() for
-  // why that glob cannot be left in place, and why a manifestTransform cannot
-  // repair it.
-  additionalPrecacheEntries: precacheEntries(),
-});
+/**
+ * Built ONLY when the wrapper is actually going to be applied.
+ *
+ * `additionalPrecacheEntries: precacheEntries()` is an ARGUMENT, so it is
+ * evaluated wherever this expression is - it is not gated by `disable`, which
+ * is merely an option the plugin reads later. Left unconditional at module
+ * scope it walked and md5'd every file in `public/` on every config load,
+ * including in development, where the wrapper below is then thrown away
+ * unused. Now the walk happens only on the path that consumes its output.
+ *
+ * WHAT THIS DOES NOT DO: it does not confine the walk to `next build`.
+ * `SERVICE_WORKER_ENABLED` separates development from everything else, not a
+ * build from a running server, so `next start` still pays for it once at boot.
+ * The obvious alternative - gating on `process.env.NEXT_PHASE` - is WRONG here:
+ * Next sets that variable in next/dist/build/index.js only after the config has
+ * been loaded and the compilation has run, so a build would see it unset and
+ * silently ship a precache manifest containing nothing from `public/`. A
+ * phase-function config export (`export default (phase) => ...`) would work,
+ * but changes the shape of this module's default export, which
+ * next.config.test.ts drives directly. The walk being cheap and, per the guard
+ * in precacheEntries, unable to throw, neither is worth it.
+ */
+const withSerwist = SERVICE_WORKER_ENABLED
+  ? withSerwistInit({
+      swSrc: "src/app/sw.ts",
+      swDest: "public/sw.js",
+      // The worker is registered from the consumer layout only (doc 41's
+      // preamble: the business and admin portals are excluded from SW scope).
+      // Serwist's own auto-registration runs on every app-router page, which is
+      // precisely the thing that must not happen.
+      register: false,
+      // Serwist would otherwise reload the page the moment connectivity
+      // returns. Doc 41 section 9 says offline actions never surprise the user,
+      // and a reload mid-scan discards a capture.
+      reloadOnOnline: false,
+      // Constantly false on this branch, which is only reached when
+      // SERVICE_WORKER_ENABLED is true. Kept because it is the plugin's own
+      // switch and stating it is cheaper than making a reader derive it; the
+      // thing that actually keeps the worker out of development is that this
+      // whole wrapper is never built there.
+      disable: !SERVICE_WORKER_ENABLED,
+      // Everything in public/, plus /offline and /manifest.webmanifest.
+      // Supplying this replaces the plugin's own glob of public/ - see
+      // precacheEntries() for why that glob cannot be left in place, and why a
+      // manifestTransform cannot repair it.
+      additionalPrecacheEntries: precacheEntries(),
+    })
+  : null;
 
 // In development this is the bare config, with no `webpack` key, which is what
 // lets `next dev` run on Turbopack. `next build` runs with `--webpack` because
 // @serwist/next has no Turbopack support - see package.json.
-export default SERVICE_WORKER_ENABLED ? withSerwist(nextConfig) : nextConfig;
+export default withSerwist === null ? nextConfig : withSerwist(nextConfig);
