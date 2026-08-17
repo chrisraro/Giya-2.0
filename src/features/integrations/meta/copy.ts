@@ -38,6 +38,12 @@ export const INSIGHTS_SURFACE_COPY: Record<Exclude<MetaSurfaceState, "pages">, s
   storage_unavailable:
     "Audience and engagement figures are not available yet: secure credential storage is not configured.",
   not_connected: "Connect a Facebook Page in Settings to see your audience and engagement figures.",
+  // NOT the sentence above. That one offers a remedy, and during a failed read
+  // the remedy does nothing: the merchant may well have a working connection we
+  // simply could not see. Telling them to go and connect one is a wrong
+  // instruction about a problem they do not have.
+  read_failed:
+    "We could not load your connected Pages just now. This one is on our side, and nothing about your connection has changed.",
 };
 
 /** Fixed prose for one Page's token, on the ANALYTICS surface. */
@@ -57,6 +63,8 @@ export const PUBLISH_SURFACE_COPY: Record<Exclude<MetaSurfaceState, "pages">, st
   storage_unavailable:
     "Posting to a Facebook Page is not available yet: secure credential storage is not configured.",
   not_connected: "Connect a Facebook Page in Settings before posting a campaign announcement.",
+  read_failed:
+    "We could not load your connected Pages just now. This one is on our side, and nothing about your connection has changed.",
 };
 
 /** Fixed prose for one Page's token, on the PUBLISHING surface. */

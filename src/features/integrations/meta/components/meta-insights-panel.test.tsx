@@ -86,8 +86,45 @@ describe("the deployment-wide states each get their own sentence", () => {
     ).toBeInTheDocument();
   });
 
+  it("CRITICAL: a failed read says the problem is ours, not that nothing is connected", () => {
+    // The seventh degraded state. `not_connected` offers "Connect a Facebook
+    // Page in Settings", and during a database wobble that is a remedy which
+    // does nothing, aimed at a merchant whose Page is connected and fine.
+    render(<MetaInsightsPanel view={view({ state: "read_failed", pages: [] })} />);
+
+    expect(
+      screen.getByText(
+        "We could not load your connected Pages just now. This one is on our side, and nothing about your connection has changed.",
+      ),
+    ).toBeInTheDocument();
+    // The wrong instruction must not appear.
+    expect(screen.queryByText(/Connect a Facebook Page in Settings/)).not.toBeInTheDocument();
+  });
+
+  it("CRITICAL: does not name a period when there are no figures to describe", () => {
+    // "Last 28 days" beside "not available on this deployment yet" describes a
+    // window of numbers that are not there. A mutation run found the label and
+    // the body were two independent branches off one discriminant with only the
+    // body pinned; this is the assertion that was missing.
+    for (const state of [
+      "not_configured",
+      "storage_unavailable",
+      "not_connected",
+      "read_failed",
+    ] as const) {
+      const { unmount } = render(<MetaInsightsPanel view={view({ state, pages: [] })} />);
+      expect(screen.queryByText("Last 28 days"), `${state} showed a period`).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
   it("renders no tile at all in any of those states", () => {
-    for (const state of ["not_configured", "storage_unavailable", "not_connected"] as const) {
+    for (const state of [
+      "not_configured",
+      "storage_unavailable",
+      "not_connected",
+      "read_failed",
+    ] as const) {
       const { unmount } = render(<MetaInsightsPanel view={view({ state, pages: [] })} />);
       // A figure of any kind here would be a figure with no source.
       expect(screen.queryByText("Impressions")).not.toBeInTheDocument();

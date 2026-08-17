@@ -63,8 +63,15 @@ import { withPageToken } from "./tokens";
 // breaker exists for.
 //
 // -----------------------------------------------------------------------------
-// NOTHING HERE THROWS, EVER
+// NOTHING HERE THROWS, ON EVERY PATH THIS MODULE CONTROLS
 // -----------------------------------------------------------------------------
+//
+// The header used to read "NOTHING HERE THROWS, EVER", which overclaimed. One
+// link in the chain is owned elsewhere: `debugToken` normalizes a missing
+// `scopes` field to `[]` (lib/integrations/meta.ts), so `result.data.scopes`
+// cannot be undefined HERE because that module guarantees it, not because
+// anything below does. Unreachable today, and a promise this file cannot keep
+// on its own is worth writing down as such.
 //
 // Doc 42: expired or revoked tokens make "insights tiles show 'reconnect'
 // state; never blocks core loops." These functions run inside a page render, so
@@ -91,7 +98,7 @@ export type GrantedScopesResult =
  * feature prefers named-field inputs; this function is the exception and here
  * is why.
  */
-export const readGrantedScopes = cache(async function readGrantedScopes(
+const readGrantedScopesImpl = async function readGrantedScopesImpl(
   businessId: string,
   connectionId: string,
 ): Promise<GrantedScopesResult> {
@@ -138,7 +145,27 @@ export const readGrantedScopes = cache(async function readGrantedScopes(
   if (!result.data.isValid) return { ok: false, failure: "needs_reconnect" };
 
   return { ok: true, scopes: result.data.scopes };
-});
+};
+
+export const readGrantedScopes = cache(readGrantedScopesImpl);
+
+/**
+ * The unwrapped implementation, exported for ONE assertion and nothing else.
+ *
+ * `cache()` erases arity - `readGrantedScopes.length` is 0 - so the memoization
+ * contract described above is invisible from the outside, and `cache` does not
+ * memoize at all outside a request scope, so no behavioural test can observe it
+ * either. That left the whole argument guarded by a comment.
+ *
+ * `readGrantedScopesImpl.length` is 2, and a test pins it. Tidying the two
+ * strings into an options object drops it to 1 and turns that test red, which
+ * is the only mechanical warning available before the marketing page quietly
+ * doubles its `debug_token` traffic through a breaker that opens after five
+ * consecutive failures.
+ *
+ * Not part of the module's real interface. Nothing but the test suite imports it.
+ */
+export const READ_GRANTED_SCOPES_IMPL = readGrantedScopesImpl;
 
 /**
  * Whether one connection can be posted to.
@@ -182,18 +209,26 @@ export async function resolveConnections(businessId: string): Promise<{
   if (!isMetaConfigured()) return { state: "not_configured", connections: [] };
   if (!isTokenCipherConfigured()) return { state: "storage_unavailable", connections: [] };
 
-  let connections: readonly MetaConnectionView[];
+  // `readConnections`, NOT `listConnections`. The flattened version cannot tell
+  // "we asked and there are none" from "we could not ask", and collapsing those
+  // two makes this function answer `not_connected` during a database wobble -
+  // which renders "Connect a Facebook Page in Settings" at a merchant whose
+  // Page is connected and working. That is the empty-versus-failed defect one
+  // layer above the tile where this feature already refuses to make it.
+  let result: Awaited<ReturnType<typeof repo.readConnections>>;
   try {
-    connections = await repo.listConnections(businessId);
+    result = await repo.readConnections(businessId);
   } catch {
-    // `listConnections` already swallows a query error and answers []. This
-    // catch is for the layer under it (no session, no client), and it lands on
-    // the same honest answer: we cannot show you a connection.
-    connections = [];
+    // `readConnections` already turns its own failures into `{ ok: false }`.
+    // This is for anything under it that rejects instead, and it lands on the
+    // same answer rather than on `not_connected`.
+    result = { ok: false };
   }
 
-  if (connections.length === 0) return { state: "not_connected", connections: [] };
-  return { state: "pages", connections };
+  if (!result.ok) return { state: "read_failed", connections: [] };
+
+  if (result.connections.length === 0) return { state: "not_connected", connections: [] };
+  return { state: "pages", connections: result.connections };
 }
 
 /**

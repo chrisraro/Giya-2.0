@@ -44,8 +44,20 @@ vi.mock("@/lib/integrations/meta", async () => {
 const tokensMock = vi.hoisted(() => ({ withPageToken: vi.fn() }));
 vi.mock("./tokens", () => tokensMock);
 
-const repoMock = vi.hoisted(() => ({ listConnections: vi.fn() }));
+const repoMock = vi.hoisted(() => ({ readConnections: vi.fn() }));
 vi.mock("./repo", () => repoMock);
+
+/**
+ * A SUCCESSFUL read that returned these rows.
+ *
+ * Wrapped in a helper because the distinction it encodes is the point: every
+ * call site here is asserting something about connections that were READ, and
+ * "the read failed" is a separate fixture with a separate expected state. A
+ * bare array at each call site would let the two blur back together.
+ */
+function connected(connections: readonly MetaConnectionView[]): void {
+  repoMock.readConnections.mockResolvedValue({ ok: true, connections });
+}
 
 import { MetaError } from "@/lib/integrations/meta";
 
@@ -112,7 +124,7 @@ beforeEach(() => {
   serverEnv.META_APP_ID = "1234567890";
   serverEnv.META_APP_SECRET = "test-app-secret-value";
   cipherMock.isTokenCipherConfigured.mockReturnValue(true);
-  repoMock.listConnections.mockResolvedValue([connection()]);
+  connected([connection()]);
   tokenWorks();
   metaMock.debugToken.mockResolvedValue({ isValid: true, scopes: FULL_GRANT, expiresAt: null });
   metaMock.readPageInsights.mockResolvedValue(ALL_FOUR);
@@ -154,7 +166,7 @@ describe("the deployment-wide degraded states (brief states 1, 2, 3)", () => {
   });
 
   it("state 3: no connection at all", async () => {
-    repoMock.listConnections.mockResolvedValue([]);
+    connected([]);
 
     const view = await loadInsightsView({ businessId: BUSINESS });
 
@@ -171,7 +183,7 @@ describe("the deployment-wide degraded states (brief states 1, 2, 3)", () => {
 
 describe("the per-Page degraded states (brief states 4, 5, 6)", () => {
   it("state 4: an expired connection prompts a reconnect and is never read", async () => {
-    repoMock.listConnections.mockResolvedValue([connection({ status: "expired" })]);
+    connected([connection({ status: "expired" })]);
 
     const view = await loadInsightsView({ businessId: BUSINESS });
 
@@ -187,7 +199,7 @@ describe("the per-Page degraded states (brief states 4, 5, 6)", () => {
   });
 
   it("state 4: a revoked connection does the same", async () => {
-    repoMock.listConnections.mockResolvedValue([connection({ status: "revoked" })]);
+    connected([connection({ status: "revoked" })]);
 
     const view = await loadInsightsView({ businessId: BUSINESS });
 
@@ -239,7 +251,7 @@ describe("the per-Page degraded states (brief states 4, 5, 6)", () => {
   });
 
   it("state 6 is decided on the TOKEN, not on the row's recorded scopes", async () => {
-    repoMock.listConnections.mockResolvedValue([connection({ scopes: [...FULL_GRANT] })]);
+    connected([connection({ scopes: [...FULL_GRANT] })]);
     metaMock.debugToken.mockResolvedValue({
       isValid: true,
       scopes: NO_INSIGHTS_GRANT,
@@ -376,11 +388,33 @@ describe("EMPTY IS NOT FAILED", () => {
 });
 
 describe("insights never take down the page they sit on (doc 42)", () => {
-  it("does not throw when the connection read fails", async () => {
-    repoMock.listConnections.mockRejectedValue(new Error("PostgREST is having a day"));
+  it("CRITICAL: a FAILED connection read is read_failed, never not_connected", async () => {
+    // `not_connected` renders "Connect a Facebook Page in Settings to see your
+    // audience and engagement figures". During a database wobble that tells a
+    // merchant whose Page is connected and working to go and connect one.
+    // Empty and failed are different facts here too, one layer above the tile.
+    repoMock.readConnections.mockResolvedValue({ ok: false });
 
     await expect(loadInsightsView({ businessId: BUSINESS })).resolves.toMatchObject({
-      state: "not_connected",
+      state: "read_failed",
+      pages: [],
+    });
+  });
+
+  it("CRITICAL: a SUCCESSFUL read of zero rows is still not_connected", async () => {
+    // The pairing half: a merchant who genuinely has connected nothing must
+    // still be told what to do about it.
+    connected([]);
+
+    const view = await loadInsightsView({ businessId: BUSINESS });
+    expect(view.state).toBe("not_connected");
+  });
+
+  it("does not throw when the connection read rejects outright", async () => {
+    repoMock.readConnections.mockRejectedValue(new Error("PostgREST is having a day"));
+
+    await expect(loadInsightsView({ businessId: BUSINESS })).resolves.toMatchObject({
+      state: "read_failed",
       pages: [],
     });
   });
@@ -393,7 +427,7 @@ describe("insights never take down the page they sit on (doc 42)", () => {
   });
 
   it("reports each connected Page independently", async () => {
-    repoMock.listConnections.mockResolvedValue([
+    connected([
       connection({ id: "aaaaaaaa-1111-4111-8111-111111111111", externalAccountName: "Kape Cebu" }),
       connection({ id: "bbbbbbbb-1111-4111-8111-111111111111", externalAccountName: null }),
     ]);

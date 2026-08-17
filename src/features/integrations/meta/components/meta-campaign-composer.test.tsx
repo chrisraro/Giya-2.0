@@ -76,6 +76,21 @@ describe("no button when the deployment cannot publish at all", () => {
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", PUBLISH_BUTTON)).not.toBeInTheDocument();
   });
+
+  it("CRITICAL: a failed read says the problem is ours, not that nothing is connected", () => {
+    // The seventh state. Telling a merchant to connect a Page they have
+    // already connected, because our own query failed, is a wrong instruction
+    // dressed as a next step.
+    render(<MetaCampaignComposer view={view({ state: "read_failed", pages: [] })} />);
+
+    expect(
+      screen.getByText(
+        "We could not load your connected Pages just now. This one is on our side, and nothing about your connection has changed.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Connect a Facebook Page in Settings/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", PUBLISH_BUTTON)).not.toBeInTheDocument();
+  });
 });
 
 describe("THE SCOPE GATE, on the screen (G2 section 2)", () => {
@@ -152,6 +167,54 @@ describe("THE SCOPE GATE, on the screen (G2 section 2)", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", PUBLISH_BUTTON)).not.toBeInTheDocument();
+  });
+
+  it("CRITICAL: never names a BLOCKED Page as the post target, whatever the order", () => {
+    // The blocked Page is FIRST and the ready one second, which is the case
+    // that separates `publishable[0]` from `view.pages[0]`. With only one
+    // publishable Page no radio group renders, so a default taken from the
+    // unfiltered list is a target the merchant cannot see or change: the card
+    // would say "Posting to Kape Manila" directly under its own explanation
+    // that Kape Manila cannot be posted to.
+    render(
+      <MetaCampaignComposer
+        view={view({
+          pages: [
+            { connectionId: "bbbb", pageName: "Kape Manila", capability: "scope_missing" },
+            { connectionId: "aaaa", pageName: "Kape Cebu", capability: "ready" },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByText("Posting to Kape Cebu")).toBeInTheDocument();
+    expect(screen.queryByText("Posting to Kape Manila")).not.toBeInTheDocument();
+  });
+
+  it("CRITICAL: posts against the READY Page's id when a blocked Page sorts first", async () => {
+    // The assertion above pins what the merchant reads; this one pins what is
+    // actually sent, because the two could diverge.
+    render(
+      <MetaCampaignComposer
+        view={view({
+          pages: [
+            { connectionId: "bbbb", pageName: "Kape Manila", capability: "unavailable" },
+            { connectionId: "aaaa", pageName: "Kape Cebu", capability: "ready" },
+          ],
+        })}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Announcement"), {
+      target: { value: "Double points all weekend." },
+    });
+    fireEvent.click(screen.getByRole("button", PUBLISH_BUTTON));
+
+    await waitFor(() => {
+      expect(actionsMock.publishMetaCampaign).toHaveBeenCalledWith(
+        expect.objectContaining({ connectionId: "aaaa" }),
+      );
+    });
   });
 
   it("offers the composer for the Page that CAN publish and explains the one that cannot", () => {

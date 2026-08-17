@@ -45,13 +45,25 @@ vi.mock("@/lib/integrations/meta", async () => {
 const tokensMock = vi.hoisted(() => ({ withPageToken: vi.fn() }));
 vi.mock("./tokens", () => tokensMock);
 
-const repoMock = vi.hoisted(() => ({ listConnections: vi.fn() }));
+const repoMock = vi.hoisted(() => ({ readConnections: vi.fn() }));
 vi.mock("./repo", () => repoMock);
+
+/**
+ * A SUCCESSFUL read that returned these rows.
+ *
+ * Wrapped in a helper because the distinction it encodes is the point: every
+ * call site here is asserting something about connections that were READ, and
+ * "the read failed" is a separate fixture with a separate expected state. A
+ * bare array at each call site would let the two blur back together.
+ */
+function connected(connections: readonly MetaConnectionView[]): void {
+  repoMock.readConnections.mockResolvedValue({ ok: true, connections });
+}
 
 import { MetaError } from "@/lib/integrations/meta";
 
 import type { MetaConnectionView } from "../types";
-import { loadPublishView, readGrantedScopes } from "./capability";
+import { READ_GRANTED_SCOPES_IMPL, loadPublishView, readGrantedScopes } from "./capability";
 
 const BUSINESS = "11111111-1111-4111-8111-111111111111";
 const CONNECTION = "cccccccc-1111-4111-8111-111111111111";
@@ -109,8 +121,29 @@ beforeEach(() => {
   serverEnv.META_APP_ID = "1234567890";
   serverEnv.META_APP_SECRET = "test-app-secret-value";
   cipherMock.isTokenCipherConfigured.mockReturnValue(true);
-  repoMock.listConnections.mockResolvedValue([connection()]);
+  connected([connection()]);
   grants(TESTER_GRANT);
+});
+
+describe("the memoization contract, pinned structurally", () => {
+  it("CRITICAL: readGrantedScopes takes two POSITIONAL arguments, not an options object", () => {
+    // React's `cache` keys its memo on argument identity: primitives by value,
+    // objects by reference. An `{ businessId, connectionId }` parameter would
+    // be a fresh object on every call and miss the cache every single time,
+    // leaving a memoization comment above a function that memoizes nothing.
+    //
+    // The consequence is not cosmetic. The marketing screen builds both its
+    // panels from this answer, so a missed memo doubles the debug_token calls
+    // per connection through a circuit breaker that opens after five
+    // consecutive failures.
+    //
+    // NEITHER HALF IS OBSERVABLE BEHAVIOURALLY: `cache()` erases arity, so
+    // `readGrantedScopes.length` is 0, and `cache` does not memoize outside a
+    // request scope, so under vitest two identical calls genuinely make two
+    // calls. The unwrapped implementation is exported for exactly this
+    // assertion, which is the only mechanical warning available.
+    expect(READ_GRANTED_SCOPES_IMPL.length).toBe(2);
+  });
 });
 
 describe("readGrantedScopes reports what the TOKEN carries", () => {
@@ -222,7 +255,7 @@ describe("loadPublishView degrades honestly before it looks at any Page", () => 
   });
 
   it("reports not_connected when the tenant has connected no Page", async () => {
-    repoMock.listConnections.mockResolvedValue([]);
+    connected([]);
 
     const view = await loadPublishView({ businessId: BUSINESS, canManage: true });
     expect(view.state).toBe("not_connected");
@@ -263,7 +296,7 @@ describe("loadPublishView gates on the GRANT, never on the request", () => {
     // merchant who removed the permission in Facebook's own settings still has
     // the old list on their row, and trusting it would show a working button
     // over a dead permission.
-    repoMock.listConnections.mockResolvedValue([connection({ scopes: [...TESTER_GRANT] })]);
+    connected([connection({ scopes: [...TESTER_GRANT] })]);
     grants(READ_ONLY_GRANT);
 
     const view = await loadPublishView({ businessId: BUSINESS, canManage: true });
@@ -271,7 +304,7 @@ describe("loadPublishView gates on the GRANT, never on the request", () => {
   });
 
   it("reports each Page separately when they disagree", async () => {
-    repoMock.listConnections.mockResolvedValue([
+    connected([
       connection({ id: "aaaaaaaa-1111-4111-8111-111111111111", externalAccountName: "Kape Cebu" }),
       connection({ id: "bbbbbbbb-1111-4111-8111-111111111111", externalAccountName: "Kape Manila" }),
     ]);
@@ -300,7 +333,7 @@ describe("loadPublishView gates on the GRANT, never on the request", () => {
     // The row already says the grant is dead. Spending a Graph call and a
     // circuit-breaker failure to be told so again would be the read that takes
     // the integration down for everyone else.
-    repoMock.listConnections.mockResolvedValue([connection({ status: "expired" })]);
+    connected([connection({ status: "expired" })]);
 
     const view = await loadPublishView({ businessId: BUSINESS, canManage: true });
 
@@ -309,7 +342,7 @@ describe("loadPublishView gates on the GRANT, never on the request", () => {
   });
 
   it("does not ask Meta about a revoked connection either", async () => {
-    repoMock.listConnections.mockResolvedValue([connection({ status: "revoked" })]);
+    connected([connection({ status: "revoked" })]);
 
     const view = await loadPublishView({ businessId: BUSINESS, canManage: true });
 
@@ -330,7 +363,7 @@ describe("loadPublishView gates on the GRANT, never on the request", () => {
   });
 
   it("falls back to the Page id when Meta never gave us a name", async () => {
-    repoMock.listConnections.mockResolvedValue([connection({ externalAccountName: null })]);
+    connected([connection({ externalAccountName: null })]);
 
     const view = await loadPublishView({ businessId: BUSINESS, canManage: true });
     expect(view.pages[0]?.pageName).toBe("1001");
@@ -341,14 +374,43 @@ describe("loadPublishView gates on the GRANT, never on the request", () => {
     expect(view.canManage).toBe(false);
   });
 
-  it("never throws when the connection read itself fails", async () => {
-    repoMock.listConnections.mockRejectedValue(new Error("PostgREST is having a day"));
+  it("CRITICAL: a FAILED connection read is read_failed, never not_connected", async () => {
+    // This assertion used to pin the opposite, and the opposite was a defect:
+    // a failed read came out as `not_connected`, whose copy tells the merchant
+    // to go and connect a Page. During a PostgREST wobble that is a wrong
+    // instruction, about a connection that is fine, offering a remedy that
+    // does nothing.
+    //
+    // Empty and failed are different facts. This feature already refuses to
+    // conflate them on an insights tile; the same rule applies to the tenant's
+    // connection list.
+    repoMock.readConnections.mockResolvedValue({ ok: false });
 
-    // doc 42: "never blocks core loops". This runs inside a page render.
     await expect(loadPublishView({ businessId: BUSINESS, canManage: true })).resolves.toEqual({
-      state: "not_connected",
+      state: "read_failed",
       pages: [],
       canManage: true,
     });
+  });
+
+  it("CRITICAL: a SUCCESSFUL read of zero rows is still not_connected", async () => {
+    // The pairing half. A rule of "any empty list is a failure" would satisfy
+    // the assertion above while telling a merchant who genuinely has not
+    // connected anything that the problem is on our side, which strands them
+    // with no next step at all.
+    connected([]);
+
+    const view = await loadPublishView({ businessId: BUSINESS, canManage: true });
+    expect(view.state).toBe("not_connected");
+  });
+
+  it("never throws when the connection read rejects outright", async () => {
+    // doc 42: "never blocks core loops". This runs inside a page render, so a
+    // rejection from the layer under the query must still become a value.
+    repoMock.readConnections.mockRejectedValue(new Error("PostgREST is having a day"));
+
+    await expect(
+      loadPublishView({ businessId: BUSINESS, canManage: true }),
+    ).resolves.toMatchObject({ state: "read_failed", pages: [] });
   });
 });

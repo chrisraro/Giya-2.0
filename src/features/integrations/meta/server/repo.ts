@@ -121,36 +121,74 @@ function toView(row: ConnectionRow): MetaConnectionView {
 }
 
 /**
- * The tenant's live Meta connections, read under the caller's own session.
+ * The tenant's live Meta connections, read under the caller's own session,
+ * WITH THE READ'S SUCCESS DISTINGUISHABLE FROM AN EMPTY RESULT.
  *
  * Soft-deleted rows are filtered HERE rather than by the RLS policy, for the
  * reason 0032's policy comment gives: a policy predicate on `deleted_at` would
  * hide a disconnected row from the tenant that disconnected it, and the
  * reconnect upsert would then be writing over a row its own owner cannot see.
  *
- * Returns an empty list on a read error rather than throwing. The settings
- * page renders many cards and one integration's read failing must not blank
- * the screen; the card's own copy covers the empty case honestly.
+ * Never throws - it runs inside a page render - but it does not launder the
+ * failure into `[]` either. "We asked and there are none" and "we could not
+ * ask" are different facts about a merchant's account, and the surfaces above
+ * this one give them different sentences: one offers Connect, the other says
+ * the problem is ours. See MetaSurfaceState's `read_failed`.
  */
-export async function listConnections(businessId: string): Promise<readonly MetaConnectionView[]> {
+export async function readConnections(
+  businessId: string,
+): Promise<
+  | { readonly ok: true; readonly connections: readonly MetaConnectionView[] }
+  | { readonly ok: false }
+> {
   assertClientColumns([...CLIENT_COLUMNS]);
 
-  const supabase = await createClient();
-  const { data, error } = await supabase
-    .from("integration_connections")
-    .select(CLIENT_SELECT)
-    .eq("business_id", businessId)
-    .eq("provider", META_PROVIDER)
-    .is("deleted_at", null)
-    .order("created_at", { ascending: true })
-    .overrideTypes<ConnectionRow[]>();
+  let data: ConnectionRow[] | null;
+  let error: { message: string } | null;
+  try {
+    const supabase = await createClient();
+    ({ data, error } = await supabase
+      .from("integration_connections")
+      .select(CLIENT_SELECT)
+      .eq("business_id", businessId)
+      .eq("provider", META_PROVIDER)
+      .is("deleted_at", null)
+      .order("created_at", { ascending: true })
+      .overrideTypes<ConnectionRow[]>());
+  } catch (thrown) {
+    // The layer UNDER the query: no cookie store, no client, a transport that
+    // rejected. `createClient` can throw where the query itself only returns
+    // an error, and both mean the same thing to a caller.
+    console.error(
+      "[integrations/meta] could not open a session to read connections",
+      thrown instanceof Error ? thrown.message : "unknown",
+    );
+    return { ok: false };
+  }
 
   if (error !== null) {
     console.error("[integrations/meta] could not read connections", error.message);
-    return [];
+    return { ok: false };
   }
 
-  return (data ?? []).map(toView);
+  return { ok: true, connections: (data ?? []).map(toView) };
+}
+
+/**
+ * The same read, flattened to a list.
+ *
+ * KEPT FOR `loadIntegrationView`, which feeds the settings card and whose
+ * contract is a plain array. That card still cannot tell a failed read from an
+ * empty one and will say "nothing connected" during a database wobble. That is
+ * a real remaining gap, it predates this function, and it is recorded rather
+ * than quietly widened: fixing it means changing `MetaIntegrationView` and the
+ * card's own copy, which is a different slice from the marketing surfaces.
+ *
+ * New callers should use `readConnections` and handle the failure.
+ */
+export async function listConnections(businessId: string): Promise<readonly MetaConnectionView[]> {
+  const result = await readConnections(businessId);
+  return result.ok ? result.connections : [];
 }
 
 export interface UpsertConnectionInput {

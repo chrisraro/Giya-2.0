@@ -88,10 +88,41 @@ export type ActionResult<T> =
  * - `storage_unavailable` INTEGRATION_TOKEN_AES_KEY unset. A DIFFERENT missing
  *                        variable with a different fix, which is why it is not
  *                        folded into the one above.
- * - `not_connected`      Configured and ready, but no Page has been connected.
+ * - `not_connected`      Configured and ready, and we READ the tenant's rows
+ *                        and there were none. An empty answer, not a missing
+ *                        one.
+ * - `read_failed`        OUR read of `integration_connections` failed. See
+ *                        below; this is the seventh state and it is not
+ *                        cosmetic.
  * - `pages`              There is at least one connection; see each one.
+ *
+ * -----------------------------------------------------------------------------
+ * WHY `read_failed` IS NOT `not_connected`
+ * -----------------------------------------------------------------------------
+ *
+ * It used to be. A failed `listConnections` was caught into an empty array and
+ * came out the far end as `not_connected`, whose copy is "Connect a Facebook
+ * Page in Settings...". So during a PostgREST wobble a merchant with a working,
+ * connected Page was told to go and connect one: a remedy that does nothing,
+ * for a problem they do not have, about a connection that is fine.
+ *
+ * That is the empty-versus-failed defect, one layer up from the tile where this
+ * feature already refuses to make it. The same distinction is drawn elsewhere
+ * in this codebase and is worth naming so the pattern is findable: the receipts
+ * routing panel answers null rather than a reassuring 0%, and the review queue
+ * count answers null rather than "nothing waiting on you". A read that did not
+ * happen is not a fact about the merchant.
+ *
+ * Doc 42 enumerates six degraded states for this integration. This is the
+ * seventh, and it is the one doc 42 could not have listed, because it is not a
+ * fact about Meta at all. It is a fact about us.
  */
-export type MetaSurfaceState = "not_configured" | "storage_unavailable" | "not_connected" | "pages";
+export type MetaSurfaceState =
+  | "not_configured"
+  | "storage_unavailable"
+  | "not_connected"
+  | "read_failed"
+  | "pages";
 
 /**
  * A fact about ONE connected Page's token.

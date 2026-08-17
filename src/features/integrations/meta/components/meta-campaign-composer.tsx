@@ -73,8 +73,17 @@ export function MetaCampaignComposer({ view }: MetaCampaignComposerProps) {
   const blocked = view.pages.filter((page) => page.capability !== "ready");
 
   const [connectionId, setConnectionId] = React.useState<string>(
-    // One Page is the overwhelmingly common case; preselect it rather than
-    // making the merchant choose from a list of one.
+    // FROM `publishable`, NOT from `view.pages`. One Page is the overwhelmingly
+    // common case so it is preselected rather than making the merchant tick a
+    // list of one, but the default must come from the filtered list.
+    //
+    // `view.pages[0]` looks equivalent and is not. With a blocked Page first
+    // and a ready Page second, `publishable.length > 1` is false, so no radio
+    // group renders and there is nothing for the merchant to correct: the
+    // screen would read "Posting to Kape Manila", naming a Page it has just
+    // finished explaining cannot be posted to, and the press would be refused
+    // by the server. No wrong write, but the composer would have contradicted
+    // itself in the same card.
     publishable[0]?.connectionId ?? "",
   );
   const [message, setMessage] = React.useState("");

@@ -103,23 +103,33 @@ export interface MetaInsightsPanelProps {
 export function MetaInsightsPanel({ view }: MetaInsightsPanelProps) {
   return (
     <Card variant="outlined" className="flex flex-col gap-4 p-4 sm:p-6">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-title-m text-on-surface">Facebook audience and engagement</h2>
-        {view.state === "pages" ? (
-          <p className="text-body-s text-on-surface-variant">{view.periodLabel}</p>
-        ) : null}
-      </div>
-
+      {/*
+        ONE branch on `view.state`, deciding the period label AND the body
+        together. They were two independent branches off the same discriminant
+        and only the body was pinned, which is the same shape as the tile defect
+        a mutation run found earlier in this file: the label could be made
+        unconditional and "Last 28 days" would sit beside "not available on this
+        deployment yet", describing a window of figures that are not there.
+      */}
       {view.state === "pages" ? (
-        <div className="flex flex-col gap-5">
-          {view.pages.map((page) => (
-            <PageInsights key={page.connectionId} page={page} />
-          ))}
-        </div>
+        <>
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-title-m text-on-surface">Facebook audience and engagement</h2>
+            <p className="text-body-s text-on-surface-variant">{view.periodLabel}</p>
+          </div>
+          <div className="flex flex-col gap-5">
+            {view.pages.map((page) => (
+              <PageInsights key={page.connectionId} page={page} />
+            ))}
+          </div>
+        </>
       ) : (
-        <p className="rounded-md3-sm bg-surface-container-highest p-4 text-body-m text-on-surface-variant">
-          {INSIGHTS_SURFACE_COPY[view.state]}
-        </p>
+        <>
+          <h2 className="text-title-m text-on-surface">Facebook audience and engagement</h2>
+          <p className="rounded-md3-sm bg-surface-container-highest p-4 text-body-m text-on-surface-variant">
+            {INSIGHTS_SURFACE_COPY[view.state]}
+          </p>
+        </>
       )}
 
       <p className="text-body-s text-on-surface-variant">
