@@ -23,6 +23,7 @@ function business(id: string, name: string, overrides: Partial<BusinessSummary> 
     name,
     logoUrl: null,
     cityName: "Cebu City",
+    coordinates: null,
     businessTypeName: "Cafe",
     ...overrides,
   };

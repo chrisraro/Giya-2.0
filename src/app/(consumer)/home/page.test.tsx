@@ -89,6 +89,7 @@ function summary(overrides: Partial<BusinessSummary> = {}): BusinessSummary {
     logoUrl: null,
     cityName: "Davao City",
     businessTypeName: "Carinderia",
+    coordinates: null,
     ...overrides,
   };
 }

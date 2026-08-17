@@ -36,6 +36,9 @@ export default async function FavoritesPage() {
                 logoUrl: fav.logoUrl,
                 cityName: fav.cityName,
                 businessTypeName: fav.businessTypeName,
+                // A saved favourite carries no pin, and this page draws no
+                // map. BusinessCard renders the name, logo and labels only.
+                coordinates: null,
               }}
             />
           ))}
