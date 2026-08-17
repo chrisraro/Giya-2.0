@@ -40,14 +40,42 @@ import { cn } from "@/lib/utils";
 // ===========================================================================
 
 /**
- * The same 512x224 logical box the single-pin map uses, for the same reason:
- * it is wider than the max-w-md column on every phone, so the responsive frame
- * crops it symmetrically rather than leaving a bald strip. Sharing the number
- * also means the tile-budget arithmetic in tile-source.ts covers both surfaces
- * without a second calculation.
+ * How wide a picture is PAINTED. The same 512x224 box the single-pin map uses,
+ * for the same reason: it is wider than the max-w-md column on every phone, so
+ * the responsive frame crops it symmetrically rather than leaving a bald strip
+ * at the edge. Sharing the number also means the tile-budget arithmetic in
+ * tile-source.ts covers both surfaces without a second calculation.
+ *
+ * This is NOT the width the shops are fitted into. See DISCOVER_MAP_FIT_WIDTH.
  */
 export const DISCOVER_MAP_WIDTH = 512;
 export const DISCOVER_MAP_HEIGHT = 224;
+
+/**
+ * How wide a picture is SEEN, and therefore the box every pin has to land in.
+ *
+ * These are two different numbers and conflating them was a real bug. The
+ * mosaic is centred with `absolute left-1/2 -translate-x-1/2` inside an
+ * `overflow-hidden` section, so the column crops it symmetrically and only the
+ * middle slice is ever painted. /discover is `max-w-md px-4`, and max-w-md is
+ * 448px with no --container-md override in globals.css, so the column is
+ * min(viewport, 448) - 32:
+ *
+ *   448px viewport and up -> 416px column, visible slice x in [48, 464]
+ *   320px viewport        -> 288px column, visible slice x in [112, 400]
+ *
+ * Fitting to 512 put pins as far out as x = 24, which is 88px outside the left
+ * edge of even the WIDEST column: a result set spread more than about 2.4x
+ * wider than tall lost its outermost shops off both sides. That is a direct
+ * contradiction of the only promise this map makes.
+ *
+ * 288 is the narrowest column a supported phone can produce, so fitting to it
+ * means every pin is visible on every device rather than on a good one. The
+ * cost is at most one zoom level on a large screen (log2(416/288) = 0.53, and
+ * the fit floors to an integer), which is a cheap price for the promise being
+ * true. The bleed either side is still painted, so nothing looks cropped.
+ */
+export const DISCOVER_MAP_FIT_WIDTH = 288;
 
 /**
  * The closest this map ever gets, which is also what a single result gets.
@@ -97,8 +125,10 @@ export function DiscoverMap({ businesses, className }: DiscoverMapProps) {
   const pinned = businesses.filter(hasPin);
 
   const frame = fitBounds({
+    // The width SEEN, not the width painted: a pin fitted into the part of the
+    // mosaic the column crops away is a pin nobody can see or tap.
     points: pinned.map((business) => business.coordinates),
-    width: DISCOVER_MAP_WIDTH,
+    width: DISCOVER_MAP_FIT_WIDTH,
     height: DISCOVER_MAP_HEIGHT,
     minZoom: DISCOVER_MAP_MIN_ZOOM,
     maxZoom: DISCOVER_MAP_MAX_ZOOM,

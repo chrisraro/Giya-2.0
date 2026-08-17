@@ -35,6 +35,34 @@ function pinItems(): HTMLElement[] {
   return [...map.querySelectorAll("li")];
 }
 
+// ---------------------------------------------------------------------------
+// LOGICAL PIXELS ARE NOT VISIBLE PIXELS.
+//
+// The mosaic is 512px wide and is centred inside the section with
+// `absolute left-1/2 -translate-x-1/2`, which sits inside `overflow-hidden`.
+// The section is as wide as its column and no wider, so the mosaic is cropped
+// symmetrically and only the middle slice is ever painted.
+//
+//   /discover is `max-w-md px-4`. max-w-md is 448px and globals.css does not
+//   override --container-md, so the column is min(viewport, 448) - 32:
+//     448px viewport and up -> 416px column, visible slice x in [48, 464]
+//     320px viewport        -> 288px column, visible slice x in [112, 400]
+//
+// A pin at logical x = 24 is 88px outside the left edge of even the widest
+// column. Asserting "inside 512" therefore proves nothing about whether a
+// consumer can see the pin, which is the only thing the fit is for.
+// ---------------------------------------------------------------------------
+const MOSAIC_WIDTH = 512;
+/** max-w-md (448) minus px-4 on both sides. */
+const WIDEST_COLUMN = 416;
+/** A 320px viewport minus px-4 on both sides: the narrowest phone we support. */
+const NARROWEST_COLUMN = 288;
+
+/** A pin's position in the coordinates of the column actually painted. */
+function visibleLeft(item: HTMLElement, columnWidth: number): number {
+  return Number.parseFloat(item.style.left) - (MOSAIC_WIDTH - columnWidth) / 2;
+}
+
 function withKey() {
   vi.stubEnv("NEXT_PUBLIC_MAPTILER_KEY", "test-key");
 }
@@ -184,7 +212,7 @@ describe("with a tile key and pinned results", () => {
     expect(Number([...zooms][0])).toBeGreaterThanOrEqual(3);
   });
 
-  it("keeps every pin inside the frame, with room for the pin's own body", () => {
+  it("keeps every pin inside the column that is actually painted", () => {
     withKey();
 
     render(
@@ -197,40 +225,90 @@ describe("with a tile key and pinned results", () => {
       />,
     );
 
-    // The mosaic's logical box is 512x224 and the fit reserves the pin's own
-    // 24px at every edge, so no pin may fall outside [24, 488] x [24, 200].
-    // Without that reservation the outermost pins sit exactly on the boundary
-    // and are drawn half outside the frame.
     for (const item of pinItems()) {
-      expect(Number.parseFloat(item.style.left)).toBeGreaterThanOrEqual(24);
-      expect(Number.parseFloat(item.style.left)).toBeLessThanOrEqual(488);
+      // Room for the pin's own body at every edge, on the narrowest phone.
+      // Vertically the mosaic is not cropped at all: h-56 is 224px and so is
+      // the mosaic, so logical top and visible top are the same number.
+      expect(visibleLeft(item, NARROWEST_COLUMN)).toBeGreaterThanOrEqual(24);
+      expect(visibleLeft(item, NARROWEST_COLUMN)).toBeLessThanOrEqual(NARROWEST_COLUMN - 24);
       expect(Number.parseFloat(item.style.top)).toBeGreaterThanOrEqual(24);
       expect(Number.parseFloat(item.style.top)).toBeLessThanOrEqual(200);
     }
+  });
+
+  it("holds a result set that is far wider than it is tall, on the narrowest phone", () => {
+    withKey();
+
+    // The shape that breaks a fit measured against the mosaic instead of the
+    // column: five cafes along one east-west street, or a city+type filter
+    // down a single commercial strip. Measured against the 512px mosaic these
+    // two land at logical x 24.3 and 487.7, which is 23.7px off the left edge
+    // and 23.7px off the right edge of even the widest column.
+    render(
+      <DiscoverMap
+        businesses={[
+          business({ id: "w", slug: "w", coordinates: { lat: 10.3, lng: 118.0 } }),
+          business({ id: "e", slug: "e", coordinates: { lat: 10.3, lng: 123.09 } }),
+        ]}
+      />,
+    );
+
+    for (const item of pinItems()) {
+      for (const column of [NARROWEST_COLUMN, WIDEST_COLUMN]) {
+        expect(visibleLeft(item, column)).toBeGreaterThanOrEqual(0);
+        expect(visibleLeft(item, column)).toBeLessThanOrEqual(column);
+      }
+    }
+  });
+
+  it("still paints tiles right across the widest column, with no bald strip", () => {
+    withKey();
+
+    // The reason the mosaic stays 512 wide while the FIT narrows: the picture
+    // has to cover the whole column on a large screen. Tiles span the mosaic,
+    // so the painted run must reach past both edges of the widest column.
+    const { container } = render(<DiscoverMap businesses={[business()]} />);
+
+    const lefts = [...container.querySelectorAll("img")].map((image) =>
+      Number.parseFloat((image as HTMLElement).style.left),
+    );
+
+    expect(Math.min(...lefts)).toBeLessThanOrEqual((MOSAIC_WIDTH - WIDEST_COLUMN) / 2);
+    expect(Math.max(...lefts) + 256).toBeGreaterThanOrEqual((MOSAIC_WIDTH + WIDEST_COLUMN) / 2);
   });
 
   it("reserves the pin's own width in the fit, even when that costs a zoom level", () => {
     withKey();
 
     // Chosen so the reservation is VISIBLE rather than merely plausible. The
-    // two shops are 2.6719 degrees apart, which is 1.90002px at zoom 0:
-    //   using the whole 512px frame:  512 / 1.90002 = 269.47, log2 = 8.074 -> 8
-    //   reserving 24px at each edge:  464 / 1.90002 = 244.21, log2 = 7.932 -> 7
-    // A fit that ignores the pin's body draws zoom 8 and slices both outermost
-    // pins down the middle at the frame edge.
+    // two shops are 2.8125 degrees apart, which is exactly 2px at zoom 0:
+    //   using the whole 288px fit box:  288 / 2 = 144, log2 = 7.170 -> 7
+    //   reserving 24px at each edge:    240 / 2 = 120, log2 = 6.907 -> 6
+    // A fit that ignores the pin's body draws zoom 7 and slices both outermost
+    // pins down the middle at the edge of the visible column.
     const { container } = render(
       <DiscoverMap
         businesses={[
           business({ id: "w", slug: "w", coordinates: { lat: 10.3, lng: 120.0 } }),
-          business({ id: "e", slug: "e", coordinates: { lat: 10.3, lng: 122.6719 } }),
+          business({ id: "e", slug: "e", coordinates: { lat: 10.3, lng: 122.8125 } }),
         ]}
       />,
     );
 
     for (const image of container.querySelectorAll("img")) {
-      expect(image.getAttribute("src")).toMatch(/\/7\/\d+\/\d+\.png/);
+      expect(image.getAttribute("src")).toMatch(/\/6\/\d+\/\d+\.png/);
     }
     expect(container.querySelectorAll("img").length).toBeGreaterThan(0);
+
+    // And the pins this fixture celebrates are ones a consumer can actually
+    // see: the previous version of this test landed them at logical 24 and
+    // 488, both of which are outside every column the section is ever painted
+    // into. Zoom 6 puts them at 192 and 320, which is 80 and 208 on a 320px
+    // phone.
+    for (const item of pinItems()) {
+      expect(visibleLeft(item, NARROWEST_COLUMN)).toBeGreaterThanOrEqual(24);
+      expect(visibleLeft(item, NARROWEST_COLUMN)).toBeLessThanOrEqual(NARROWEST_COLUMN - 24);
+    }
   });
 
   it("puts each shop at its own place, with the eastern one further right", () => {
