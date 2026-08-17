@@ -176,6 +176,78 @@ describe("getBusinessBySlug", () => {
   });
 });
 
+describe("listActiveBusinesses", () => {
+  const SUMMARY_ROW = {
+    id: "biz-1",
+    slug: "kape-diaria",
+    name: "Kape Diaria",
+    logo_url: "https://cdn.giya.ph/logo.png",
+    city_id: "city-1",
+    business_type_id: "type-1",
+    lat: 10.3156,
+    lng: 123.8854,
+  };
+
+  function withRefNames() {
+    table("ref_cities").__result = { data: [{ id: "city-1", name: "Cebu City" }], error: null };
+    table("ref_business_types").__result = { data: [{ id: "type-1", name: "Cafe" }], error: null };
+  }
+
+  it("carries each shop's pin, so a list read can also be a map", async () => {
+    table("businesses").__result = { data: [SUMMARY_ROW], error: null };
+    withRefNames();
+
+    const result = await repo.listActiveBusinesses({ limit: 50 });
+
+    expect(result[0]?.coordinates).toEqual({ lat: 10.3156, lng: 123.8854 });
+    expect(table("businesses").select).toHaveBeenCalledWith(
+      "id, slug, name, logo_url, city_id, business_type_id, lat, lng",
+    );
+  });
+
+  it("keeps a shop with no pin in the results, and reports it as unpinned", async () => {
+    // THE RULE THIS PROTECTS. A shop nobody has geocoded is absent from the
+    // map and present in the list. Dropping it would mean a consumer's search
+    // silently loses a real shop over a missing column.
+    table("businesses").__result = {
+      data: [{ ...SUMMARY_ROW, lat: null, lng: null }],
+      error: null,
+    };
+    withRefNames();
+
+    const result = await repo.listActiveBusinesses({ limit: 50 });
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.name).toBe("Kape Diaria");
+    expect(result[0]?.coordinates).toBeNull();
+  });
+
+  it("reads no pin at all when only one of lat/lng is stored", async () => {
+    table("businesses").__result = { data: [{ ...SUMMARY_ROW, lng: null }], error: null };
+    withRefNames();
+
+    const result = await repo.listActiveBusinesses({ limit: 50 });
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.coordinates).toBeNull();
+  });
+
+  it("throws when the catalog read fails, rather than reporting an empty catalog", async () => {
+    // Empty is not the same as failed. Swallowing this renders "No matching
+    // shops found" over a database outage, which tells the consumer their
+    // search was wrong and tells us nothing at all.
+    table("businesses").__result = { data: null, error: { message: "connection reset" } };
+
+    await expect(repo.listActiveBusinesses({ limit: 50 })).rejects.toThrow(/connection reset/);
+  });
+
+  it("returns an empty list, without throwing, when the catalog is genuinely empty", async () => {
+    table("businesses").__result = { data: [], error: null };
+
+    await expect(repo.listActiveBusinesses({ limit: 50 })).resolves.toEqual([]);
+  });
+});
+
 describe("getPublicMenu", () => {
   it("returns an empty array when there are no active categories", async () => {
     table("menu_categories").__result = { data: [], error: null };

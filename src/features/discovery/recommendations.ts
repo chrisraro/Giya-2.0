@@ -29,5 +29,9 @@ export async function getVectorRecommendations(
     logoUrl: b.logo_url,
     cityName: null,
     businessTypeName: null,
+    // This read does not select lat/lng, so "no pin" here means "not read"
+    // rather than "not geocoded". Safe only because nothing draws a map from
+    // recommendations; select the two columns before that changes.
+    coordinates: null,
   }));
 }

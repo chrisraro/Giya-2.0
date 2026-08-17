@@ -89,6 +89,7 @@ function summary(overrides: Partial<BusinessSummary> = {}): BusinessSummary {
     logoUrl: null,
     cityName: "Davao City",
     businessTypeName: "Carinderia",
+    coordinates: null,
     ...overrides,
   };
 }
@@ -386,6 +387,39 @@ describe("/home on an empty database", () => {
 
     expect(screen.getByText("No shops yet")).toBeInTheDocument();
     expect(screen.getByText(/No shops are live on Giya right now/)).toBeInTheDocument();
+  });
+
+  it("CRITICAL: a failed catalog read hides the section rather than claiming no shops exist", async () => {
+    // listActiveBusinesses throws on a query error now. Catching it into []
+    // would be worse than letting the page fail: `noShopsOnGiya` is
+    // `length === 0`, so an outage would render "No shops are live on Giya
+    // right now" to every consumer, which is a confident statement about the
+    // whole platform derived from a dropped connection. The sentinel is null
+    // and it suppresses the section entirely.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.listActiveBusinesses.mockRejectedValue(new Error("connection reset"));
+
+    await renderHome();
+
+    expect(screen.queryByText("No shops yet")).not.toBeInTheDocument();
+    expect(screen.queryByText(/No shops are live on Giya right now/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Shops on Giya")).not.toBeInTheDocument();
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it("CRITICAL: the rest of /home survives a failed catalog read", async () => {
+    // The reason to catch at all. The greeting and the points total have
+    // nothing to do with the discover grid, and losing the whole first screen
+    // after sign-in over it is the worse outcome.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.listActiveBusinesses.mockRejectedValue(new Error("connection reset"));
+    signedInAs("Ana Cruz");
+
+    await renderHome();
+
+    expect(screen.getByText(/Magandang \w+, Ana$/)).toBeInTheDocument();
+    logged.mockRestore();
   });
 
   it("CRITICAL: no fixture name reaches the DOM", async () => {

@@ -32,7 +32,20 @@ export default async function HomePage() {
   const [balances, activeBusinesses, unreadNotifications, promotions, favorites] =
     await Promise.all([
       getMyBalances(),
-      listActiveBusinesses({ limit: HOME_DISCOVER_FETCH }),
+      // THE GRID DEGRADES; THE PAGE DOES NOT FAIL; AND THE SENTINEL IS NOT [].
+      //
+      // Same reasoning as the favourites rail below, with one extra trap that
+      // makes the shape of the sentinel matter. `noShopsOnGiya` is derived
+      // from `length === 0`, and an empty array renders "No shops are live on
+      // Giya right now" - a confident claim about the entire platform,
+      // assembled from a dropped connection, and a stronger lie than the grid
+      // simply not being there. So a failed read becomes `null`, which is a
+      // third state neither "some shops" nor "no shops", and the section is
+      // omitted rather than filled with a sentence nobody can act on.
+      listActiveBusinesses({ limit: HOME_DISCOVER_FETCH }).catch((error: unknown) => {
+        console.error("[home] catalog read failed; rendering /home without the shop grid", error);
+        return null;
+      }),
       getMyUnreadNotificationCount(),
       listPublicPromotions(5).catch(() => []),
       // THE RAIL DEGRADES; THE PAGE DOES NOT FAIL.
@@ -64,12 +77,14 @@ export default async function HomePage() {
   const railFavorites = favorites.slice(0, HOME_FAVORITES_LIMIT);
 
   const collectedIds = new Set(balances.map((balance) => balance.businessId));
-  const discover = activeBusinesses
+  const discover = (activeBusinesses ?? [])
     .filter((business) => !collectedIds.has(business.id))
     .slice(0, HOME_DISCOVER_LIMIT);
   // No shops at all on the platform is a different thing to say than "you are
   // already on every shop we have", and only the first one gets an empty state.
-  const noShopsOnGiya = activeBusinesses.length === 0;
+  // A failed read is a third thing again and says nothing: `null` is not zero
+  // shops, so it must not reach the sentence that announces zero shops.
+  const noShopsOnGiya = activeBusinesses !== null && activeBusinesses.length === 0;
 
   return (
     <main className="mx-auto max-w-md px-4 pt-6">

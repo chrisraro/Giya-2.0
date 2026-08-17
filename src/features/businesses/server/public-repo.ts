@@ -57,6 +57,16 @@ export type BusinessSummary = {
   logoUrl: string | null;
   cityName: string | null;
   businessTypeName: string | null;
+  /**
+   * The map pin, or null when the shop has never been geocoded, which is the
+   * common case. Carried on the SUMMARY and not only on `PublicBusiness`
+   * because /discover draws a map of its whole filtered result set, and the
+   * alternative is a second read of the same rows for two more columns.
+   *
+   * A null here means absent from the map. It never means absent from the
+   * list: see `listActiveBusinesses`.
+   */
+  coordinates: Coordinates | null;
 };
 
 export type PublicVariant = {
@@ -215,7 +225,7 @@ export async function listActiveBusinesses(
 
   let select = supabase
     .from("businesses")
-    .select("id, slug, name, logo_url, city_id, business_type_id")
+    .select("id, slug, name, logo_url, city_id, business_type_id, lat, lng")
     .eq("status", "active")
     .is("deleted_at", null)
     .order("name", { ascending: true })
@@ -227,7 +237,18 @@ export async function listActiveBusinesses(
   if (args.businessTypeId) select = select.eq("business_type_id", args.businessTypeId);
 
   const { data, error } = await select;
-  if (error || !data || data.length === 0) return [];
+
+  // EMPTY IS NOT THE SAME AS FAILED, and this read is the one place that
+  // distinction is most expensive to get wrong: /discover renders "No matching
+  // shops found" for an empty list, so swallowing an error here tells a
+  // consumer their search was too narrow while the database is down. Same rule
+  // as src/features/rewards/server/repo.ts and the loyalty repo - throw on the
+  // error, return empty only for genuinely empty. /home already catches around
+  // its own optional reads and can do the same here if it wants to degrade.
+  if (error) {
+    throw new Error(`Failed to list active businesses: ${error.message}`);
+  }
+  if (!data || data.length === 0) return [];
 
   // Two `.in()` lookups rather than one per row, mirroring the id -> name
   // resolution in getBusinessBySlug (the generated Database types do not model
@@ -249,6 +270,11 @@ export async function listActiveBusinesses(
     logoUrl: business.logo_url,
     cityName: business.city_id ? (cityNames.get(business.city_id) ?? null) : null,
     businessTypeName: typeNames.get(business.business_type_id) ?? null,
+    // Note what does NOT happen here: an unpinned shop is not filtered out.
+    // The map is built from the subset of this list that has coordinates, and
+    // losing a shop from a consumer's search because nobody geocoded it would
+    // be a far worse bug than a sparse map.
+    coordinates: toPublicCoordinates(business.lat, business.lng),
   }));
 }
 
