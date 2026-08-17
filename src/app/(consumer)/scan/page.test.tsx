@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // /scan has exactly one job before it renders anything: decide whether this
@@ -16,9 +16,19 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: nav.push }),
 }));
 
-const mocks = vi.hoisted(() => ({ loadScanTargets: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  loadScanTargets: vi.fn(),
+  loadScanPreviewRule: vi.fn(),
+  listActiveBusinesses: vi.fn(),
+}));
 vi.mock("@/features/receipts/server/scan-targets", () => ({
   loadScanTargets: mocks.loadScanTargets,
+}));
+vi.mock("@/features/receipts/server/preview-rule", () => ({
+  loadScanPreviewRule: mocks.loadScanPreviewRule,
+}));
+vi.mock("@/features/businesses/server/public-repo", () => ({
+  listActiveBusinesses: mocks.listActiveBusinesses,
 }));
 
 const ScanPage = (await import("./page")).default;
@@ -48,6 +58,113 @@ beforeEach(() => {
       },
     ],
     truncated: false,
+  });
+  mocks.listActiveBusinesses.mockResolvedValue([
+    { id: BUSINESS_ID, slug: "kape-diaria", name: "Kape Diaria", logoUrl: null, cityName: null, businessTypeName: null },
+  ]);
+  // 1 point per ₱50, which is DELIBERATELY not the action's 1-point-per-peso
+  // fallback: every points assertion below would also pass under the fallback
+  // if the rate were 100.
+  mocks.loadScanPreviewRule.mockResolvedValue({ rateCentavosPerPoint: 50, rounding: "floor" });
+});
+
+// T4.6: ScanPreview and previewReceiptPointsAction were both correct and both
+// tested, and `rg -n "ScanPreview" src/` returned only the component's own
+// definition. Working code no consumer could reach.
+//
+// These tests therefore go through the PAGE. Rendering <ScanPreview /> here
+// would have passed for the whole time it was orphaned, which is the defect,
+// and the estimate is driven by typing a real amount into the real input so
+// that a mount which drops the rule prop cannot survive either.
+describe("/scan points estimate", () => {
+  async function typeAmount(pesos: string): Promise<void> {
+    const field = screen.getByLabelText("Receipt total in pesos");
+    await act(async () => {
+      fireEvent.change(field, { target: { value: pesos } });
+    });
+  }
+
+  it("CRITICAL: the page mounts the estimate for the bound shop", async () => {
+    await renderScan({ business: BUSINESS_ID });
+
+    expect(screen.getByLabelText("Receipt total in pesos")).toBeInTheDocument();
+    expect(mocks.loadScanPreviewRule).toHaveBeenCalledWith(BUSINESS_ID);
+  });
+
+  it("CRITICAL: estimates under THIS shop's rule and names the shop", async () => {
+    await renderScan({ business: BUSINESS_ID });
+    await typeAmount("300");
+
+    // 30000 centavos at 50 centavos per point = 600. Under the action's
+    // unsupplied-rate fallback the same receipt reads 300, so this figure is
+    // only reachable if the page passed the rule it read.
+    expect(screen.getByText("~600 pts at Kape Diaria")).toBeInTheDocument();
+  });
+
+  it("honours the shop's rounding mode rather than assuming the house default", async () => {
+    mocks.loadScanPreviewRule.mockResolvedValue({ rateCentavosPerPoint: 700, rounding: "ceil" });
+    await renderScan({ business: BUSINESS_ID });
+    await typeAmount("100");
+
+    // 10000 / 700 = 14.28..., which floors to 14 and ceils to 15.
+    expect(screen.getByText("~15 pts at Kape Diaria")).toBeInTheDocument();
+  });
+
+  it("CRITICAL: shows no estimate at all for a shop with no amount-rate rule to preview", async () => {
+    mocks.loadScanPreviewRule.mockResolvedValue(null);
+    await renderScan({ business: BUSINESS_ID });
+
+    // A number under the platform default would be a different shop's number.
+    expect(screen.queryByLabelText("Receipt total in pesos")).not.toBeInTheDocument();
+    expect(await screen.findByText(CAPTURE_MARKER)).toBeInTheDocument();
+  });
+
+  it("CRITICAL: a failed rule read costs the estimate, not the camera", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.loadScanPreviewRule.mockRejectedValue(new Error("permission denied for table points_rules"));
+
+    await renderScan({ business: BUSINESS_ID });
+
+    expect(await screen.findByText(CAPTURE_MARKER)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Receipt total in pesos")).not.toBeInTheDocument();
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it("drops the estimate when the bound business is not publicly readable", async () => {
+    // Deactivated or soft-deleted: there is no name to attach the figure to, and
+    // "~600 pts at " is not a sentence.
+    mocks.listActiveBusinesses.mockResolvedValue([]);
+    await renderScan({ business: BUSINESS_ID });
+
+    expect(screen.queryByLabelText("Receipt total in pesos")).not.toBeInTheDocument();
+  });
+
+  // AUTHORIZATION FIRST, PRIVILEGED READ SECOND.
+  //
+  // `loadScanPreviewRule` runs under service_role and so is not fenced by RLS:
+  // it will happily return the base rule of a suspended, deactivated or
+  // soft-deleted business. `listActiveBusinesses` is the consumer's own
+  // RLS-scoped read and is the only thing here that answers "may this person
+  // see this shop at all".
+  //
+  // Firing both together and discarding the rule at render time makes "we never
+  // read a rule for a business the consumer cannot see" true by accident of the
+  // render guard rather than by construction, and it is one refactor away from
+  // being false. The read is now gated on the answer.
+  it("CRITICAL: never runs the privileged rule read for a business the consumer cannot see", async () => {
+    mocks.listActiveBusinesses.mockResolvedValue([]);
+
+    await renderScan({ business: BUSINESS_ID });
+
+    expect(mocks.loadScanPreviewRule).not.toHaveBeenCalled();
+  });
+
+  it("reads no preview rule on the chooser path, where there is no shop yet", async () => {
+    await renderScan();
+
+    expect(mocks.loadScanPreviewRule).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Receipt total in pesos")).not.toBeInTheDocument();
   });
 });
 

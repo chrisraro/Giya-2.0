@@ -1,13 +1,21 @@
 "use server";
 
 import { computePoints } from "@/features/points/compute";
-import type { PointsRule } from "@/features/points/types";
+import type { PointsRule, RoundingMode } from "@/features/points/types";
 
 export interface PreviewInput {
   amountCentavos: number;
   businessTimezone?: string;
   baseRateCentavosPerPoint?: number;
   multiplier?: number;
+  /**
+   * The base rule's rounding mode. Defaults to "floor", the house default, and
+   * is passed explicitly by every caller that knows the real rule: a shop set
+   * to "ceil" whose preview quietly rounded down would understate the award on
+   * most receipts, which is the same class of lie as previewing at the wrong
+   * rate.
+   */
+  rounding?: RoundingMode;
 }
 
 export async function previewReceiptPointsAction(input: PreviewInput): Promise<{
@@ -22,7 +30,7 @@ export async function previewReceiptPointsAction(input: PreviewInput): Promise<{
       id: "base-preview",
       rule_type: "amount_rate",
       rate_centavos_per_point: rate,
-      rounding: "floor",
+      rounding: input.rounding ?? "floor",
       kind: "base",
     };
 

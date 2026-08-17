@@ -16,3 +16,13 @@ export const HOME_DISCOVER_LIMIT = 5;
 // are already in the balance strip above), so the read over-fetches to keep the
 // section from coming back short after that filter.
 export const HOME_DISCOVER_FETCH = HOME_DISCOVER_LIMIT * 2;
+
+/**
+ * How many saved shops the home rail carries before deferring to /favorites.
+ *
+ * The rail is an accelerator back to a shop the consumer already chose, not a
+ * second copy of /favorites, and a horizontally scrolling row that never ends
+ * is a row nobody reaches the end of. The "See all favorites" link beside the
+ * heading is what makes the cut honest.
+ */
+export const HOME_FAVORITES_LIMIT = 8;
