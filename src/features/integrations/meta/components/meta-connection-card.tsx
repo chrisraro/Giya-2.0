@@ -14,11 +14,25 @@ import { needsReconnect, type MetaConnectionView, type MetaIntegrationView } fro
 // =============================================================================
 //
 // doc 42's V1 scope for this surface is the CONNECTION, not what it produces.
-// INSIGHTS TILES ARE OUT OF SCOPE FOR THIS SLICE and deliberately so: the
-// connection is the foundation everything else stands on, and a tile rendered
-// against a connection whose token lifecycle is not yet proven is a tile that
-// breaks in a way merchants blame on the numbers. Doc 32's analytics tiles pick
-// this up once the connection has been through a real app review.
+// The tiles and the campaign composer that consume it live on
+// /business/marketing (G2), and this card's copy now points there instead of
+// promising a future release.
+//
+// TWO SENTENCES WERE REMOVED FROM THIS CARD WHEN THAT LANDED, and they are
+// recorded here because both were true when written and false the moment the
+// marketing screen shipped:
+//
+//   "Giya never posts on your behalf."
+//       No longer true. `pages_manage_posts` is now requested and the composer
+//       posts a campaign announcement when a merchant presses the button. The
+//       replacement states the actual boundary: we post only on a press.
+//   "Audience and engagement tiles are not part of this release."
+//       No longer true; they exist.
+//
+// A promise on a settings screen is a claim about the product, and a claim
+// nobody re-reads when the product changes is how a surface starts lying. Both
+// were pinned by tests, which is why this had to be a deliberate edit rather
+// than something that slipped.
 //
 // -----------------------------------------------------------------------------
 // WHAT RENDERS WHEN THE INTEGRATION IS DORMANT
@@ -227,7 +241,7 @@ export function MetaConnectionCard({
         <h2 className="text-title-m text-on-surface">Facebook and Instagram</h2>
         <p className="text-body-m text-on-surface-variant">
           Connect your Facebook Page so Giya can read your audience and engagement figures. Giya
-          never posts on your behalf.
+          posts to your Page only when you write an announcement and press Post.
         </p>
       </div>
 
@@ -334,8 +348,8 @@ export function MetaConnectionCard({
       ) : null}
 
       <p className="text-body-s text-on-surface-variant">
-        Audience and engagement tiles are not part of this release. Connecting now means they work
-        the day they arrive.
+        Your audience and engagement figures, and the announcement composer, are on the Marketing
+        screen.
       </p>
     </Card>
   );

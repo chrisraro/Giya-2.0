@@ -63,6 +63,146 @@ export type ActionResult<T> =
   | { readonly ok: true; readonly data: T }
   | { readonly ok: false; readonly message: string };
 
+// =============================================================================
+// THE DEGRADED STATES, ONCE, FOR BOTH MARKETING SURFACES.
+// =============================================================================
+//
+// Analytics tiles and the campaign composer fail in the same six ways, and the
+// merchant is owed a different sentence for each. They are enumerated in the
+// type system rather than left as booleans because a boolean pair
+// (`available`, `connected`) collapses "we have no credentials on this
+// deployment" into "you have not connected a Page", and those are different
+// facts with different fixes and different audiences.
+//
+// The split into a DEPLOYMENT-wide state and a PER-CONNECTION state is
+// deliberate. `not_configured` and `storage_unavailable` are facts about this
+// build; `needs_reconnect` and `scope_missing` are facts about one Page's
+// token, and a merchant with two Pages can be in both at once. Flattening them
+// would force the surface to pick one sentence for two different situations.
+
+/**
+ * A fact about this deployment or this tenant, before any single Page is
+ * considered.
+ *
+ * - `not_configured`     META_APP_ID / META_APP_SECRET unset.
+ * - `storage_unavailable` INTEGRATION_TOKEN_AES_KEY unset. A DIFFERENT missing
+ *                        variable with a different fix, which is why it is not
+ *                        folded into the one above.
+ * - `not_connected`      Configured and ready, and we READ the tenant's rows
+ *                        and there were none. An empty answer, not a missing
+ *                        one.
+ * - `read_failed`        OUR read of `integration_connections` failed. See
+ *                        below; this is the seventh state and it is not
+ *                        cosmetic.
+ * - `pages`              There is at least one connection; see each one.
+ *
+ * -----------------------------------------------------------------------------
+ * WHY `read_failed` IS NOT `not_connected`
+ * -----------------------------------------------------------------------------
+ *
+ * It used to be. A failed `listConnections` was caught into an empty array and
+ * came out the far end as `not_connected`, whose copy is "Connect a Facebook
+ * Page in Settings...". So during a PostgREST wobble a merchant with a working,
+ * connected Page was told to go and connect one: a remedy that does nothing,
+ * for a problem they do not have, about a connection that is fine.
+ *
+ * That is the empty-versus-failed defect, one layer up from the tile where this
+ * feature already refuses to make it. The same distinction is drawn elsewhere
+ * in this codebase and is worth naming so the pattern is findable: the receipts
+ * routing panel answers null rather than a reassuring 0%, and the review queue
+ * count answers null rather than "nothing waiting on you". A read that did not
+ * happen is not a fact about the merchant.
+ *
+ * Doc 42 enumerates six degraded states for this integration. This is the
+ * seventh, and it is the one doc 42 could not have listed, because it is not a
+ * fact about Meta at all. It is a fact about us.
+ */
+export type MetaSurfaceState =
+  | "not_configured"
+  | "storage_unavailable"
+  | "not_connected"
+  | "read_failed"
+  | "pages";
+
+/**
+ * A fact about ONE connected Page's token.
+ *
+ * - `ready`           Meta answered, and the token carries what this surface needs.
+ * - `needs_reconnect` The connection is expired or revoked, or Meta says the
+ *                     token is no longer valid. Reconnecting fixes this.
+ * - `scope_missing`   Meta answered, the token works, and the permission this
+ *                     surface needs is NOT in it. RECONNECTING MAY NOT FIX
+ *                     THIS: an unreviewed app grants a shorter list to anyone
+ *                     who is not an app admin, developer or tester, so the
+ *                     copy for this state must not tell the merchant to try
+ *                     again. See docs/30-modules/42-integrations.md.
+ * - `unavailable`     We could not ask Meta at all (circuit open, timeout,
+ *                     outage). Nothing is known, and nothing is claimed.
+ * - `unreadable`      The stored credential could not be opened by this build.
+ *                     An operations problem; reconnecting does not fix it
+ *                     either, and saying "reconnect" would be a lie with a
+ *                     button on it.
+ */
+export type MetaConnectionCapability =
+  | "ready"
+  | "needs_reconnect"
+  | "scope_missing"
+  | "unavailable"
+  | "unreadable";
+
+/** One connected Page, with what this surface can actually do with it. */
+export interface MetaPageCapability {
+  readonly connectionId: string;
+  /** The Page's name, or its id when Meta never gave us a name. Not a secret. */
+  readonly pageName: string;
+  readonly capability: MetaConnectionCapability;
+}
+
+/**
+ * One analytics figure.
+ *
+ * `reading` is a SUM TYPE and not a `number | null`, and that is the single
+ * most important line in this file. A tile that stores 0 for "we could not
+ * read impressions" is a tile that tells a merchant their reach collapsed. The
+ * two cases are structurally different here, so a component cannot render one
+ * as the other without deleting a branch.
+ */
+export interface MetaInsightTile {
+  /** Meta's metric name, e.g. `page_impressions`. Useful in a bug report. */
+  readonly metric: string;
+  /** What the merchant reads. Fixed prose, not derived from `metric`. */
+  readonly label: string;
+  readonly reading:
+    | { readonly kind: "value"; readonly value: number }
+    | /**
+       * Meta did not report this metric, or reported it in a shape that is not
+       * one number (a breakdown object). NOT a zero. The tile says so.
+       */
+      { readonly kind: "unreported" };
+}
+
+/** One connected Page's analytics, or the reason there are none. */
+export interface MetaPageInsights extends MetaPageCapability {
+  /** Empty unless `capability` is 'ready'. Never partially invented. */
+  readonly tiles: readonly MetaInsightTile[];
+}
+
+export interface MetaInsightsView {
+  readonly state: MetaSurfaceState;
+  /** Empty unless `state` is 'pages'. */
+  readonly pages: readonly MetaPageInsights[];
+  /** The window the tiles describe, as fixed prose for the panel heading. */
+  readonly periodLabel: string;
+}
+
+export interface MetaPublishView {
+  readonly state: MetaSurfaceState;
+  /** Empty unless `state` is 'pages'. */
+  readonly pages: readonly MetaPageCapability[];
+  /** Whether the caller's role may press Publish at all (owner/manager). */
+  readonly canManage: boolean;
+}
+
 /**
  * A status that means the merchant has to walk the consent dialog again.
  *

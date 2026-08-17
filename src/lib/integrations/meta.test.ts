@@ -39,6 +39,8 @@ vi.mock("./circuit-breaker", async () => {
 
 import {
   META_GRAPH_VERSION,
+  META_INSIGHTS_SCOPE,
+  META_PUBLISH_SCOPE,
   META_TIMEOUT_MS,
   META_V1_SCOPES,
   MetaError,
@@ -154,7 +156,7 @@ describe("dormant until credentialed", () => {
 });
 
 describe("buildAuthorizeUrl", () => {
-  it("requests exactly the V1 scopes and no publishing permission", () => {
+  it("requests the four read scopes AND pages_manage_posts", () => {
     const url = new URL(
       buildAuthorizeUrl({ redirectUri: "https://giya.ph/cb", state: "nonce-1" }) ?? "",
     );
@@ -162,16 +164,25 @@ describe("buildAuthorizeUrl", () => {
     expect(url.origin + url.pathname).toBe(
       `https://www.facebook.com/${META_GRAPH_VERSION}/dialog/oauth`,
     );
+    // Transcribed as a literal, deliberately. If this string is ever rebuilt
+    // from META_V1_SCOPES it can no longer disagree with the code, and the
+    // whole value of the assertion is that it can.
     expect(url.searchParams.get("scope")).toBe(
-      "pages_show_list,pages_read_engagement,read_insights,instagram_basic",
+      "pages_show_list,pages_read_engagement,read_insights,instagram_basic,pages_manage_posts",
     );
     expect(url.searchParams.get("state")).toBe("nonce-1");
     expect(url.searchParams.get("client_id")).toBe(APP_ID);
     expect(url.searchParams.get("response_type")).toBe("code");
-    // doc 42 defers publishing to SCALE, and an unused permission makes app
-    // review harder and a secret compromise worse.
-    expect(url.searchParams.get("scope")).not.toContain("manage_posts");
-    expect(url.searchParams.get("scope")).not.toContain("content_publish");
+  });
+
+  it("still does NOT request instagram_content_publish", () => {
+    // The OTHER [SCALE] scope stays deferred. Nothing in this codebase posts
+    // to Instagram from a merchant surface, and `publishInstagramMedia` is
+    // reachable from no route, so asking for it would be exactly the
+    // unjustifiable review line item that the pages_manage_posts decision is
+    // careful to be able to justify.
+    const url = new URL(buildAuthorizeUrl({ redirectUri: "https://giya.ph/cb", state: "s" }) ?? "");
+    expect(url.searchParams.get("scope")).not.toContain("instagram_content_publish");
   });
 
   it("never puts the app secret in the dialog URL", () => {
@@ -179,13 +190,25 @@ describe("buildAuthorizeUrl", () => {
     expect(url).not.toContain(APP_SECRET);
   });
 
-  it("exposes the V1 scope list as the four read scopes", () => {
+  it("exposes the V1 scope list as the four read scopes plus the publish scope", () => {
     expect([...META_V1_SCOPES]).toEqual([
       "pages_show_list",
       "pages_read_engagement",
       "read_insights",
       "instagram_basic",
+      "pages_manage_posts",
     ]);
+  });
+
+  it("names the publish and insights scopes as literals the gates can be checked against", () => {
+    // Both are exported so no gate has to spell a Meta permission inline, and
+    // both are asserted against a hand-typed literal so the exported value
+    // cannot silently become something Meta has never heard of.
+    expect(META_PUBLISH_SCOPE).toBe("pages_manage_posts");
+    expect(META_INSIGHTS_SCOPE).toBe("read_insights");
+    // The publish scope must be one the OAuth grant actually asks for, or the
+    // gate below it would be checking for a permission nobody ever requested.
+    expect([...META_V1_SCOPES]).toContain("pages_manage_posts");
   });
 });
 

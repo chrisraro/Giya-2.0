@@ -59,6 +59,24 @@ Per `13-api-standards.md` table. Additionally: signup velocity per IP/device fin
 - Secrets in Vercel/GitHub encrypted stores; rotation runbook; no secrets in code, logs, or client bundles (`src/lib/env.ts` separates `server`/`client` schemas).
 - Redemption QR tokens: signed JWT (separate signing key), `jti` single-use in Redis, TTL 5 min.
 
+### Meta Business credentials carry WRITE access to merchant Pages [V1]
+
+Stated here, and not only in `../30-modules/42-integrations.md`, because this doc owns secrets posture and the change is to what a compromise **costs**, not to how the secrets are stored.
+
+`pages_manage_posts` is now in the requested OAuth scope set (reasoning and the App Review position: doc 42, "Scope amendment"). Until that change, every Meta credential Giya held was read-only, and the worst case for a leak was disclosure of a merchant's own audience figures. That is no longer true. **Two distinct secrets now unlock the ability to publish to a connected merchant's public Facebook Page:**
+
+| Secret | Where it lives | What a compromise now permits |
+|---|---|---|
+| `META_APP_SECRET` | server env | Mint and exchange tokens for **any** connected merchant; post to their Pages. Blast radius is every tenant with a live connection. |
+| `INTEGRATION_TOKEN_AES_KEY` **plus** read access to `integration_connections` | server env plus DB | Decrypt stored page tokens and post with them. The ciphertext at rest was a read credential and is now a write credential. Both halves are required: neither alone is sufficient, which is the point of the split. |
+
+Consequences that follow, and are already in force:
+
+- The `integration_connections` token-column fence (migration 0032: no client `SELECT` grant on `access_token_encrypted` / `refresh_token_encrypted`, enforced a second time in `features/integrations/meta/server/repo.ts`) was a privacy control and is now also an integrity control. Weakening it is a larger decision than it was.
+- `features/integrations/meta/server/tokens.ts` remains the only module that decrypts, and the publish path routes through it rather than calling `decryptToken` itself.
+- Every publish writes an `integration.published` audit row (actor, role, Page id, Meta post id). This is the only record that a post came from Giya rather than from the merchant, and it is what answers "who posted this" after the fact.
+- Rotation of either secret is now a **containment** action for a write capability, not only for a read one, and should be treated with the urgency the runbook reserves for signing keys.
+
 ## Audit logging
 
 `audit_logs` (schema in `25-schema-platform.md`) captures: actor (user/system/worker), actor role, action verb, entity type + id, `business_id` when tenant-scoped, before/after diff (JSONB, PII-minimized), reason (required for admin overrides), request_id, IP, UA. Insert-only (no update/delete grants). Coverage: every state change that matters — verification decisions, role changes, campaign lifecycle, manual points adjustments, reward inventory changes, suspensions, feature-flag flips, signed-URL grants on documents, admin logins. Retention: 2 years hot, then archived `[SCALE]`.

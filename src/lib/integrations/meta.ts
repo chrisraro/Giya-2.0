@@ -69,23 +69,61 @@ export const META_TIMEOUT_MS = 10_000;
 export const META_CIRCUIT_SERVICE = "meta";
 
 /**
- * V1 scopes, EXACTLY. doc 42 defers `pages_manage_posts` and
- * `instagram_content_publish` to [SCALE].
+ * The scopes the consent dialog asks for.
  *
- * Requesting a permission we do not use is not free: it lengthens Meta's app
- * review (every requested permission needs a recorded justification and a
- * screencast of it being used), it raises the consent dialog's refusal rate,
- * and it means a compromise of our app secret would carry the ability to POST
- * to every connected merchant's Page. Ask for read, get read.
+ * FOUR READ SCOPES PLUS `pages_manage_posts`. Doc 42 originally deferred both
+ * publishing scopes to [SCALE]; that doc now records this amendment and its
+ * reasoning, and the short version is here because this constant is where
+ * somebody will come looking:
+ *
+ *   - The campaign composer (features/integrations/meta/components) posts a
+ *     campaign announcement to a connected Page. That is a real, shipped,
+ *     merchant-triggered control, so the permission behind it is one we can
+ *     both justify to app review and demonstrate on a screencast. The rule
+ *     "ask for read, get read" was never about the count of scopes; it was
+ *     about not asking for permissions nothing uses.
+ *   - Facebook grants an UNREVIEWED scope to users who are admins, developers
+ *     or testers of the app. That is what makes this reachable before App
+ *     Review and it is the whole reason the scope goes in now rather than
+ *     after: the operator tests with exactly such an account.
+ *
+ * WHAT DOES NOT FOLLOW FROM THIS, and the mistake this comment exists to
+ * prevent: requesting a scope is NOT holding it. Everyone else gets less. A
+ * merchant can untick `pages_manage_posts` on the consent screen, and a
+ * non-tester on an unreviewed app is silently granted a shorter list than was
+ * requested. So NOTHING may gate a publishing affordance on this constant.
+ * The granted set is read back from `debugToken` at runtime, and
+ * server/capability.ts is the only module allowed to answer "can this
+ * connection post".
+ *
+ * `instagram_content_publish` stays deferred: no surface in this codebase
+ * publishes to Instagram, so it would be exactly the unjustifiable review line
+ * item the paragraph above is careful not to be.
  */
 export const META_V1_SCOPES = [
   "pages_show_list",
   "pages_read_engagement",
   "read_insights",
   "instagram_basic",
+  "pages_manage_posts",
 ] as const;
 
 export type MetaScope = (typeof META_V1_SCOPES)[number];
+
+/**
+ * The permission `publishFacebookPost` needs, named once.
+ *
+ * Exported so the capability gate compares a granted scope list against this
+ * rather than spelling a Meta permission inline in a feature module. It is
+ * declared separately from `META_V1_SCOPES` and NOT derived from it, because
+ * the two answer different questions - "what did we ask for" and "what does
+ * posting require" - and a gate built out of the request list is the exact
+ * defect this whole design is avoiding.
+ */
+export const META_PUBLISH_SCOPE = "pages_manage_posts";
+
+/** The permission `readPageInsights` needs. Same reasoning as above. */
+export const META_INSIGHTS_SCOPE = "read_insights";
 
 export type MetaErrorCode =
   /** META_APP_ID and/or META_APP_SECRET are unset. The dormant state. */

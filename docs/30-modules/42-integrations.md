@@ -29,11 +29,34 @@ Same model as Google (Supabase Auth provider). Note: this is **login only** — 
 
 ## Meta Business OAuth — business connects FB Page / IG [V1]
 
-- **Purpose:** a business links its Facebook Page / Instagram account. V1 enables **page insights read** (audience/engagement tiles in `32-business-portal.md` analytics); **content publishing is [SCALE]** (`../00-product/02-roadmap.md` Phase 3 marketing).
-- **Auth model:** Meta Business Login (OAuth), scopes at V1: `pages_show_list`, `pages_read_engagement`, `read_insights`, `instagram_basic` (+ `pages_manage_posts`, `instagram_content_publish` deferred to [SCALE]). Short-lived user token exchanged server-side for a **long-lived token (~60d)** and page tokens.
+- **Purpose:** a business links its Facebook Page / Instagram account. V1 enables **page insights read** (audience/engagement tiles in `32-business-portal.md` analytics) and **Facebook Page announcement posting** from the marketing screen (see the scope amendment below); **Instagram content publishing stays [SCALE]** (`../00-product/02-roadmap.md` Phase 3 marketing).
+- **Auth model:** Meta Business Login (OAuth), scopes at V1: `pages_show_list`, `pages_read_engagement`, `read_insights`, `instagram_basic`, **`pages_manage_posts`** (`instagram_content_publish` remains deferred to [SCALE]). Short-lived user token exchanged server-side for a **long-lived token (~60d)** and page tokens.
+
+#### Scope amendment: `pages_manage_posts` is requested ahead of App Review [V1]
+
+`pages_manage_posts` was originally deferred to [SCALE] alongside `instagram_content_publish`. It is now in the requested set. The reasoning, recorded here because a reviewer will ask:
+
+1. **There is a real control behind it.** `/business/marketing` carries a campaign announcement composer that posts to a connected Page (`src/features/integrations/meta/server/publishing.ts`). The deferral rule was never about the number of scopes, it was about not requesting permissions nothing uses. This one is used, justifiable to app review, and demonstrable on a screencast.
+2. **It is reachable before approval.** Facebook grants an unreviewed scope to users who are **admins, developers or testers** of the app. The operator tests with such an account, so the composer works for them today and for ordinary merchants only once App Review passes.
+3. **Requesting is not holding, and nothing in the product may assume otherwise.** A merchant can decline an individual permission on the consent screen, and a non-tester on an unreviewed app is silently granted a shorter list than was requested. The publish affordance is therefore gated on the scopes Meta reports for the **actual token** via `GET /debug_token` (`src/features/integrations/meta/server/capability.ts`), never on the requested-scope constant. When the grant is absent the surface says publishing needs a permission this app has not been approved for yet, and offers no button.
+4. **`instagram_content_publish` stays deferred** because no surface publishes to Instagram; adding it would be exactly the unjustifiable review line item point 1 rules out.
+
+Consequence to accept knowingly: a compromise of the app secret would now carry the ability to post to connected Pages, not only to read them. That is the price of the control, and it is why the publish path is server-only, tenancy-pinned, and audited.
 - **Connect flow:** owner/manager clicks Connect in portal settings → server-generated state nonce (Redis, 10 min TTL) → Meta consent dialog → callback `/api/v1/businesses/{businessId}/integrations/meta/callback` verifies state, exchanges code server-side, lists Pages, user picks Page(s) → one `integration_connections` row per Page. Disconnect deletes the row (soft) and best-effort revokes the grant.
 - **Token storage decision:** **dedicated `integration_connections` table** (see Schema deltas), not `settings` scope `'business'`. Rationale: tokens need per-row encryption, expiry tracking, status lifecycle, uniqueness per external account, and admin visibility — a typed row beats an opaque JSONB setting; `settings` stays for preferences, never credentials. Tokens encrypted AES-256-GCM app-layer like TINs (`../10-architecture/15-security.md`), never logged, never in claims, never selected by client-reachable query paths.
-- **Refresh/webhook handling:** V1 refresh is **on-read**: the insights client re-exchanges any token older than 45d before use (long-lived tokens last ~60d, so read-time refresh suffices at V1 insight volumes); a dedicated scheduled refresh queue is added only when publishing arrives [SCALE] and stale tokens become user-visible failures. Meta's deauthorize callback webhook marks the connection `revoked`; UI prompts reconnect.
+- **Refresh/webhook handling:** V1 refresh is **on-read**: the insights client re-exchanges any token older than 45d before use (long-lived tokens last ~60d, so read-time refresh suffices at V1 insight volumes). A dedicated scheduled refresh queue is added when **a write exists that is not synchronous with a human watching its outcome** (see the restatement below). Meta's deauthorize callback webhook marks the connection `revoked`; UI prompts reconnect.
+
+#### Refresh-queue trigger, restated [V1]
+
+The original trigger read "when publishing arrives [SCALE] **and** stale tokens become user-visible failures". That is a conjunction, and publishing arriving has fired only the first clause. Restating it because the wording invites a reading in which the queue is now overdue, and it is not:
+
+**V1 publishing is synchronous by construction, so a post never silently does not happen.** The capability is resolved from a live `debug_token` inside a `force-dynamic` render, resolved again in a fresh request when the button is pressed, `withPageToken` returns `expired` before any write is attempted, and every refusal lands in a `role="alert"` in front of the person who pressed the button. A stale token produces a visible refusal with a named reason, not a missing post.
+
+So the trigger is better stated as the property that actually matters:
+
+> A scheduled refresh queue is required once Giya performs a write to Meta that is **not** synchronous with a human watching its outcome.
+
+That fires the moment anything **schedules** a post, **retries** one in the background, or posts **on a timer** (doc 32 §11.1's scheduler calendar is the obvious candidate). At that point a token that expired between composition and send is a post the merchant believes happened and did not, which is the failure the queue exists to prevent. Until then, on-read refresh is sufficient and a queue would be a `jobs` row, a worker route, a QStash schedule and a per-tenant failure path solving nothing.
 - **Failure handling:** expired/revoked token → connection `status='expired'|'revoked'`, insights tiles show "reconnect" state; never blocks core loops. All Meta calls behind circuit breaker.
 - **Cost:** free API; app-review lead time is the real cost — start review early in V1.
 
