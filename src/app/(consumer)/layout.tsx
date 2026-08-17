@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { RegisterServiceWorker } from "@/components/pwa/register-service-worker";
 import { BottomNav } from "@/components/shell/bottom-nav";
 import { createClient } from "@/lib/supabase/server";
 
@@ -93,6 +94,16 @@ export default async function ConsumerLayout({ children }: { children: React.Rea
     <div className="min-h-dvh bg-surface pb-24">
       {children}
       <BottomNav />
+      {/*
+        The ONLY service worker registration in the app. Doc 41's preamble
+        excludes the business and admin portals from SW scope: staff decisions
+        (redemption validation, review queues) must never be made against a
+        cached page, and a back-office terminal is shared by a whole shift.
+        Mounted here rather than in the root layout, which also wraps those
+        portals plus the marketing site. src/app/service-worker-scope.test.ts
+        holds that line.
+      */}
+      <RegisterServiceWorker />
     </div>
   );
 }
