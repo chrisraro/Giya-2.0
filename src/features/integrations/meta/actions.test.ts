@@ -49,8 +49,22 @@ vi.mock("./server/publishing", () => ({
 
 // The three CONNECTION actions in this module import service.ts, which reaches
 // a Supabase client at module scope. Stubbed so importing actions.ts does not
-// require a server env; nothing in this file exercises those three, and they
-// have their own suites.
+// require a server env.
+//
+// `startMetaConnect`, `connectMetaPages` and `disconnectMeta` ARE NOT COVERED,
+// by this file or by any other. An earlier draft of this comment claimed they
+// "have their own suites"; that was false. They appear in the test tree only as
+// `vi.mock` entries, which is exactly why a misfired mutant that rewrote
+// `startMetaConnect`'s role gate passed 287 tests without a murmur.
+//
+// It is inherited, not introduced: the same gap existed before this file did,
+// and closing it is a slice of its own. Recorded here rather than papered over,
+// because "there is a suite for that" is the kind of claim that goes stale in
+// silence and then gets believed by the next person deciding what to test.
+//
+// What they DO share with `publishMetaCampaign`: the same
+// `resolveStaffContext(BUSINESS_SETTINGS_ROLES)` shape, so a reader should
+// assume their guards are unpinned, not that they are safe.
 vi.mock("./server/service", () => ({
   startConnect: vi.fn(),
   connectPages: vi.fn(),

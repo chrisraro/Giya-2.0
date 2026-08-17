@@ -18,13 +18,29 @@ import * as repo from "./repo";
 //
 // THERE IS DELIBERATELY NO REFRESH QUEUE. It would be a `jobs` row, a worker
 // route, a QStash schedule and a failure path per tenant, all to solve a
-// problem that does not exist yet: at V1 nothing WRITES to Meta, so a stale
-// token cannot fail anything a merchant is watching - it can only make an
-// insights tile show "reconnect" a little sooner than necessary. The moment
-// publishing lands, a token that silently expired means a post that silently
-// did not happen, and that is when the queue earns its keep. Doc 42 is
-// explicit about the ordering and this file honours it rather than
-// pre-building it.
+// problem that does not exist yet.
+//
+// THE REASON HAS CHANGED, AND THE OLD ONE IS NOW FALSE. This comment used to
+// say "at V1 nothing WRITES to Meta". Something does: G2's campaign composer
+// posts to a connected Page. The conclusion survives, but on a different and
+// more durable argument, so it is restated rather than left to be discovered.
+//
+// The queue is not needed because V1 publishing is SYNCHRONOUS END TO END. The
+// capability is resolved from a live `debug_token` inside a `force-dynamic`
+// render, resolved again in a fresh request when the button is pressed,
+// `withPageToken` returns `expired` BEFORE any write is attempted, and every
+// refusal lands in an alert in front of the person who pressed the button. A
+// stale token therefore produces a visible refusal naming its reason, never a
+// post the merchant believes happened and did not.
+//
+// So the trigger is not "publishing exists". It is:
+//
+//     a write that is NOT synchronous with a human watching its outcome.
+//
+// That fires the moment anything schedules a post, retries one in the
+// background, or posts on a timer - doc 32 section 11.1's scheduler calendar
+// being the obvious candidate. Whoever builds that builds the queue with it.
+// Doc 42's "Refresh-queue trigger, restated" carries the same wording.
 //
 // -----------------------------------------------------------------------------
 // WHY 45 DAYS

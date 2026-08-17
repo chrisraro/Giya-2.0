@@ -104,32 +104,42 @@ export function MetaInsightsPanel({ view }: MetaInsightsPanelProps) {
   return (
     <Card variant="outlined" className="flex flex-col gap-4 p-4 sm:p-6">
       {/*
-        ONE branch on `view.state`, deciding the period label AND the body
-        together. They were two independent branches off the same discriminant
-        and only the body was pinned, which is the same shape as the tile defect
-        a mutation run found earlier in this file: the label could be made
-        unconditional and "Last 28 days" would sit beside "not available on this
-        deployment yet", describing a window of figures that are not there.
+        THE HEADING IS UNCONDITIONAL, SO IT IS WRITTEN ONCE, ABOVE THE BRANCH.
+
+        This is the third correction of one recurring shape in this file, and
+        the shape is worth naming because it kept reappearing while I was
+        fixing it. In order: the tile decided its type face and its text in two
+        branches off one discriminant; the per-page panel's alert role went
+        unpinned; then the period label and the body did the same thing. The
+        fix for the third one introduced a fourth variant - the same <h2> typed
+        into BOTH arms of the ternary, one fact in two places with only one of
+        them pinned, so the degraded arm's heading could drift silently.
+
+        The general rule the file now follows: anything that does not depend on
+        `view.state` lives outside the `view.state` branch. Nothing that is the
+        same in both arms may be written twice.
+
+        The period label DOES depend on it, and stays inside: "Last 28 days"
+        beside "not available on this deployment yet" would name a window for
+        figures that are not there.
       */}
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="text-title-m text-on-surface">Facebook audience and engagement</h2>
+        {view.state === "pages" ? (
+          <p className="text-body-s text-on-surface-variant">{view.periodLabel}</p>
+        ) : null}
+      </div>
+
       {view.state === "pages" ? (
-        <>
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="text-title-m text-on-surface">Facebook audience and engagement</h2>
-            <p className="text-body-s text-on-surface-variant">{view.periodLabel}</p>
-          </div>
-          <div className="flex flex-col gap-5">
-            {view.pages.map((page) => (
-              <PageInsights key={page.connectionId} page={page} />
-            ))}
-          </div>
-        </>
+        <div className="flex flex-col gap-5">
+          {view.pages.map((page) => (
+            <PageInsights key={page.connectionId} page={page} />
+          ))}
+        </div>
       ) : (
-        <>
-          <h2 className="text-title-m text-on-surface">Facebook audience and engagement</h2>
-          <p className="rounded-md3-sm bg-surface-container-highest p-4 text-body-m text-on-surface-variant">
-            {INSIGHTS_SURFACE_COPY[view.state]}
-          </p>
-        </>
+        <p className="rounded-md3-sm bg-surface-container-highest p-4 text-body-m text-on-surface-variant">
+          {INSIGHTS_SURFACE_COPY[view.state]}
+        </p>
       )}
 
       <p className="text-body-s text-on-surface-variant">

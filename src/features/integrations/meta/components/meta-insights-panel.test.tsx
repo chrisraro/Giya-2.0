@@ -101,6 +101,31 @@ describe("the deployment-wide states each get their own sentence", () => {
     expect(screen.queryByText(/Connect a Facebook Page in Settings/)).not.toBeInTheDocument();
   });
 
+  it("CRITICAL: keeps its heading in every state, including the degraded ones", () => {
+    // The heading does not depend on `view.state`, so it is written once above
+    // the branch. It used to be typed into both arms, where the degraded arm's
+    // copy could drift with nothing to catch it: one fact in two places, only
+    // one pinned. A card with no heading is also just an anonymous grey panel.
+    for (const state of [
+      "pages",
+      "not_configured",
+      "storage_unavailable",
+      "not_connected",
+      "read_failed",
+    ] as const) {
+      const { unmount } = render(
+        <MetaInsightsPanel
+          view={view({ state, pages: state === "pages" ? [page()] : [] })}
+        />,
+      );
+      expect(
+        screen.getByRole("heading", { name: "Facebook audience and engagement" }),
+        `${state} lost or changed its heading`,
+      ).toBeInTheDocument();
+      unmount();
+    }
+  });
+
   it("CRITICAL: does not name a period when there are no figures to describe", () => {
     // "Last 28 days" beside "not available on this deployment yet" describes a
     // window of numbers that are not there. A mutation run found the label and

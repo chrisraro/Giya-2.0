@@ -1,11 +1,15 @@
 // @vitest-environment node
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/env", () => ({ env: {}, getServerEnv: () => ({}) }));
 
-import { CLIENT_COLUMNS, TOKEN_COLUMNS, assertClientColumns } from "./repo";
+const supabaseMock = vi.hoisted(() => ({ createClient: vi.fn() }));
+vi.mock("@/lib/supabase/server", () => ({ createClient: supabaseMock.createClient }));
+vi.mock("@/lib/supabase/service", () => ({ createServiceRoleClient: () => null }));
+
+import { CLIENT_COLUMNS, TOKEN_COLUMNS, assertClientColumns, listConnections, readConnections } from "./repo";
 
 // =============================================================================
 // The column allowlist, asserted directly.
@@ -94,3 +98,153 @@ describe("assertClientColumns", () => {
     ).toThrow(/access_token_encrypted, refresh_token_encrypted/);
   });
 });
+
+// =============================================================================
+// readConnections: THE PRODUCER OF THE ok/failed DISCRIMINANT.
+// =============================================================================
+//
+// Everything above this line tests the column fence. This block tests the one
+// thing the whole `read_failed` state rests on, and it was written because
+// both of this function's failure exits survived removal while eight
+// consumer-side assertions stayed green.
+//
+// That is the point worth keeping. `capability.test.ts` and `insights.test.ts`
+// mock `readConnections` and assert richly on both sides of the discriminant,
+// so they pin what the CONSUMERS do with the answer and say nothing at all
+// about whether the answer is ever produced. Laundering a query error back
+// into `{ ok: true, connections: [] }` here silently restores the exact defect
+// the seventh state was added to fix: `read_failed` would never fire in
+// production, and a PostgREST error would read to a merchant as "you have no
+// connections, go and connect one".
+//
+// Same shape as the server-action gap one layer up: a densely tested consumer
+// in front of an untested producer.
+
+/** A query builder whose terminal `.overrideTypes()` resolves to `settled`. */
+function queryResolving(settled: { data: unknown; error: unknown }) {
+  const builder: Record<string, unknown> = {};
+  for (const method of ["select", "eq", "is", "order"]) {
+    builder[method] = vi.fn(() => builder);
+  }
+  builder.overrideTypes = vi.fn(async () => settled);
+  return builder;
+}
+
+function clientReturning(settled: { data: unknown; error: unknown }) {
+  supabaseMock.createClient.mockResolvedValue({ from: vi.fn(() => queryResolving(settled)) });
+}
+
+const BUSINESS = "11111111-1111-4111-8111-111111111111";
+
+const ROW = {
+  id: "cccccccc-1111-4111-8111-111111111111",
+  status: "connected",
+  external_account_id: "1001",
+  external_account_name: "Kape Cebu",
+  scopes: ["pages_show_list", "read_insights"],
+  token_expires_at: null,
+  last_synced_at: null,
+  error: null,
+  created_at: "2026-07-26T00:00:00.000Z",
+};
+
+describe("readConnections distinguishes a failed read from an empty one", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("CRITICAL: a query error is ok:false, NEVER an empty success", () => {
+    // The mutant: `return { ok: true, connections: [] }` here. It restores the
+    // defect the seventh state exists to prevent, and no consumer test catches
+    // it because every one of them mocks this function.
+    clientReturning({ data: null, error: { message: "PostgREST is having a day" } });
+
+    return expect(readConnections(BUSINESS)).resolves.toEqual({ ok: false });
+  });
+
+  it("CRITICAL: a successful read of zero rows is ok:true with an empty list", async () => {
+    // The pairing half, at the producer. A rule of "no rows means failure"
+    // would satisfy the assertion above while telling every genuinely
+    // unconnected merchant that the problem is on our side.
+    clientReturning({ data: [], error: null });
+
+    await expect(readConnections(BUSINESS)).resolves.toEqual({ ok: true, connections: [] });
+  });
+
+  it("CRITICAL: a createClient that THROWS is caught, not propagated", async () => {
+    // Not equivalent to the branch above, and the difference is a real screen:
+    // `loadIntegrationView` calls `listConnections` with nothing above it to
+    // catch, so this is the only thing keeping a thrown createClient off the
+    // /business/settings render.
+    supabaseMock.createClient.mockRejectedValue(new Error("no cookie store in this scope"));
+
+    await expect(readConnections(BUSINESS)).resolves.toEqual({ ok: false });
+  });
+
+  it("maps a returned row into the portal's view shape", async () => {
+    clientReturning({ data: [ROW], error: null });
+
+    const result = await readConnections(BUSINESS);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.connections).toEqual([
+      {
+        id: "cccccccc-1111-4111-8111-111111111111",
+        status: "connected",
+        externalAccountId: "1001",
+        externalAccountName: "Kape Cebu",
+        scopes: ["pages_show_list", "read_insights"],
+        tokenExpiresAt: null,
+        lastSyncedAt: null,
+        error: null,
+        connectedAt: "2026-07-26T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("treats a null data set with no error as an empty success, not a failure", async () => {
+    // PostgREST can answer `{ data: null, error: null }`. It means no rows.
+    clientReturning({ data: null, error: null });
+
+    await expect(readConnections(BUSINESS)).resolves.toEqual({ ok: true, connections: [] });
+  });
+
+  it("never names a token column in the query it actually runs", async () => {
+    // The column fence, exercised through the real call rather than through
+    // `assertClientColumns` alone: this asserts the select string the function
+    // builds, not the list a test hands it.
+    const builder = queryResolving({ data: [], error: null });
+    supabaseMock.createClient.mockResolvedValue({ from: vi.fn(() => builder) });
+
+    await readConnections(BUSINESS);
+
+    const selected = String((builder.select as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] ?? "");
+    for (const column of TOKEN_COLUMNS) {
+      expect(selected).not.toContain(column);
+    }
+    expect(selected).toContain("external_account_id");
+  });
+});
+
+describe("listConnections flattens, and loses the distinction on purpose", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("answers [] on a failed read, which is why new callers must not use it", async () => {
+    // Pinned so the compromise is visible rather than implied. This is the
+    // shape `loadIntegrationView` still depends on, and the reason the
+    // settings card cannot yet tell an empty read from a failed one.
+    clientReturning({ data: null, error: { message: "PostgREST is having a day" } });
+
+    await expect(listConnections(BUSINESS)).resolves.toEqual([]);
+  });
+
+  it("answers the same [] on a genuinely empty read", async () => {
+    clientReturning({ data: [], error: null });
+
+    await expect(listConnections(BUSINESS)).resolves.toEqual([]);
+  });
+});
+

@@ -44,7 +44,19 @@ Same model as Google (Supabase Auth provider). Note: this is **login only** — 
 Consequence to accept knowingly: a compromise of the app secret would now carry the ability to post to connected Pages, not only to read them. That is the price of the control, and it is why the publish path is server-only, tenancy-pinned, and audited.
 - **Connect flow:** owner/manager clicks Connect in portal settings → server-generated state nonce (Redis, 10 min TTL) → Meta consent dialog → callback `/api/v1/businesses/{businessId}/integrations/meta/callback` verifies state, exchanges code server-side, lists Pages, user picks Page(s) → one `integration_connections` row per Page. Disconnect deletes the row (soft) and best-effort revokes the grant.
 - **Token storage decision:** **dedicated `integration_connections` table** (see Schema deltas), not `settings` scope `'business'`. Rationale: tokens need per-row encryption, expiry tracking, status lifecycle, uniqueness per external account, and admin visibility — a typed row beats an opaque JSONB setting; `settings` stays for preferences, never credentials. Tokens encrypted AES-256-GCM app-layer like TINs (`../10-architecture/15-security.md`), never logged, never in claims, never selected by client-reachable query paths.
-- **Refresh/webhook handling:** V1 refresh is **on-read**: the insights client re-exchanges any token older than 45d before use (long-lived tokens last ~60d, so read-time refresh suffices at V1 insight volumes); a dedicated scheduled refresh queue is added only when publishing arrives [SCALE] and stale tokens become user-visible failures. Meta's deauthorize callback webhook marks the connection `revoked`; UI prompts reconnect.
+- **Refresh/webhook handling:** V1 refresh is **on-read**: the insights client re-exchanges any token older than 45d before use (long-lived tokens last ~60d, so read-time refresh suffices at V1 insight volumes). A dedicated scheduled refresh queue is added when **a write exists that is not synchronous with a human watching its outcome** (see the restatement below). Meta's deauthorize callback webhook marks the connection `revoked`; UI prompts reconnect.
+
+#### Refresh-queue trigger, restated [V1]
+
+The original trigger read "when publishing arrives [SCALE] **and** stale tokens become user-visible failures". That is a conjunction, and publishing arriving has fired only the first clause. Restating it because the wording invites a reading in which the queue is now overdue, and it is not:
+
+**V1 publishing is synchronous by construction, so a post never silently does not happen.** The capability is resolved from a live `debug_token` inside a `force-dynamic` render, resolved again in a fresh request when the button is pressed, `withPageToken` returns `expired` before any write is attempted, and every refusal lands in a `role="alert"` in front of the person who pressed the button. A stale token produces a visible refusal with a named reason, not a missing post.
+
+So the trigger is better stated as the property that actually matters:
+
+> A scheduled refresh queue is required once Giya performs a write to Meta that is **not** synchronous with a human watching its outcome.
+
+That fires the moment anything **schedules** a post, **retries** one in the background, or posts **on a timer** (doc 32 §11.1's scheduler calendar is the obvious candidate). At that point a token that expired between composition and send is a post the merchant believes happened and did not, which is the failure the queue exists to prevent. Until then, on-read refresh is sufficient and a queue would be a `jobs` row, a worker route, a QStash schedule and a per-tenant failure path solving nothing.
 - **Failure handling:** expired/revoked token → connection `status='expired'|'revoked'`, insights tiles show "reconnect" state; never blocks core loops. All Meta calls behind circuit breaker.
 - **Cost:** free API; app-review lead time is the real cost — start review early in V1.
 
