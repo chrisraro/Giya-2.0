@@ -131,6 +131,18 @@ describe("/scan points estimate", () => {
     logged.mockRestore();
   });
 
+  it("CRITICAL: on the chooser path a failed catalog read fails the page, and does not offer an empty chooser", async () => {
+    // The other half of the bound-path catch, and the half that was asserted
+    // only in a comment. On this path the catalog IS the page: degrading to an
+    // empty chooser during an outage tells a consumer standing in a shop that
+    // there is nowhere to scan, which is a confident falsehood built from a
+    // dropped connection. Failing loudly is correct here, so a `.catch()`
+    // added to this path must break something.
+    mocks.loadScanTargets.mockRejectedValue(new Error("connection reset"));
+
+    await expect(renderScan()).rejects.toThrow(/connection reset/);
+  });
+
   it("CRITICAL: a failed catalog read costs the estimate, not the camera", async () => {
     // The twin of the test above, and it did not exist while the comment at
     // the top of scan/page.tsx said "both degrade to no preview rather than

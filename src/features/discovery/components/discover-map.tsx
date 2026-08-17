@@ -54,11 +54,18 @@ export const DISCOVER_MAP_HEIGHT = 224;
 /**
  * How wide a picture is SEEN, and therefore the box every pin has to land in.
  *
- * These are two different numbers and conflating them was a real bug. The
- * mosaic is centred with `absolute left-1/2 -translate-x-1/2` inside an
- * `overflow-hidden` section, so the column crops it symmetrically and only the
- * middle slice is ever painted. /discover is `max-w-md px-4`, and max-w-md is
- * 448px with no --container-md override in globals.css, so the column is
+ * These are two different numbers and conflating them was a real bug.
+ *
+ * THIS NUMBER IS COUPLED TO TWO CSS DECISIONS, named here so that
+ * `git grep DISCOVER_MAP_FIT_WIDTH` finds them. The mosaic is centred with
+ * `absolute left-1/2 -translate-x-1/2` and the section is `overflow-hidden`,
+ * so the column crops the mosaic SYMMETRICALLY and only the middle slice is
+ * ever painted. Change either of those and this constant is wrong: an
+ * unclipped mosaic would overflow its column, and a mosaic anchored left
+ * rather than centred would move the visible slice off the fitted box.
+ *
+ * /discover is `max-w-md px-4`, and max-w-md is 448px with no
+ * --container-md override in globals.css, so the column is
  * min(viewport, 448) - 32:
  *
  *   448px viewport and up -> 416px column, visible slice x in [48, 464]
@@ -69,11 +76,17 @@ export const DISCOVER_MAP_HEIGHT = 224;
  * wider than tall lost its outermost shops off both sides. That is a direct
  * contradiction of the only promise this map makes.
  *
- * 288 is the narrowest column a supported phone can produce, so fitting to it
- * means every pin is visible on every device rather than on a good one. The
- * cost is at most one zoom level on a large screen (log2(416/288) = 0.53, and
- * the fit floors to an integer), which is a cheap price for the promise being
- * true. The bleed either side is still painted, so nothing looks cropped.
+ * WHY 320 AND NOT A GUESS. Nothing in this repo states a minimum viewport, so
+ * the floor comes from WCAG 2.1 SC 1.4.10 (Reflow), which specifies content
+ * must work at 320 CSS px wide without two-dimensional scrolling. 288 is then
+ * mechanical: 320 minus `px-4` on both sides. If a higher floor is ever
+ * written down for this product, this is the line to change, and the map wins
+ * back up to one zoom level.
+ *
+ * The cost of 288 is at most one zoom level on a large screen
+ * (log2(416/288) = 0.53, and the fit floors to an integer), which is a cheap
+ * price for the promise being true. The bleed either side is still painted, so
+ * nothing looks cropped.
  */
 export const DISCOVER_MAP_FIT_WIDTH = 288;
 
@@ -97,8 +110,9 @@ export const DISCOVER_MAP_MAX_ZOOM = 15;
  * rescue a result set containing a mis-geocoded outlier: `toPublicCoordinates`
  * validates only that a pair is inside +/-90 and +/-180, so a merchant typo
  * lands anywhere on Earth and passes, and Cebu plus a row typed into London
- * renders a basemap of eastern Iran with both pins off-frame. The floor stops
- * that being the whole globe as a smear; it does not make it a useful picture.
+ * centres on 33.28N 61.88E, the Iran/Afghanistan border, with both pins
+ * off-frame. The floor stops that being the whole globe as a smear; it does
+ * not make it a useful picture.
  *
  * That is survivable only because the map is decoration and the LIST is what
  * the consumer reads: both shops are still in the results, including the

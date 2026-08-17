@@ -52,6 +52,18 @@ function pinItems(): HTMLElement[] {
 // column. Asserting "inside 512" therefore proves nothing about whether a
 // consumer can see the pin, which is the only thing the fit is for.
 // ---------------------------------------------------------------------------
+/**
+ * DISCOVER_MAP_WIDTH, deliberately duplicated as a literal rather than
+ * imported: importing it would let a wrong value agree with its own
+ * expectation, which is the whole point of asserting against literals.
+ *
+ * CHANGE BOTH TOGETHER. `visibleLeft` derives the crop from this number, so if
+ * DISCOVER_MAP_WIDTH moves and this does not, the pin assertions below start
+ * computing the visible column from the wrong mosaic and fail with a message
+ * about a pin being off screen when the real cause is a stale literal here.
+ * The mosaic-width assertion in "paints a mosaic at least as wide as the
+ * widest column" is the one that names the actual mismatch.
+ */
 const MOSAIC_WIDTH = 512;
 /** max-w-md (448) minus px-4 on both sides. */
 const WIDEST_COLUMN = 416;
@@ -261,20 +273,43 @@ describe("with a tile key and pinned results", () => {
     }
   });
 
-  it("still paints tiles right across the widest column, with no bald strip", () => {
+  it("paints a mosaic at least as wide as the widest column, and covers all of it", () => {
     withKey();
 
-    // The reason the mosaic stays 512 wide while the FIT narrows: the picture
-    // has to cover the whole column on a large screen. Tiles span the mosaic,
-    // so the painted run must reach past both edges of the widest column.
+    // The reason the mosaic stays wide while the FIT narrows: the picture has
+    // to cover the whole column on a large screen or the section shows a bald
+    // strip at one edge.
+    //
+    // NOTE ON WHAT EACH ASSERTION CAN AND CANNOT CATCH, because the previous
+    // version of this test asserted two things that were true by construction
+    // and could never fail. `staticMapLayout` always emits the tile row
+    // starting at `floor(originX / 256)`, so the first tile's left offset is
+    // ALWAYS <= 0, and the last tile's right edge is ALWAYS >= the frame
+    // width. Measured across all six shipped fixtures: left offsets -83.0 to
+    // -243.9, right edges 524.1 to 685.0. Thresholds of 48 and 464 were
+    // unreachable in both directions.
+    //
+    // So the real question is not where the tiles are, it is how wide the
+    // mosaic they fill is. That is read from the rendered element rather than
+    // imported, so a wrong constant cannot agree with its own expectation.
     const { container } = render(<DiscoverMap businesses={[business()]} />);
 
+    const mosaic = container.querySelector("ul")?.parentElement;
+    const paintedWidth = Number.parseFloat(mosaic?.style.width ?? "0");
+
+    // Fails the moment DISCOVER_MAP_WIDTH drops below the widest column.
+    expect(paintedWidth).toBeGreaterThanOrEqual(WIDEST_COLUMN);
+    expect(paintedWidth).toBe(MOSAIC_WIDTH);
+
+    // And the tiles cover that box completely, which is the layout's job
+    // rather than this component's: dropping an edge column would leave a
+    // genuine bald strip and would fail here.
     const lefts = [...container.querySelectorAll("img")].map((image) =>
       Number.parseFloat((image as HTMLElement).style.left),
     );
 
-    expect(Math.min(...lefts)).toBeLessThanOrEqual((MOSAIC_WIDTH - WIDEST_COLUMN) / 2);
-    expect(Math.max(...lefts) + 256).toBeGreaterThanOrEqual((MOSAIC_WIDTH + WIDEST_COLUMN) / 2);
+    expect(Math.min(...lefts)).toBeLessThanOrEqual(0);
+    expect(Math.max(...lefts) + 256).toBeGreaterThanOrEqual(paintedWidth);
   });
 
   it("reserves the pin's own width in the fit, even when that costs a zoom level", () => {
