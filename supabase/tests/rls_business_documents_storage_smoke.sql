@@ -129,6 +129,23 @@ select
     (select id::text from ins where name like current_setting('test.biz2') || '/%'), true);
 
 -- ---------------------------------------------------------------- bucket row
+--
+-- READ BEFORE TRUSTING ASSERTIONS 2, 4 AND 5 AS COVERAGE. `public`,
+-- `file_size_limit` and `allowed_mime_types` are enforced by the STORAGE API,
+-- never by Postgres. Nothing in the database refuses an oversized or wrongly
+-- typed object, and a `set local role authenticated` session can insert a
+-- storage.objects row that violates all three - because the API is what reads
+-- these columns, and pgTAP is not going through the API.
+--
+-- So these three are CATALOG assertions and cannot be anything else: they prove
+-- the migration wrote the settings it claims, and they prove nothing about
+-- behaviour. Widening any of them is caught here and is caught NOWHERE
+-- behaviourally, which is exactly why they are worth stating. The byte-level
+-- enforcement that does exist lives in the upload action's magic-byte sniff
+-- (src/features/businesses/onboarding/server/document-format.ts), and the size
+-- cap is additionally enforced by the column's own
+-- business_documents_size_bytes_check, which assertion 3 ties this bucket to.
+--
 -- 1. the bucket 0079 creates exists at all. Before this migration it did not,
 --    despite four documents and 0002's own column comment naming it.
 select is(
@@ -266,11 +283,7 @@ select is(
 -- ------------------------------------------------- is_active_staff grant matrix
 -- 14/15/16. Every policy above delegates to private.is_active_staff, so its
 --           grants are part of this fence and are pinned per role rather than
---           as one "has some assertion" check. service_role is asserted
---           INDEPENDENTLY because Supabase grants EXECUTE via project-level
---           default privileges at CREATE time, entirely regardless of what any
---           migration revokes - a function can carry perfect anon/authenticated
---           assertions and still be reachable by the service role.
+--           as one "has some assertion" check.
 select ok(
   not has_function_privilege('anon', 'private.is_active_staff(uuid, text[])', 'execute'),
   'anon cannot execute private.is_active_staff');
@@ -279,9 +292,37 @@ select ok(
   has_function_privilege('authenticated', 'private.is_active_staff(uuid, text[])', 'execute'),
   'authenticated CAN execute private.is_active_staff (the policies need it)');
 
+-- 16. service_role does NOT hold execute on this one, and the assertion says so
+--     rather than asserting the habit. READ THIS BEFORE "FIXING" IT EITHER WAY.
+--
+--     The rule this project has carried since 0052 - that Supabase grants
+--     EXECUTE to service_role via project-level DEFAULT PRIVILEGES at CREATE
+--     time, regardless of what a migration revokes - is about the PUBLIC schema.
+--     These three helpers live in `private`, where there is no such default and
+--     every grant is authored. Verified live 2026-08-17:
+--
+--       private.is_active_staff  secdef=t  {postgres=X, authenticated=X}
+--       private.is_staff_of      secdef=f  {postgres=X, authenticated=X, service_role=X}
+--       private.jwt_biz_role     secdef=f  {postgres=X, authenticated=X, service_role=X}
+--
+--     The divergence is not a Supabase behaviour at all, it is two migrations
+--     written six files apart:
+--       0001_foundations.sql:118-119  grant execute ... to authenticated, service_role;
+--       0010_catalog_table_staff_policies.sql:31-32
+--                                     revoke ... from public, anon;
+--                                     grant execute ... to authenticated;
+--     0010 never named service_role, and nothing since has.
+--
+--     It has NO practical effect: service_role is BYPASSRLS, so it never
+--     evaluates the policies that call this function and never needs to call it.
+--     The grant is therefore left exactly as it is - 0079 neither creates nor
+--     touches this function, and widening a SECURITY DEFINER helper's audience
+--     to make a test pass would be the wrong direction entirely. What is pinned
+--     here is the deployed reality, so that a future migration handing
+--     service_role execute on it is a visible change rather than a silent one.
 select ok(
-  has_function_privilege('service_role', 'private.is_active_staff(uuid, text[])', 'execute'),
-  'service_role holds execute on private.is_active_staff (project default, asserted not assumed)');
+  not has_function_privilege('service_role', 'private.is_active_staff(uuid, text[])', 'execute'),
+  'service_role does NOT hold execute on private.is_active_staff (0010 granted only authenticated)');
 
 -- ------------------------------------------------- owner of tenant 1, NO biz claim
 -- The claim deliberately carries only `sub`. This is the wizard's real session:
@@ -381,14 +422,34 @@ select is(
 --     re-uploading writes a new object with a new uuid. Swapping bytes under a
 --     document an admin already approved is the one mutation this bucket must
 --     never allow, and unlike a delete it leaves no trace.
-select throws_ok(
-  format($$update storage.objects
-              set name = '%s/renamed.pdf'
-            where id = current_setting('test.obj1')::uuid$$,
-         current_setting('test.biz1')),
-  '42501',
-  null,
-  'an owner cannot UPDATE their own document object: there is no UPDATE policy');
+--
+--     ASSERTED ON THE ROW COUNT, NOT WITH throws_ok, and the distinction is the
+--     whole mechanism. With no applicable UPDATE policy, RLS FILTERS the row out
+--     of the statement's scope; it does not raise. 42501 arises only when a row
+--     passes USING and then fails WITH CHECK - there is no USING here to pass.
+--     An earlier version of this assertion expected 42501 and failed against a
+--     fence that was working perfectly. Verified live: the update affects zero
+--     rows, `name` is byte-identical afterwards, and the only UPDATE policy on
+--     storage.objects is avatars_objects_owner_update, gated on
+--     bucket_id = 'avatars'.
+--
+--     PAIRED WITH ASSERTION 23, which is what makes this mean something: 23
+--     proves this owner CAN see obj1, so zero rows here is the update being
+--     filtered rather than the row being absent or invisible. Assertion 27 then
+--     pins the absence of the policy structurally, which is the load-bearing
+--     half - a row count alone cannot tell "no UPDATE policy" from "an UPDATE
+--     policy that happens not to match".
+with upd as (
+  update storage.objects
+     set name = current_setting('test.biz1') || '/renamed.pdf'
+   where id = current_setting('test.obj1')::uuid
+  returning 1)
+select set_config('test.own_update_rows', (select count(*)::text from upd), true);
+
+select is(
+  current_setting('test.own_update_rows')::int,
+  0,
+  'an owner UPDATE of their own document object affects zero rows: no UPDATE policy exists');
 
 -- 27. and structurally, so the absence is a decision rather than an oversight
 select is(
