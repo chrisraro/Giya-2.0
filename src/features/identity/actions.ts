@@ -3,6 +3,11 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
+import {
+  toOpeningHoursEntries,
+  type WizardHoursInput,
+} from "@/features/businesses/onboarding/wizard-hours";
+import { updateBusinessOpeningHours } from "@/features/businesses/settings/server/repo";
 import { toErrorMessage } from "@/lib/auth/error-message";
 import { createClient } from "@/lib/supabase/server";
 
@@ -573,22 +578,57 @@ export async function signOut(): Promise<void> {
 }
 
 /**
- * Registers a new business for the signed-in owner via the
- * `register_business` RPC. The wizard's business type and city fields are
- * display names (e.g. "Cafe", "Cebu"); the RPC accepts a slug or display
- * name case-insensitively, so they are forwarded as-is.
+ * `hoursSaved` is a real part of the answer, not a detail. Registration and the
+ * opening-hours write are two statements against two different privilege paths
+ * (a SECURITY DEFINER RPC, then an RLS-scoped update), so "the business exists"
+ * and "the hours are stored" can genuinely disagree, and the caller is entitled
+ * to know which it got.
+ */
+export type RegisterBusinessResult =
+  | { ok: true; hoursSaved: boolean }
+  | { ok: false; message: string };
+
+/**
+ * Registers a new business for the signed-in owner via the `register_business`
+ * RPC, then stores the wizard's opening hours against the row it created.
+ *
+ * The wizard's business type and city fields are display names (e.g. "Cafe",
+ * "Cebu"); the RPC accepts a slug or display name case-insensitively, so they
+ * are forwarded as-is.
+ *
+ * WHY THE HOURS ARE A SECOND STATEMENT. `register_business` takes four
+ * arguments and writes `businesses` + `business_staff` inside a SECURITY
+ * DEFINER function with `search_path` pinned to ''. Widening its signature is a
+ * migration, and G1 has none to spend; the RPC already RETURNS the new
+ * business's uuid, and `businesses_staff_update` already lets the owner it just
+ * created update that row. So the hours go through the ordinary RLS-scoped
+ * update path, behind the same `assertEditableColumns` fence every other
+ * `businesses` write goes through.
+ *
+ * VALIDATION HAPPENS FIRST, BEFORE THE RPC. `private.register_business` inserts
+ * unconditionally - it is not idempotent, and a second call creates a second
+ * business with a second owner row. Validating the times afterwards would leave
+ * a real business behind every rejected attempt.
+ *
+ * A FAILED HOURS WRITE DOES NOT FAIL THE REGISTRATION, for the same
+ * non-idempotency reason: the business exists by then, and answering ok:false
+ * would invite the merchant to press the button again and end up with two
+ * shops. It comes back as `hoursSaved: false` with the Postgres detail logged -
+ * reported rather than swallowed - and Settings is where the merchant fixes it.
  */
 export async function registerBusiness({
   name,
   type,
   city,
   address,
+  hours,
 }: {
   name: string;
   type: string;
   city: string;
   address: string;
-}): Promise<ActionResult> {
+  hours: WizardHoursInput;
+}): Promise<RegisterBusinessResult> {
   const supabase = await createClient();
 
   const {
@@ -599,7 +639,12 @@ export async function registerBusiness({
     return NOT_SIGNED_IN;
   }
 
-  const { error } = await supabase.rpc("register_business", {
+  const expanded = toOpeningHoursEntries(hours);
+  if (!expanded.ok) {
+    return { ok: false, message: expanded.message };
+  }
+
+  const { data: businessId, error } = await supabase.rpc("register_business", {
     p_name: name,
     p_type: type,
     p_city: city,
@@ -610,5 +655,20 @@ export async function registerBusiness({
     return { ok: false, message: error.message };
   }
 
-  return { ok: true };
+  if (!businessId) {
+    // The RPC's contract is to return the new id, so this is a shape nobody
+    // expects. It is logged and reported rather than papered over: an update
+    // aimed at a null id is the one statement never to guess at.
+    console.error("[identity] register_business returned no business id");
+    return { ok: true, hoursSaved: false };
+  }
+
+  const { error: hoursError } = await updateBusinessOpeningHours(businessId, expanded.entries);
+
+  if (hoursError) {
+    console.error("[identity] opening_hours write failed after registration", hoursError);
+    return { ok: true, hoursSaved: false };
+  }
+
+  return { ok: true, hoursSaved: true };
 }

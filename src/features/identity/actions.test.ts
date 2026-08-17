@@ -26,6 +26,15 @@ const mocks = vi.hoisted(() => ({
   registerDevice: vi.fn(),
   deleteDevice: vi.fn(),
   signOutFn: vi.fn(),
+  updateBusinessOpeningHours: vi.fn(),
+}));
+
+// The `businesses` write fence (assertEditableColumns) and the SQL behind it
+// are covered in features/businesses/settings/settings.test.ts. Here it is a
+// seam, so what gets asserted is which business id and which seven rows
+// registration hands it.
+vi.mock("@/features/businesses/settings/server/repo", () => ({
+  updateBusinessOpeningHours: mocks.updateBusinessOpeningHours,
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -152,7 +161,10 @@ beforeEach(() => {
   mocks.canonicalizeAvatarImage.mockResolvedValue(CANONICAL_BYTES);
   mocks.sniffImageFormat.mockReturnValue("jpeg");
 
-  mocks.rpc.mockResolvedValue({ data: "business-1", error: null });
+  // `register_business` RETURNS the new business's uuid, which is how the
+  // hours write below knows which row to aim at.
+  mocks.rpc.mockResolvedValue({ data: BIZ_ID, error: null });
+  mocks.updateBusinessOpeningHours.mockResolvedValue({ data: null, error: null });
 
   mocks.registerDevice.mockResolvedValue(undefined);
   mocks.deleteDevice.mockResolvedValue({ ok: true, wasCurrent: false });
@@ -226,18 +238,42 @@ describe("completeConsumerOnboarding", () => {
   });
 });
 
+// ===========================================================================
+// G1 section 2: registration persists the wizard's HOURS.
+//
+// It did not. The wizard collected four times and the page carried
+// `TODO(api): wire hours + documents once the schema supports them` over a
+// column - `businesses.opening_hours` - that has existed since 0002. The only
+// thing that reached the database was the register_business RPC's four args,
+// so a merchant filled in their opening hours, saw them accepted, and had them
+// discarded on the way to the dashboard.
+// ===========================================================================
+
+const BIZ_ID = "9d1f0a4e-3b2c-4d5e-8f60-112233445566";
+
+const WIZARD_INPUT = {
+  name: "Kape Diaria",
+  type: "Cafe",
+  city: "Cebu",
+  address: "123 Mango Ave",
+  // Deliberately NOT the wizard's own prefill (09:00-18:00 / 09:00-15:00): an
+  // assertion built on the default cannot tell "we stored what the merchant
+  // typed" from "we stored the placeholder".
+  hours: {
+    weekdayOpen: "07:30",
+    weekdayClose: "19:45",
+    weekendOpen: "10:00",
+    weekendClose: "14:15",
+  },
+};
+
 describe("registerBusiness", () => {
   it("calls the register_business rpc with the mapped args", async () => {
     mockAuthed();
 
-    const result = await registerBusiness({
-      name: "Kape Diaria",
-      type: "Cafe",
-      city: "Cebu",
-      address: "123 Mango Ave",
-    });
+    const result = await registerBusiness(WIZARD_INPUT);
 
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, hoursSaved: true });
     expect(mocks.rpc).toHaveBeenCalledWith("register_business", {
       p_name: "Kape Diaria",
       p_type: "Cafe",
@@ -249,12 +285,7 @@ describe("registerBusiness", () => {
   it("returns ok:false without calling the rpc when unauthenticated", async () => {
     mockUnauthenticated();
 
-    const result = await registerBusiness({
-      name: "Kape Diaria",
-      type: "Cafe",
-      city: "Cebu",
-      address: "123 Mango Ave",
-    });
+    const result = await registerBusiness(WIZARD_INPUT);
 
     expect(result.ok).toBe(false);
     expect(mocks.rpc).not.toHaveBeenCalled();
@@ -264,14 +295,74 @@ describe("registerBusiness", () => {
     mockAuthed();
     mocks.rpc.mockResolvedValue({ data: null, error: { message: "duplicate business" } });
 
-    const result = await registerBusiness({
-      name: "Kape Diaria",
-      type: "Cafe",
-      city: "Cebu",
-      address: "123 Mango Ave",
-    });
+    const result = await registerBusiness(WIZARD_INPUT);
 
     expect(result).toEqual({ ok: false, message: "duplicate business" });
+  });
+
+  // --------------------------------------------------------- the hours write
+
+  it("CRITICAL: writes the wizard's hours as seven rows against the id the rpc returned", async () => {
+    mockAuthed();
+
+    await registerBusiness(WIZARD_INPUT);
+
+    expect(mocks.updateBusinessOpeningHours).toHaveBeenCalledWith(BIZ_ID, [
+      { day: 1, open: "07:30", close: "19:45", closed: false },
+      { day: 2, open: "07:30", close: "19:45", closed: false },
+      { day: 3, open: "07:30", close: "19:45", closed: false },
+      { day: 4, open: "07:30", close: "19:45", closed: false },
+      { day: 5, open: "07:30", close: "19:45", closed: false },
+      { day: 6, open: "10:00", close: "14:15", closed: false },
+      { day: 7, open: "10:00", close: "14:15", closed: false },
+    ]);
+  });
+
+  it("CRITICAL: refuses a malformed time BEFORE creating anything", async () => {
+    mockAuthed();
+
+    const result = await registerBusiness({
+      ...WIZARD_INPUT,
+      hours: { ...WIZARD_INPUT.hours, weekdayOpen: "" },
+    });
+
+    expect(result.ok).toBe(false);
+    // Order is the whole point. `private.register_business` inserts
+    // unconditionally, so validating after the RPC would leave a real business
+    // behind every rejected attempt.
+    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.updateBusinessOpeningHours).not.toHaveBeenCalled();
+  });
+
+  it("reports hoursSaved:false rather than failing the whole registration", async () => {
+    // The business EXISTS at this point and `register_business` is not
+    // idempotent - a second call inserts a second business and a second owner
+    // row. Answering ok:false here would invite the merchant to press the
+    // button again and end up with two shops. Losing prefilled hours that
+    // Settings can fix is the smaller harm, and it is reported rather than
+    // swallowed.
+    mockAuthed();
+    mocks.updateBusinessOpeningHours.mockResolvedValue({
+      data: null,
+      error: { message: "permission denied for table businesses" },
+    });
+
+    const result = await registerBusiness(WIZARD_INPUT);
+
+    expect(result).toEqual({ ok: true, hoursSaved: false });
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not attempt an hours write when the rpc returned no id", async () => {
+    mockAuthed();
+    mocks.rpc.mockResolvedValue({ data: null, error: null });
+
+    const result = await registerBusiness(WIZARD_INPUT);
+
+    // No id means no row to aim at. Writing `.eq("id", null)` would be an
+    // unfiltered-looking update, which is the one shape never to guess at.
+    expect(mocks.updateBusinessOpeningHours).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: true, hoursSaved: false });
   });
 });
 

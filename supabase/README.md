@@ -162,6 +162,14 @@ simulate end users. Via MCP, the file body can be run with `execute_sql`
 Buckets are created from migrations, not the dashboard, so the bucket settings
 and their `storage.objects` policies live in the same reviewable file.
 
+**Exactly two buckets exist live: `receipts` and `avatars`.** The docs name
+several others (doc 11 lists `business-documents`, `invoice-templates`, `menus`,
+`products`, `promotions`, `rewards`, `announcements`, `temp`, `exports`) and
+`0002_identity.sql` writes `business-documents/{business_id}/{uuid}.pdf` into a
+column comment. None of those has a migration and none of them is deployed. See
+"The `business-documents` BUCKET does not exist" near the migration ledger
+before writing any upload path against a bucket named only in a doc.
+
 ### `receipts` (0019_receipts_storage.sql)
 
 | property | value |
@@ -1395,6 +1403,119 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0076_purge_business_rpc.sql | **NO ROW — NOT APPLIED** (`purge_business_data` absent) | (unrecorded) |
 | 0077_force_delete_business.sql | **NO ROW — function IS live** | (unrecorded) |
 | 0078_loyalty_card_progression.sql | **NOT YET APPLIED — written by T4.5, applied by the coordinator** | (unrecorded) |
+
+### ⚠️ `0067_business_documents.sql` is a DEAD FILE, verified live 2026-08-17
+
+**Nothing in `0067_business_documents.sql` ever reached the database.** Its
+first statement is `create table if not exists public.business_documents`, and
+that table already existed — `0002_identity.sql:333` creates it. The `if not
+exists` made the create a silent no-op, and unlike the `loyalty_cards` case
+(0066/0078) the file carries no `alter table ... add column` lines either, so
+not one of its columns, checks or defaults landed.
+
+This is the second `create table if not exists` over an existing table on this
+project. Read that sentence as a convention: **`if not exists` on a `create
+table` is banned in new migrations here.** It converts "this migration
+conflicts with history" — a loud, fixable failure — into "this migration did
+nothing", which surfaces months later as code written against columns that do
+not exist.
+
+The divergence table below lists `business_documents` under "Verified live".
+**That row is true and misleading.** The TABLE is live because 0002 created it.
+It does not mean 0067 was applied. A `to_regclass` check cannot tell a table
+created by the file you are holding from a table of the same name created six
+years of migrations earlier, so for a `create ... if not exists` file the
+column list is the only honest probe.
+
+What is actually deployed (0002's schema) against what 0067 claims:
+
+| live (0002) | 0067 claims |
+|---|---|
+| `storage_path`, `file_name`, `mime_type`, `size_bytes` | `file_path` |
+| `verification_id`, `expires_on`, `deleted_at`, `created_by`, `updated_by` | — |
+| — | `status`, `revision_note` |
+| `doc_type in (business_permit, mayors_permit, tin, dti, sec, sample_receipt, other)` | `doc_type in (dti_permit, mayor_permit, bir_2303, other)` |
+
+Code written against 0067 fails twice: `file_path` does not exist, and
+`dti_permit` violates the live `business_documents_doc_type_check`. **Write
+against 0002.** Consolidating the two files is its own task with its own risks;
+this is a record, not a fix.
+
+The RLS/grant half of 0067 DID land, because those statements are not guarded:
+`authenticated` holds `INSERT, SELECT, UPDATE`, and `business_docs_staff_insert`
+plus two overlapping staff select policies (`business_docs_staff_select` via
+`is_staff_of`, 0067's; `business_documents_staff_select` via `is_active_staff`,
+0002's as amended by 0011) are live. An owner or manager can insert directly —
+no SECURITY DEFINER RPC is needed.
+
+### ⚠️ `is_staff_of` reads CLAIMS; `is_active_staff` reads the TABLE
+
+These two are not synonyms and the difference has already decided one design.
+Verified live 2026-08-17:
+
+```sql
+private.is_staff_of(bid, min_roles)   -- STABLE, *not* security definer
+  -> private.jwt_biz_role(bid)
+  -> auth.jwt()->'app_metadata'->'biz'->>bid::text
+     (falls back to a business_staff read ONLY when app_metadata.biz_overflow
+      is true, and that read is un-elevated, so business_staff's own RLS applies)
+
+private.is_active_staff(bid, roles)   -- STABLE SECURITY DEFINER, search_path=''
+  -> exists(select 1 from public.business_staff
+             where business_id = bid and user_id = auth.uid()
+               and status = 'active' and role = any(roles))
+```
+
+Doc 12's "claims are hints, tables are truth" is exactly this. It bites hardest
+right after registration: `register_business` writes the `businesses` row **and**
+the `business_staff` owner row, but the caller's access token was minted at
+sign-up, **before** that row existed, so it carries no `biz` claim for the
+business they just created. Anything gated on `is_staff_of` refuses them until
+the token is refreshed and the custom access token hook has stamped the claim.
+
+`0079_business_documents_storage.sql` therefore fences the **storage objects** on
+`is_active_staff`, matching `src/app/(business)/business/(portal)/layout.tsx`,
+which resolves membership from `business_staff` for the same stated reason.
+
+**Owed follow-up:** `business_docs_staff_insert` on the TABLE (from 0067, one of
+the statements of that file that *did* land, since it is unguarded) still uses
+`is_staff_of`. So the object write and the row write have different admission
+rules for the same upload. The upload path works around it by refreshing the
+session before it writes anything, and its orphan rule (object first, row
+second, object removed if the row fails) makes a claims-lag failure safe rather
+than corrupting. Aligning that policy onto `is_active_staff` would remove the
+dependency entirely and is a one-policy migration; it was deliberately not done
+from underneath a task scoped to the storage bucket.
+
+### ⚠️ The `business-documents` BUCKET does not exist, verified live 2026-08-17
+
+`0002_identity.sql:332` says "Bucket: business-documents", doc 11 lists it, doc
+15 assigns it a signed-URL policy and doc 41 puts it on the never-cache list.
+**No migration has ever created it, and it is not there.**
+
+```
+select id from storage.buckets;   -- avatars, receipts. That is all.
+select count(*) from storage.objects where bucket_id = 'business-documents';  -- 0
+select count(*) from public.business_documents;                               -- 0
+```
+
+There are no `storage.objects` policies for it either — the only ones live are
+the four `avatars_objects_owner_*` and the two `receipts_objects_consumer_*`.
+`0019_receipts_storage.sql` created `receipts` and `0064_avatars_storage.sql`
+created `avatars`; nothing did the same for this one.
+
+**RESOLVED by `0079_business_documents_storage.sql`** (written, not yet applied
+at the time of writing — see the ledger note for its status). 0079 creates the
+private bucket with `file_size_limit` set to agree with
+`business_documents_size_bytes_check` rather than to a second opinion, a
+PDF/JPEG/PNG allowlist, and three `storage.objects` policies (insert, select,
+delete — deliberately no UPDATE) scoped to owner/manager of the tenant named by
+the `{business_id}/` path prefix, via `private.is_active_staff`. Its pgTAP suite
+is `supabase/tests/rls_business_documents_storage_smoke.sql`, 35 assertions.
+
+Until it is applied, `select id from storage.buckets` still returns only
+`avatars` and `receipts`, and any upload path is writing into a bucket that is
+not there.
 
 ### ⚠️ Ledger divergence, verified live 2026-08-16
 

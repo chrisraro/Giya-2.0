@@ -198,6 +198,60 @@ describe("the settings form cannot submit status, verified_at or plan", () => {
     expect([...repo.FORBIDDEN_BUSINESS_COLUMNS]).toContain("google_place_id");
   });
 
+  // The registration wizard added a SECOND writer of `businesses`
+  // (updateBusinessOpeningHours, called from features/identity/actions.ts). The
+  // fence is a promise about every write path, not about this screen, so the
+  // new one is held to it here.
+  describe("updateBusinessOpeningHours - registration's narrow write", () => {
+    it("writes opening_hours against the given business and nothing else", async () => {
+      const entries = [{ day: 1, open: "07:30", close: "19:45", closed: false }];
+
+      await repo.updateBusinessOpeningHours(OWN_BUSINESS, entries);
+
+      expect(table("businesses").update).toHaveBeenCalledWith({ opening_hours: entries });
+      expect(table("businesses").eq).toHaveBeenCalledWith("id", OWN_BUSINESS);
+    });
+
+    it("CRITICAL: the patch it builds names only an allowlisted column", () => {
+      // Asserted against the fence itself rather than by inspecting the call,
+      // so it stays true if the function is ever refactored to assemble its
+      // patch somewhere else.
+      expect(() => repo.assertEditableColumns({ opening_hours: [] })).not.toThrow();
+      expect([...repo.EDITABLE_BUSINESS_COLUMNS]).toContain("opening_hours");
+    });
+
+    it("CRITICAL: does not touch the columns register_business just set", async () => {
+      await repo.updateBusinessOpeningHours(OWN_BUSINESS, [
+        { day: 1, open: "07:30", close: "19:45", closed: false },
+      ]);
+
+      // The reason this is not `updateBusinessProfile` with a mostly-null
+      // patch: that patch carries `name`, `description`, `address_line`,
+      // `lat`, `lng` and the rest, so registration would write null over the
+      // name and address the RPC had filled in seconds earlier.
+      const profileOnlyColumns = [
+        "name",
+        "description",
+        "phone",
+        "email",
+        "website",
+        "socials",
+        "address_line",
+        "barangay",
+        "postal_code",
+        "lat",
+        "lng",
+      ];
+      const patch = (table("businesses").update as ReturnType<typeof vi.fn>).mock
+        .calls[0]?.[0] as Record<string, unknown>;
+
+      expect(patch).toBeDefined();
+      for (const column of profileOnlyColumns) {
+        expect(patch).not.toHaveProperty(column);
+      }
+    });
+  });
+
   it("the built patch never names a column outside the allowlist", () => {
     const parsed = businessProfileSchema.parse(VALID_INPUT);
     const patch = service.buildProfilePatch(parsed);

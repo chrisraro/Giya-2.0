@@ -9,6 +9,14 @@ import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/brand/logo";
 import { cn } from "@/lib/utils";
 import { registerBusiness } from "@/features/identity/actions";
+import { uploadVerificationDocument } from "@/features/businesses/onboarding/actions";
+import {
+  BUSINESS_DOCUMENT_MAX_BYTES,
+  BUSINESS_DOCUMENT_MIME_TYPES,
+  BUSINESS_DOCUMENT_TYPES,
+  BUSINESS_DOCUMENT_TYPE_LABELS,
+  type BusinessDocumentType,
+} from "@/features/businesses/onboarding/documents";
 import { createClient } from "@/lib/supabase/client";
 
 const STEP_LABELS = ["Basics", "Location & hours", "Verification"];
@@ -20,6 +28,9 @@ const REQUIRED_DOCS = [
   "DTI or SEC registration",
   "Valid government ID",
 ];
+
+/** For the copy only. The real cap is enforced by the action and by 0079's bucket. */
+const DOCUMENT_MAX_MB = Math.floor(BUSINESS_DOCUMENT_MAX_BYTES / (1024 * 1024));
 
 // Shared visual treatment for the native <select> and <input type="time">
 // controls below. They cannot reuse <TextField> directly (its props type is
@@ -240,15 +251,30 @@ function LocationHoursStep({
   );
 }
 
+/**
+ * One picked document plus the kind the merchant says it is.
+ *
+ * The kind is collected here rather than defaulted server-side because
+ * `business_documents.doc_type` is what an admin reviewer sorts a verification
+ * round by (doc 32 section 56: the required set depends on the registration
+ * type). A pile of rows all reading `other` is a queue nobody can work.
+ */
+type PickedDocument = {
+  file: File;
+  docType: BusinessDocumentType;
+};
+
 function VerificationStep({
-  files,
+  documents,
   onPickFiles,
   onRemoveFile,
+  onDocTypeChange,
   fileInputRef,
 }: {
-  files: File[];
+  documents: PickedDocument[];
   onPickFiles: (fileList: FileList | null) => void;
   onRemoveFile: (index: number) => void;
+  onDocTypeChange: (index: number, docType: BusinessDocumentType) => void;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
 }) {
   return (
@@ -277,7 +303,9 @@ function VerificationStep({
             <span className="material-symbols-rounded text-[24px]">upload_file</span>
           </span>
           <span className="text-label-l text-on-surface">Drag files or tap to choose</span>
-          <span className="text-body-s text-on-surface-variant">PDF, JPG, or PNG</span>
+          <span className="text-body-s text-on-surface-variant">
+            PDF, JPG, or PNG, up to {DOCUMENT_MAX_MB}MB each
+          </span>
         </button>
         <input
           ref={fileInputRef}
@@ -286,39 +314,64 @@ function VerificationStep({
           tabIndex={-1}
           aria-hidden="true"
           className="hidden"
+          // The same three types 0079's bucket allows. A hint to the file
+          // picker, never a check: the action magic-byte sniffs, because this
+          // attribute is trivially bypassed and describes a filename anyway.
+          accept={BUSINESS_DOCUMENT_MIME_TYPES.join(",")}
           onChange={(event) => onPickFiles(event.target.files)}
         />
 
-        {files.length > 0 ? (
+        {documents.length > 0 ? (
           <ul className="flex flex-col gap-2">
-            {files.map((file, index) => (
+            {documents.map((document, index) => (
               <li
-                key={`${file.name}-${index}`}
-                className="flex items-center justify-between gap-3 rounded-md3-sm border border-outline-variant bg-surface px-4 py-3"
+                key={`${document.file.name}-${index}`}
+                className="flex flex-col gap-3 rounded-md3-sm border border-outline-variant bg-surface px-4 py-3"
               >
-                <span className="flex min-w-0 items-center gap-2 text-body-m text-on-surface">
-                  <span
-                    aria-hidden
-                    className="material-symbols-rounded shrink-0 text-[18px] text-on-surface-variant"
+                <div className="flex items-center justify-between gap-3">
+                  <span className="flex min-w-0 items-center gap-2 text-body-m text-on-surface">
+                    <span
+                      aria-hidden
+                      className="material-symbols-rounded shrink-0 text-[18px] text-on-surface-variant"
+                    >
+                      description
+                    </span>
+                    <span className="truncate">{document.file.name}</span>
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${document.file.name}`}
+                    onClick={() => onRemoveFile(index)}
+                    className={cn(
+                      "flex size-8 shrink-0 items-center justify-center rounded-full text-on-surface-variant",
+                      "outline-none transition-colors duration-200 ease-standard hover:bg-surface-container-high",
+                      "focus-visible:ring-2 focus-visible:ring-secondary",
+                    )}
                   >
-                    description
-                  </span>
-                  <span className="truncate">{file.name}</span>
-                </span>
-                <button
-                  type="button"
-                  aria-label={`Remove ${file.name}`}
-                  onClick={() => onRemoveFile(index)}
-                  className={cn(
-                    "flex size-8 shrink-0 items-center justify-center rounded-full text-on-surface-variant",
-                    "outline-none transition-colors duration-200 ease-standard hover:bg-surface-container-high",
-                    "focus-visible:ring-2 focus-visible:ring-secondary",
-                  )}
-                >
-                  <span aria-hidden className="material-symbols-rounded text-[18px]">
-                    close
-                  </span>
-                </button>
+                    <span aria-hidden className="material-symbols-rounded text-[18px]">
+                      close
+                    </span>
+                  </button>
+                </div>
+                <div className="flex flex-col gap-2">
+                  <FieldLabel htmlFor={`doc-type-${index}`}>
+                    What kind of document is this?
+                  </FieldLabel>
+                  <select
+                    id={`doc-type-${index}`}
+                    value={document.docType}
+                    onChange={(event) =>
+                      onDocTypeChange(index, event.target.value as BusinessDocumentType)
+                    }
+                    className={fieldControlClass}
+                  >
+                    {BUSINESS_DOCUMENT_TYPES.map((docType) => (
+                      <option key={docType} value={docType}>
+                        {BUSINESS_DOCUMENT_TYPE_LABELS[docType]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </li>
             ))}
           </ul>
@@ -367,12 +420,12 @@ export default function BusinessOnboardingPage() {
     weekendClose: "15:00",
   });
 
-  // Step 3: verification
-  const [files, setFiles] = React.useState<File[]>([]);
-
-  // Hours and documents remain client-only for now; there is no server
-  // column for them yet.
-  // TODO(api): wire hours + documents once the schema supports them
+  // Step 3: verification. Both TODOs that used to sit here are gone: hours
+  // reach `businesses.opening_hours` and documents reach the private
+  // `business-documents` bucket that 0079 finally created (it had been named by
+  // 0002's column comment and four docs, and deployed nowhere, which is why
+  // this step was a mock for so long).
+  const [documents, setDocuments] = React.useState<PickedDocument[]>([]);
 
   const [error, setError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
@@ -383,12 +436,25 @@ export default function BusinessOnboardingPage() {
 
   function handlePickFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
-    // TODO(api): replace mock (no real upload; client-side list only)
-    setFiles((prev) => [...prev, ...Array.from(fileList)]);
+    setDocuments((prev) => [
+      ...prev,
+      // `other` is a real value in `business_documents_doc_type_check`, not a
+      // placeholder, and it is the honest default: the merchant has told us
+      // nothing about this file yet. The picker beside each row is where they
+      // say, and guessing `mayors_permit` for them would put a claim in the
+      // admin queue that nobody made.
+      ...Array.from(fileList).map((file) => ({ file, docType: "other" as BusinessDocumentType })),
+    ]);
   }
 
   function handleRemoveFile(index: number) {
-    setFiles((prev) => prev.filter((_, i) => i !== index));
+    setDocuments((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function handleDocTypeChange(index: number, docType: BusinessDocumentType) {
+    setDocuments((prev) =>
+      prev.map((document, i) => (i === index ? { ...document, docType } : document)),
+    );
   }
 
   const step1Complete = name.trim() !== "" && businessType !== "" && city.trim() !== "";
@@ -402,19 +468,67 @@ export default function BusinessOnboardingPage() {
     if (submitting) return;
     setError(null);
     setSubmitting(true);
-    const result = await registerBusiness({ name, type: businessType, city, address });
+    const result = await registerBusiness({
+      name,
+      type: businessType,
+      city,
+      address,
+      // The four times from step 2, expanded to the seven rows
+      // `businesses.opening_hours` stores by the action's own
+      // `toOpeningHoursEntries`. They used to stop here.
+      hours,
+    });
     if (!result.ok) {
       setSubmitting(false);
       setError(result.message);
       return;
     }
-    // Refresh the session before navigating so the client picks up a fresh
-    // token once the custom access token hook is enabled and stamps `biz`
-    // claims for the business just registered; the token issued at
-    // sign-up/sign-in predates this business_staff row and won't carry it.
+    if (!result.hoursSaved) {
+      // The business exists, so the merchant goes on to the dashboard either
+      // way. Saying so beats a silent drop, and Settings is one screen away.
+      console.error("[onboarding] the business was created but its hours were not saved");
+    }
+    // Refresh the session BEFORE uploading, not merely before navigating.
+    //
+    // The token issued at sign-up/sign-in predates the `business_staff` row
+    // `register_business` just wrote, so it carries no `biz` claim for this
+    // business. 0079's storage policies read table truth
+    // (`private.is_active_staff`) and do not care, but 0067's row policy on
+    // `business_documents` uses the claims-based `private.is_staff_of`, so the
+    // ROW write does. This line is what makes the two agree; it used to sit
+    // after everything, purely as a courtesy before navigation.
     const supabase = createClient();
     await supabase.auth.refreshSession();
-    router.push("/business/pending-approval");
+
+    // Documents are uploaded one at a time and sequentially, not with
+    // Promise.all: each is a multipart body of up to 20MB, and firing five at
+    // once at a merchant on Philippine mobile data is how a wizard appears to
+    // hang. A failure does NOT stop the others or block the dashboard - the
+    // business exists by now, `register_business` is not idempotent, and
+    // Settings is where a missing document gets re-added.
+    const failedDocuments: string[] = [];
+    for (const document of documents) {
+      const payload = new FormData();
+      payload.set("document", document.file);
+      payload.set("docType", document.docType);
+      // No businessId: the action resolves the tenant from the caller's own
+      // membership, so this form cannot name somebody else's.
+      const uploaded = await uploadVerificationDocument(payload);
+      if (!uploaded.ok) failedDocuments.push(document.file.name);
+    }
+
+    if (failedDocuments.length > 0) {
+      console.error("[onboarding] documents that did not upload", failedDocuments);
+    }
+    // Into the portal, which is what the button has always said. This used to
+    // push to /business/pending-approval - a waiting room offering a "check
+    // status" button and no way to do anything - and that was the real lockout
+    // for an unapproved merchant. The portal layout's own approval guard could
+    // never fire (see its comment), so this line was the only thing actually
+    // keeping a brand new `draft` business out of the product it just signed up
+    // for. A business builds its profile, menu, promos and rewards WHILE it
+    // waits for review; only its public storefront waits on approval.
+    router.push("/business/dashboard");
   }
 
   function goNext() {
@@ -462,9 +576,10 @@ export default function BusinessOnboardingPage() {
         )}
         {step === 2 && (
           <VerificationStep
-            files={files}
+            documents={documents}
             onPickFiles={handlePickFiles}
             onRemoveFile={handleRemoveFile}
+            onDocTypeChange={handleDocTypeChange}
             fileInputRef={fileInputRef}
           />
         )}

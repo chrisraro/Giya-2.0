@@ -127,6 +127,36 @@ export async function getBusinessProfile(businessId: string): Promise<Result<Bus
   return { data, error };
 }
 
+/**
+ * Writes ONLY `businesses.opening_hours`, for the registration wizard.
+ *
+ * A separate entry point rather than a call to `updateBusinessProfile` with a
+ * mostly-null patch: the wizard has collected a name, a type, a city, an
+ * address and two time pairs, and nothing else. Sending it through the full
+ * profile patch would write `description`, `phone`, `email`, `website`,
+ * `socials`, `barangay`, `postal_code`, `lat` and `lng` as null over columns
+ * `register_business` had just set or deliberately left alone - a save that
+ * clears fields nobody was editing.
+ *
+ * It goes through `assertEditableColumns` all the same. That fence is not about
+ * which screen is calling; it is the promise that no code path assembles a
+ * `businesses` update naming `status`, `verified_at` or `plan` while
+ * `businesses_staff_update` is still row-scoped and grants no column
+ * privileges. A second write path is exactly the thing that fence exists for.
+ */
+export async function updateBusinessOpeningHours(
+  businessId: string,
+  openingHours: Json,
+): Promise<Result<null>> {
+  const patch = { opening_hours: openingHours };
+  assertEditableColumns(patch);
+
+  const supabase = await createClient();
+  const { error } = await supabase.from("businesses").update(patch).eq("id", businessId);
+
+  return { data: null, error };
+}
+
 export async function updateBusinessProfile(
   businessId: string,
   patch: BusinessProfilePatch,

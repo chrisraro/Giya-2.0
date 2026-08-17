@@ -104,6 +104,117 @@ describe("business portal suspension gate (doc 30 section 2.8)", () => {
   });
 });
 
+// ===========================================================================
+// THE UNAPPROVED-PORTAL RULE (G1 section 3).
+//
+// A business that has not been approved yet has FULL portal access. That is a
+// product decision and not an accident: the portal is where a merchant builds
+// its profile, menu, promos and rewards WHILE it waits for review. Approval
+// controls the STOREFRONT, and that control is `status = 'active'` in
+// src/features/businesses/server/public-repo.ts - proven separately in
+// public-repo.test.ts, which is the suite that must stay green for this one to
+// be safe.
+//
+// THESE ASSERTIONS EXIST TO STOP A TIDY-UP. This layout used to carry
+//
+//   if (portal.business.status === "pending") redirect("/business/pending-approval");
+//
+// and "pending" is not a status this system has. `businesses_status_check`
+// allows exactly ('draft','pending_verification','active','suspended',
+// 'closed'), so the branch could never fire and the unapproved merchant got
+// into the portal by accident. The obvious "fix" - correcting the comparison to
+// `pending_verification`, or widening it to also catch `draft` - would lock
+// every unapproved merchant out of the product. It turns these tests red
+// instead.
+//
+// The status list below is written out as literals rather than imported from
+// the code under test: it is a transcription of the live check constraint, so
+// it can disagree with the application, which is the entire point of it.
+// ===========================================================================
+const LIVE_BUSINESS_STATUSES = [
+  "draft",
+  "pending_verification",
+  "active",
+  "suspended",
+  "closed",
+] as const;
+
+/** What `register_business` creates, and what "submit for review" moves it to. */
+const UNAPPROVED_STATUSES = ["draft", "pending_verification"] as const;
+
+describe("unapproved businesses keep full portal access (G1 section 3)", () => {
+  for (const status of UNAPPROVED_STATUSES) {
+    it(`CRITICAL: renders the portal for a ${status} business instead of redirecting it away`, async () => {
+      signedIn();
+      mocks.resolvePortalContext.mockResolvedValue(portalOf(status));
+
+      // Not `resolves.toBeDefined()` alone: a redirect throws, so this asserts
+      // the layout got all the way to a rendered tree for a merchant nobody
+      // has approved yet.
+      await expect(renderLayout()).resolves.toBeDefined();
+    });
+  }
+
+  it("CRITICAL: a closed business keeps portal access too, by decision not omission", async () => {
+    // `closed` is the merchant's own end state; `suspended` is a platform
+    // sanction. Only the second blocks the portal. The product already assumed
+    // this: activation/presenter.ts and go-live-card.tsx both render `closed`
+    // copy on PORTAL surfaces, which a redirect here would make unreachable -
+    // the same latent contradiction /business/pending-approval was in.
+    // Consumers are covered separately: `closed` fails the storefront's
+    // status='active' filter, asserted in storefront-visibility.test.ts.
+    signedIn();
+    mocks.resolvePortalContext.mockResolvedValue(portalOf("closed"));
+
+    await expect(renderLayout()).resolves.toBeDefined();
+  });
+
+  it("CRITICAL: suspended is the ONLY status that blocks the portal", async () => {
+    // The pairing assertion, over the whole live state machine. Each of the
+    // four non-suspended statuses is separately asserted above; this one says
+    // the blocking set has exactly one member, so adding a status to the gate
+    // fails here even if someone also updates that status's own test.
+    const blocked: string[] = [];
+    for (const status of LIVE_BUSINESS_STATUSES) {
+      vi.clearAllMocks();
+      mocks.resolveReviewerContext.mockResolvedValue(null);
+      mocks.countPendingReview.mockResolvedValue(null);
+      signedIn();
+      mocks.resolvePortalContext.mockResolvedValue(portalOf(status));
+
+      const redirected = await renderLayout().then(
+        () => false,
+        (error: unknown) => error instanceof RedirectError,
+      );
+      if (redirected) blocked.push(status);
+    }
+
+    expect(blocked).toEqual(["suspended"]);
+  });
+
+  it("CRITICAL: never redirects any live status to /business/pending-approval", async () => {
+    for (const status of LIVE_BUSINESS_STATUSES) {
+      vi.clearAllMocks();
+      mocks.resolveReviewerContext.mockResolvedValue(null);
+      mocks.countPendingReview.mockResolvedValue(null);
+      signedIn();
+      mocks.resolvePortalContext.mockResolvedValue(portalOf(status));
+
+      // `.catch` rather than a try/catch: `suspended` legitimately redirects,
+      // and what is asserted is the DESTINATION of whatever happened, not that
+      // nothing happened.
+      const outcome = await renderLayout().then(
+        () => null,
+        (error: unknown) => (error instanceof RedirectError ? error.to : null),
+      );
+
+      expect(outcome, `status ${status} redirected to the approval waiting room`).not.toBe(
+        "/business/pending-approval",
+      );
+    }
+  });
+});
+
 describe("business portal layout - unaffected existing behaviour", () => {
   it("sends an unauthenticated caller to /login", async () => {
     signedOut();
