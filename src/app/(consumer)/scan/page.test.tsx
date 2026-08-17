@@ -140,6 +140,26 @@ describe("/scan points estimate", () => {
     expect(screen.queryByLabelText("Receipt total in pesos")).not.toBeInTheDocument();
   });
 
+  // AUTHORIZATION FIRST, PRIVILEGED READ SECOND.
+  //
+  // `loadScanPreviewRule` runs under service_role and so is not fenced by RLS:
+  // it will happily return the base rule of a suspended, deactivated or
+  // soft-deleted business. `listActiveBusinesses` is the consumer's own
+  // RLS-scoped read and is the only thing here that answers "may this person
+  // see this shop at all".
+  //
+  // Firing both together and discarding the rule at render time makes "we never
+  // read a rule for a business the consumer cannot see" true by accident of the
+  // render guard rather than by construction, and it is one refactor away from
+  // being false. The read is now gated on the answer.
+  it("CRITICAL: never runs the privileged rule read for a business the consumer cannot see", async () => {
+    mocks.listActiveBusinesses.mockResolvedValue([]);
+
+    await renderScan({ business: BUSINESS_ID });
+
+    expect(mocks.loadScanPreviewRule).not.toHaveBeenCalled();
+  });
+
   it("reads no preview rule on the chooser path, where there is no shop yet", async () => {
     await renderScan();
 

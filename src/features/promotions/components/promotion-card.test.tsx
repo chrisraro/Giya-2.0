@@ -78,19 +78,32 @@ describe("PromotionCard redemption contract", () => {
     expect(contractText()).toBe(COUNTER_CONTRACT);
   });
 
-  it("states it for a discount-shaped offer too, which is counter-honored the same way", () => {
-    render(
-      <PromotionCard
-        promotion={promotion({
-          offerKind: "amount_off",
-          percentOff: null,
-          amountOffCentavos: 5000,
-        })}
-      />,
-    );
+  // EVERY offer family `getOfferBadgeText` can render, not just the two that
+  // happen to be percentage-shaped. `freebie` is as live as the others and is
+  // the one a "counter-honoured" claim is easiest to quietly drop from, because
+  // a free item feels less like a price cut than the other two and the suite
+  // stayed green without it.
+  it.each([
+    { family: "percent_off", overrides: { offerKind: "percent_off", percentOff: 20 } },
+    {
+      family: "amount_off",
+      overrides: { offerKind: "amount_off", percentOff: null, amountOffCentavos: 5000 },
+    },
+    {
+      family: "freebie",
+      overrides: { offerKind: "freebie", percentOff: null, freebieText: "a cup of taho" },
+    },
+    // Neither column set. getOfferBadgeText falls through to "PROMO", and the
+    // contract is no less true for an offer the merchant described only in prose.
+    { family: "unspecified", overrides: { offerKind: "promotion", percentOff: null } },
+  ])(
+    "CRITICAL: states it for a $family offer, which is counter-honored the same way",
+    ({ overrides }) => {
+      render(<PromotionCard promotion={promotion(overrides)} />);
 
-    expect(contractText()).toBe(COUNTER_CONTRACT);
-  });
+      expect(contractText()).toBe(COUNTER_CONTRACT);
+    },
+  );
 
   it("uses no em-dash, which this codebase bans in consumer copy", () => {
     render(<PromotionCard promotion={promotion()} />);

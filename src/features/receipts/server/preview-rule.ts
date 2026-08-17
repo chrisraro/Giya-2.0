@@ -15,15 +15,34 @@ import { createServiceRoleClient } from "@/lib/supabase/service";
 // different number, and the consumer has no way to know which one to believe.
 // So: preview under the real rule, or do not preview.
 //
-// WHY SERVICE ROLE. `points_rules` has exactly three policies, all from
-// 0012_campaigns.sql, and all three are staff-scoped
-// (`points_rules_staff_select/insert/update`). A signed-in consumer cannot read
-// this table at all, and giving them a policy that lets them would be a
-// migration, which this task is not allowed to make. The exposure is one
-// column of one row: the rate a shop already advertises to the customers
-// standing in it, and which the admin verification queue already renders via
-// `describeBaseRule`. No consumer-owned data crosses this client, and only the
-// derived rate reaches the browser.
+// WHAT IS DISCLOSED, AND WHY THAT IS ACCEPTABLE. The value that reaches the
+// browser is the earning rate of a publicly listed, active shop, shown to a
+// signed-in consumer who is standing in that shop with its receipt in hand. It
+// is counter signage: the number the merchant advertises to exactly this person
+// at exactly this moment. No consumer-owned data crosses this client, and no
+// other column of the row does either.
+//
+// WHY SERVICE ROLE, GIVEN THAT. `points_rules` has exactly three policies, all
+// from 0012_campaigns.sql, and all three are staff-scoped
+// (`points_rules_staff_select/insert/update`). No client role can read this
+// table, and there is no view or RPC over it anywhere in the codebase, so this
+// is service-role or no estimate.
+//
+// A `select` policy would be the WRONG fix, not merely one this task cannot
+// make. RLS cannot restrict columns, so a policy publishes the whole row:
+// `conditions` (the campaign targeting DSL) and `created_by` / `updated_by`,
+// both `uuid references auth.users(id)`. The right long-term shape is a
+// two-column view (`business_id`, `rate_centavos_per_point`, `rounding`) joined
+// to active businesses, and this module should be repointed onto the ordinary
+// client the day one exists.
+//
+// GATED ON AN AUTHORIZATION ANSWER THIS MODULE DOES NOT ITSELF HAVE. Service
+// role means RLS fences nothing here: this function will return the base rule
+// of a suspended, deactivated or soft-deleted business as readily as a live
+// one. Its only caller therefore resolves the consumer's own RLS-scoped
+// `listActiveBusinesses` FIRST and calls this only if that returned the shop -
+// see the sequencing comment in src/app/(consumer)/scan/page.tsx. Any new
+// caller owes the same check; this module cannot perform it for them.
 //
 // THROWS on a query error, per `src/features/rewards/server/repo.ts` and
 // `src/features/loyalty/server/repo.ts`. `null` means something specific and

@@ -195,8 +195,34 @@ create index points_rules_biz_idx on public.points_rules (business_id) where is_
 -- amendment: FK index per doc 20 convention (every FK indexed)
 create index points_rules_campaign_idx on public.points_rules (campaign_id);
 
--- No public select: earning math is tenant configuration, not a consumer
--- surface. Consumer-facing "how you earn" copy is served by the app layer.
+-- No public select: earning math is tenant configuration, and the whole ROW is
+-- tenant configuration - `conditions` (the campaign targeting DSL) and
+-- `created_by` / `updated_by` (both `uuid references auth.users(id)`) sit on it
+-- alongside the rate. RLS cannot restrict columns, so any select policy here
+-- publishes those too. That, not the rate itself, is why this table has no
+-- consumer policy and should not grow one.
+--
+-- AMENDED (T4.6): one consumer surface now derives from this table, and it does
+-- NOT go through a policy. `/scan` shows the signed-in consumer a
+-- "~N pts at <shop>" estimate for the shop they are standing in, which is only
+-- honest if it is computed under that shop's own base rule; the platform
+-- default of 1 point per peso would quote a shop earning 1 point per PHP50
+-- double what its receipts pay. Since no client role can read this table, the
+-- app performs a narrow service-role read instead - see
+-- src/features/receipts/server/preview-rule.ts, which selects exactly
+-- `rate_centavos_per_point` and `rounding` for one business's single active
+-- amount_rate base rule, and is gated on the caller's own RLS-scoped
+-- `listActiveBusinesses` having already returned that business (see
+-- src/app/(consumer)/scan/page.tsx, where the two reads are sequential for that
+-- reason). What reaches the browser is the earning rate of a publicly listed
+-- active shop: the number that shop advertises to the customers standing in it.
+--
+-- The right long-term shape is a two-column view over this table
+-- (`business_id`, `rate_centavos_per_point`, `rounding`) joined to active
+-- businesses, which discloses the rate without publishing `conditions` or the
+-- two `auth.users` references. Until that exists, the sentence this comment
+-- replaced ("Consumer-facing 'how you earn' copy is served by the app layer")
+-- was true of the copy and false of the numbers.
 -- P1: staff of the tenant read their rules in any state
 create policy points_rules_staff_select on public.points_rules
   for select to authenticated

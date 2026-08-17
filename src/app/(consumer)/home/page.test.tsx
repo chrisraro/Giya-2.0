@@ -144,7 +144,7 @@ describe("/home favourites rail", () => {
     );
   });
 
-  it("offers the full list, since the rail only shows the first few", async () => {
+  it("links to the full list at /favorites", async () => {
     mocks.listMyFavorites.mockResolvedValue([favorite]);
     await renderHome();
 
@@ -152,6 +152,29 @@ describe("/home favourites rail", () => {
       "href",
       "/favorites",
     );
+  });
+
+  // The cap is asserted as a LITERAL 8, not as HOME_FAVORITES_LIMIT.
+  //
+  // Importing the constant would make the expected value and the rendered value
+  // the same value: raise the constant to 20 and a ten-favourite fixture still
+  // agrees with itself. The literal is the second place that has to change, so
+  // moving the cap is a deliberate two-file edit rather than a one-line one.
+  it("CRITICAL: rails at most 8 saved shops however many the consumer has", async () => {
+    mocks.listMyFavorites.mockResolvedValue(
+      Array.from({ length: 10 }, (_unused, index) => ({
+        id: `fav-${index}`,
+        businessId: `biz-${index}`,
+        slug: `saved-shop-${index}`,
+        name: `Saved Shop ${index}`,
+        logoUrl: null,
+        cityName: null,
+        businessTypeName: null,
+      })),
+    );
+    await renderHome();
+
+    expect(screen.getAllByRole("link", { name: /Saved Shop \d+/ })).toHaveLength(8);
   });
 
   it("shows nothing at all when the consumer has saved none, rather than an empty shell", async () => {
