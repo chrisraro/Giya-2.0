@@ -20,6 +20,14 @@ import type { Json } from "@/lib/supabase/types";
 //   integration.disconnected  - the merchant disconnected it
 //   integration.revoked       - Meta's deauthorize webhook ended the grant
 //   integration.expired       - a token was found dead on read
+//   integration.published     - a campaign announcement was posted to the Page
+//
+// `integration.published` is the newest and the only one that records a WRITE
+// to a third party on the merchant's behalf. It earns its row for that reason
+// alone: `pages_manage_posts` is the strongest permission this app holds, and
+// "who posted to our Page, and when" is a question a merchant will eventually
+// ask. The row names the Page and Meta's post id, both of which are already
+// public in the post's own URL.
 //
 // ACTOR KIND. Owner/manager actions are 'user', not 'admin': 0022's
 // `audit_logs_admin_reason_required` makes a reason mandatory for 'admin'
@@ -42,6 +50,7 @@ export const AUDIT_ACTIONS = {
   disconnected: "integration.disconnected",
   revoked: "integration.revoked",
   expired: "integration.expired",
+  published: "integration.published",
 } as const;
 
 export type IntegrationAuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];
