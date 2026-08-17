@@ -143,3 +143,22 @@ export function tileUrlTemplate(scheme: MapColorScheme): string | null {
 
   return `https://api.maptiler.com/maps/${STYLE_IDS[scheme]}/256/{z}/{x}/{y}.${TILE_EXTENSION}?key=${encodeURIComponent(key)}`;
 }
+
+export interface TileTemplates {
+  readonly light: string;
+  readonly dark: string;
+}
+
+/**
+ * Both templates, or null when there is no key. Every map surface starts with
+ * this and returns null on null, BEFORE it renders any frame, border or
+ * heading: that is what "no key means no map, not an empty grey rectangle"
+ * amounts to in practice. One call rather than an `isTileSourceConfigured()`
+ * check followed by two template reads, so there is a single guard to test
+ * instead of three that cannot disagree.
+ */
+export function tileTemplates(): TileTemplates | null {
+  const light = tileUrlTemplate("light");
+  const dark = tileUrlTemplate("dark");
+  return light !== null && dark !== null ? { light, dark } : null;
+}

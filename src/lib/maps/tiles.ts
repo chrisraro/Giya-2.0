@@ -44,6 +44,17 @@ export interface StaticMapLayout {
   /** Where the pin's point sits inside the frame. Always the exact centre. */
   readonly pinLeft: number;
   readonly pinTop: number;
+  /**
+   * World-pixel coordinates of the frame's top-left corner, at `zoom`.
+   *
+   * Exposed because a map of a RESULT SET has to place shops at arbitrary
+   * offsets, not just one at the centre. Computing it a second time in the
+   * component would work today and drift the pins off the tiles the first time
+   * either copy of `centerPixel - size / 2` changed; `offsetWithinFrame` below
+   * reads it from here so there is only ever one copy.
+   */
+  readonly originX: number;
+  readonly originY: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -153,7 +164,22 @@ export function staticMapLayout({
     tiles,
     pinLeft: width / 2,
     pinTop: height / 2,
+    originX,
+    originY,
   };
+}
+
+/**
+ * Where inside a frame a given coordinate falls, in frame pixels from its
+ * top-left corner. The result can be negative or larger than the frame: that
+ * means the point is outside it, and the caller decides whether to clip.
+ */
+export function offsetWithinFrame(
+  point: Coordinates,
+  layout: StaticMapLayout,
+): { left: number; top: number } {
+  const pixel = projectToWorldPixels(point, layout.zoom);
+  return { left: pixel.x - layout.originX, top: pixel.y - layout.originY };
 }
 
 /**

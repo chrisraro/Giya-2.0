@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildTileUrl,
   MERCATOR_LATITUDE_LIMIT,
+  offsetWithinFrame,
   projectToWorldPixels,
   staticMapLayout,
   TILE_SIZE,
@@ -126,6 +127,61 @@ describe("the static map layout", () => {
 
     expect(layout.zoom).toBe(16);
     expect(layout.tiles.every((tile) => Number.isInteger(tile.z))).toBe(true);
+  });
+});
+
+describe("placing a point inside the frame", () => {
+  // A single-pin map only ever draws at the centre. A map of a result set has
+  // to put an arbitrary shop at an arbitrary offset, which needs the frame's
+  // own world-pixel origin rather than just its centre.
+
+  it("reports the frame's world-pixel origin alongside the tiles", () => {
+    // Zoom 2 makes the world 1024px, so (0, 0) projects to (512, 512). A
+    // 512x224 frame centred there starts at (512 - 256, 512 - 112).
+    const layout = staticMapLayout({
+      center: { lat: 0, lng: 0 },
+      zoom: 2,
+      width: 512,
+      height: 224,
+    });
+
+    expect(layout.originX).toBe(256);
+    expect(layout.originY).toBe(400);
+  });
+
+  it("offsets a point from that origin, so the centre lands on the pin position", () => {
+    const layout = staticMapLayout({
+      center: CEBU,
+      zoom: 14,
+      width: 512,
+      height: 224,
+    });
+
+    const centre = offsetWithinFrame(CEBU, layout);
+
+    expect(centre.left).toBeCloseTo(layout.pinLeft, 6);
+    expect(centre.top).toBeCloseTo(layout.pinTop, 6);
+  });
+
+  it("puts a point east and north of the centre right and up from it", () => {
+    // Zoom 2, world 1024px: lng 45 projects to x = (225/360) * 1024 = 640,
+    // and the frame's origin is 256, so the pin belongs 384px in.
+    const layout = staticMapLayout({
+      center: { lat: 0, lng: 0 },
+      zoom: 2,
+      width: 512,
+      height: 224,
+    });
+
+    const east = offsetWithinFrame({ lat: 0, lng: 45 }, layout);
+    expect(east.left).toBeCloseTo(384, 6);
+    expect(east.top).toBeCloseTo(112, 6);
+
+    const north = offsetWithinFrame({ lat: 45, lng: 0 }, layout);
+    // North is UP, which is a smaller y in screen coordinates. Getting this
+    // backwards mirrors every map about its own centre.
+    expect(north.top).toBeLessThan(112);
+    expect(north.left).toBeCloseTo(256, 6);
   });
 });
 

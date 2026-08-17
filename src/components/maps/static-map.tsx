@@ -1,9 +1,10 @@
 import { type Coordinates } from "@/lib/maps/coordinates";
-import { BUSINESS_MAP_ZOOM, isTileSourceConfigured, tileUrlTemplate } from "@/lib/maps/tile-source";
-import { buildTileUrl, staticMapLayout, TILE_SIZE } from "@/lib/maps/tiles";
+import { BUSINESS_MAP_ZOOM, tileTemplates } from "@/lib/maps/tile-source";
+import { staticMapLayout } from "@/lib/maps/tiles";
 import { cn } from "@/lib/utils";
 
 import { MapAttribution, MapPin } from "./map-chrome";
+import { TileMosaic } from "./tile-mosaic";
 
 // ===========================================================================
 // A MAP WITH NO JAVASCRIPT.
@@ -59,11 +60,8 @@ export interface StaticMapProps {
  * bordered rectangle saying "map unavailable" is worse than no rectangle.
  */
 export function StaticMap({ center, label, zoom = BUSINESS_MAP_ZOOM, className }: StaticMapProps) {
-  if (!isTileSourceConfigured()) return null;
-
-  const lightTemplate = tileUrlTemplate("light");
-  const darkTemplate = tileUrlTemplate("dark");
-  if (!lightTemplate || !darkTemplate) return null;
+  const templates = tileTemplates();
+  if (!templates) return null;
 
   const layout = staticMapLayout({
     center,
@@ -81,66 +79,7 @@ export function StaticMap({ center, label, zoom = BUSINESS_MAP_ZOOM, className }
         className,
       )}
     >
-      <div
-        // The mosaic sits centred inside whatever width the frame ended up
-        // with, so cropping is symmetric and the pin stays on the shop.
-        className="absolute left-1/2 top-0 -translate-x-1/2"
-        style={{ width: layout.width, height: layout.height }}
-      >
-        {layout.tiles.map((tile) => (
-          <picture key={tile.id}>
-            {/*
-              THE DARK-THEME DECISION, in one element.
-
-              A raster tile is a photograph; it will not respond to a CSS class
-              the way a token-styled surface does. There are three ways to deal
-              with that and only one of them belongs on a server-rendered page:
-
-                - `filter: invert(1) hue-rotate(180deg)`, the popular trick.
-                  Rejected: it makes parks purple, water orange and label text
-                  a grey ghost. It looks broken rather than dark.
-                - Render both schemes and toggle with a `dark:` class.
-                  Rejected: `display: none` does not stop a browser fetching an
-                  image, so every visitor would download both mosaics and burn
-                  twice the tile quota to look at one of them.
-                - Ask the provider for dark pixels and let the BROWSER choose
-                  which set to fetch. That is <picture> with a media condition,
-                  and it downloads exactly one.
-
-              The cost, stated plainly: this follows the OS colour scheme, while
-              the surrounding chrome follows next-themes. Those agree by default
-              (next-themes' default is `system`) and disagree only for a visitor
-              who has explicitly overridden the theme inside the app. For that
-              visitor the map is a light photograph in a dark frame - which is
-              how every photograph on a dark page already looks, and is why the
-              frame carries a token border and a token background: it reads as a
-              framed image, not as a theme failure.
-            */}
-            <source
-              media="(prefers-color-scheme: dark)"
-              srcSet={buildTileUrl(darkTemplate, tile)}
-            />
-            {/* A bare <img> and not next/image, on purpose: next/image would
-                proxy every tile through our own optimizer, which defeats the
-                immutable shared CDN caching that makes the free tier viable
-                (see src/lib/maps/tile-source.ts) and adds a serverless
-                invocation per tile to re-encode an image that is already
-                exactly 256x256. It is also the <picture> fallback, which
-                next/image cannot be. */}
-            <img
-              src={buildTileUrl(lightTemplate, tile)}
-              alt=""
-              width={TILE_SIZE}
-              height={TILE_SIZE}
-              // Below the fold on the business page; never block the LCP for it.
-              loading="lazy"
-              decoding="async"
-              className="absolute max-w-none"
-              style={{ left: tile.left, top: tile.top }}
-            />
-          </picture>
-        ))}
-
+      <TileMosaic layout={layout} templates={templates}>
         {/* Bottom-centre of the pin's box is its point; see MAP_PIN_CLASS. */}
         <span
           className="absolute"
@@ -152,7 +91,7 @@ export function StaticMap({ center, label, zoom = BUSINESS_MAP_ZOOM, className }
         >
           <MapPin />
         </span>
-      </div>
+      </TileMosaic>
 
       <MapAttribution className="absolute bottom-1 right-1" />
     </div>
