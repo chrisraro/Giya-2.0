@@ -162,6 +162,14 @@ simulate end users. Via MCP, the file body can be run with `execute_sql`
 Buckets are created from migrations, not the dashboard, so the bucket settings
 and their `storage.objects` policies live in the same reviewable file.
 
+**Exactly two buckets exist live: `receipts` and `avatars`.** The docs name
+several others (doc 11 lists `business-documents`, `invoice-templates`, `menus`,
+`products`, `promotions`, `rewards`, `announcements`, `temp`, `exports`) and
+`0002_identity.sql` writes `business-documents/{business_id}/{uuid}.pdf` into a
+column comment. None of those has a migration and none of them is deployed. See
+"The `business-documents` BUCKET does not exist" near the migration ledger
+before writing any upload path against a bucket named only in a doc.
+
 ### `receipts` (0019_receipts_storage.sql)
 
 | property | value |
@@ -1395,6 +1403,77 @@ ledger. Live versions are timestamps; the files use readable ordinal prefixes:
 | 0076_purge_business_rpc.sql | **NO ROW — NOT APPLIED** (`purge_business_data` absent) | (unrecorded) |
 | 0077_force_delete_business.sql | **NO ROW — function IS live** | (unrecorded) |
 | 0078_loyalty_card_progression.sql | **NOT YET APPLIED — written by T4.5, applied by the coordinator** | (unrecorded) |
+
+### ⚠️ `0067_business_documents.sql` is a DEAD FILE, verified live 2026-08-17
+
+**Nothing in `0067_business_documents.sql` ever reached the database.** Its
+first statement is `create table if not exists public.business_documents`, and
+that table already existed — `0002_identity.sql:333` creates it. The `if not
+exists` made the create a silent no-op, and unlike the `loyalty_cards` case
+(0066/0078) the file carries no `alter table ... add column` lines either, so
+not one of its columns, checks or defaults landed.
+
+This is the second `create table if not exists` over an existing table on this
+project. Read that sentence as a convention: **`if not exists` on a `create
+table` is banned in new migrations here.** It converts "this migration
+conflicts with history" — a loud, fixable failure — into "this migration did
+nothing", which surfaces months later as code written against columns that do
+not exist.
+
+The divergence table below lists `business_documents` under "Verified live".
+**That row is true and misleading.** The TABLE is live because 0002 created it.
+It does not mean 0067 was applied. A `to_regclass` check cannot tell a table
+created by the file you are holding from a table of the same name created six
+years of migrations earlier, so for a `create ... if not exists` file the
+column list is the only honest probe.
+
+What is actually deployed (0002's schema) against what 0067 claims:
+
+| live (0002) | 0067 claims |
+|---|---|
+| `storage_path`, `file_name`, `mime_type`, `size_bytes` | `file_path` |
+| `verification_id`, `expires_on`, `deleted_at`, `created_by`, `updated_by` | — |
+| — | `status`, `revision_note` |
+| `doc_type in (business_permit, mayors_permit, tin, dti, sec, sample_receipt, other)` | `doc_type in (dti_permit, mayor_permit, bir_2303, other)` |
+
+Code written against 0067 fails twice: `file_path` does not exist, and
+`dti_permit` violates the live `business_documents_doc_type_check`. **Write
+against 0002.** Consolidating the two files is its own task with its own risks;
+this is a record, not a fix.
+
+The RLS/grant half of 0067 DID land, because those statements are not guarded:
+`authenticated` holds `INSERT, SELECT, UPDATE`, and `business_docs_staff_insert`
+plus two overlapping staff select policies (`business_docs_staff_select` via
+`is_staff_of`, 0067's; `business_documents_staff_select` via `is_active_staff`,
+0002's as amended by 0011) are live. An owner or manager can insert directly —
+no SECURITY DEFINER RPC is needed.
+
+### ⚠️ The `business-documents` BUCKET does not exist, verified live 2026-08-17
+
+`0002_identity.sql:332` says "Bucket: business-documents", doc 11 lists it, doc
+15 assigns it a signed-URL policy and doc 41 puts it on the never-cache list.
+**No migration has ever created it, and it is not there.**
+
+```
+select id from storage.buckets;   -- avatars, receipts. That is all.
+select count(*) from storage.objects where bucket_id = 'business-documents';  -- 0
+select count(*) from public.business_documents;                               -- 0
+```
+
+There are no `storage.objects` policies for it either — the only ones live are
+the four `avatars_objects_owner_*` and the two `receipts_objects_consumer_*`.
+`0019_receipts_storage.sql` created `receipts` and `0064_avatars_storage.sql`
+created `avatars`; nothing did the same for this one.
+
+**Consequence: document upload cannot be built without a migration.** The table
+is ready and writable, but a `business_documents` row records a `storage_path`
+into a bucket that does not exist, so writing the row without the bucket would
+produce records pointing at nothing. G1 stopped at this line rather than ship
+that. What is owed is one migration in the shape of 0019/0064: the
+`storage.buckets` insert (private, `file_size_limit` 20971520 to match
+`business_documents_size_bytes_check`, PDF/JPEG/PNG mime allowlist) plus
+`storage.objects` policies scoped by `private.is_staff_of(business_id, ...)` on
+the `{business_id}/` path prefix, and a pgTAP smoke suite alongside it.
 
 ### ⚠️ Ledger divergence, verified live 2026-08-16
 
