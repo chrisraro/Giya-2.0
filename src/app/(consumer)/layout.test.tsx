@@ -44,6 +44,9 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 const ConsumerLayout = (await import("./layout")).default;
+const { OfflineBanner } = await import("@/components/pwa/offline-banner");
+const { RegisterServiceWorker } = await import("@/components/pwa/register-service-worker");
+const { InstallPrompt } = await import("@/components/pwa/install-prompt");
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -57,6 +60,28 @@ function signedOut(): void {
 
 async function renderLayout(): Promise<React.ReactElement> {
   return ConsumerLayout({ children: null });
+}
+
+/**
+ * Every component type in the tree the layout returns.
+ *
+ * Walks the element tree rather than grepping the source, because a grep for
+ * `<OfflineBanner` is equally satisfied by a mount that has been commented out,
+ * by a mention in a doc comment, and by a real one. This collects the actual
+ * `type` references React would render, so the only thing that can put
+ * `OfflineBanner` in the result is the layout really returning one.
+ */
+function componentTypes(node: unknown, out: Set<unknown> = new Set()): Set<unknown> {
+  if (Array.isArray(node)) {
+    for (const child of node) componentTypes(child, out);
+    return out;
+  }
+  if (node === null || typeof node !== "object") return out;
+
+  const element = node as { type?: unknown; props?: { children?: unknown } };
+  if (element.type !== undefined) out.add(element.type);
+  if (element.props?.children !== undefined) componentTypes(element.props.children, out);
+  return out;
 }
 
 beforeEach(() => {
@@ -97,6 +122,65 @@ describe("consumer onboarding gate", () => {
     mocks.maybeSingle.mockResolvedValue({ data: null, error: { message: "boom" } });
 
     await expect(renderLayout()).resolves.toBeDefined();
+  });
+});
+
+describe("the consumer shell mounts the PWA surfaces", () => {
+  // WHAT THESE PROVE, AND WHAT THEY DO NOT.
+  //
+  // They prove the layout's returned tree really contains these components -
+  // by identity, not by name - for a consumer who gets past both gates. That
+  // is the whole reason T5.2 exists: OfflineBanner was written in T-1 and
+  // imported by nothing, so doc 41 section 9's "one global offline pill" did
+  // not appear anywhere in the product.
+  //
+  // They do NOT prove the pill is VISIBLE, or that it is the only one, or
+  // anything at all about which URLs the service worker caches. Visibility is
+  // the component's own tests (offline-banner.test.tsx); uniqueness and the
+  // portal exclusion are src/app/offline-ui-scope.test.ts and
+  // src/app/service-worker-scope.test.ts; caching is decided by the route
+  // matcher in src/lib/pwa/runtime-caching.ts and proved there.
+
+  it("CRITICAL: mounts the offline pill", async () => {
+    signedIn();
+    mocks.maybeSingle.mockResolvedValue({
+      data: { onboarded_at: "2026-07-01T00:00:00.000Z", is_suspended: false },
+      error: null,
+    });
+
+    expect(componentTypes(await renderLayout())).toContain(OfflineBanner);
+  });
+
+  it("mounts it for a signed-out visitor too", async () => {
+    // /b/[slug] lives in this group and is public. Somebody following a shared
+    // shop link on a dying connection is exactly who the pill is for, and the
+    // signed-out branch returns early from the gates - a mount placed inside
+    // the authenticated branch would miss them.
+    signedOut();
+
+    expect(componentTypes(await renderLayout())).toContain(OfflineBanner);
+  });
+
+  it("CRITICAL: mounts the install prompt", async () => {
+    // Here rather than on the receipt screen that triggers it, and that is not
+    // a tidiness choice: `beforeinstallprompt` fires on PAGE LOAD, and a
+    // client-side navigation into /scan/[receiptId] is not one. A listener
+    // mounted at the trigger site would never capture an event to replay.
+    signedIn();
+    mocks.maybeSingle.mockResolvedValue({
+      data: { onboarded_at: "2026-07-01T00:00:00.000Z", is_suspended: false },
+      error: null,
+    });
+
+    expect(componentTypes(await renderLayout())).toContain(InstallPrompt);
+  });
+
+  it("still mounts the service worker registration alongside it (T5.1)", async () => {
+    // Pinned here so a refactor of this return statement cannot quietly drop
+    // one while adding the other.
+    signedOut();
+
+    expect(componentTypes(await renderLayout())).toContain(RegisterServiceWorker);
   });
 });
 
