@@ -41,75 +41,79 @@ type Row = Record<string, unknown>;
  * given. Only the operators public-repo.ts actually uses are implemented, and
  * an unimplemented one would be a missing method rather than a silent no-op.
  */
-function makeTable(rows: readonly Row[]) {
-  const builder = {
-    _rows: [...rows] as Row[],
-    select() {
-      return builder;
-    },
-    eq(column: string, value: unknown) {
-      builder._rows = builder._rows.filter((row) => row[column] === value);
-      return builder;
-    },
-    in(column: string, values: readonly unknown[]) {
-      builder._rows = builder._rows.filter((row) => values.includes(row[column]));
-      return builder;
-    },
-    is(column: string, value: unknown) {
-      builder._rows = builder._rows.filter((row) => (row[column] ?? null) === value);
-      return builder;
-    },
-    ilike(column: string, pattern: string) {
-      const needle = pattern.replaceAll("%", "").toLowerCase();
-      builder._rows = builder._rows.filter((row) =>
-        String(row[column] ?? "").toLowerCase().includes(needle),
+interface FakeTable {
+  select(): FakeTable;
+  eq(column: string, value: unknown): FakeTable;
+  in(column: string, values: readonly unknown[]): FakeTable;
+  is(column: string, value: unknown): FakeTable;
+  ilike(column: string, pattern: string): FakeTable;
+  order(column: string, options?: { ascending?: boolean }): FakeTable;
+  limit(count: number): FakeTable;
+  maybeSingle(): Promise<{ data: Row | null; error: null }>;
+  then(resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown): Promise<unknown>;
+}
+
+function makeTable(seed: readonly Row[]): FakeTable {
+  let rows: Row[] = [...seed];
+  // `order` and `limit` are RECORDED, not applied, and are replayed only when
+  // the builder is awaited. PostgREST orders and limits the whole filtered set
+  // server-side, so a double that applied them the moment they were chained
+  // would truncate rows before a later `.in()`/`.ilike()` ever saw them.
+  // listActiveBusinesses chains exactly that way - `.limit()` first, `.in()`
+  // afterwards - and an eager `limit(1)` made two of the assertions below pass
+  // against a repo with NO status filter at all, because the one row that
+  // survived the truncation happened to be the approved one.
+  let ordering: { column: string; ascending: boolean } | null = null;
+  let take: number | null = null;
+
+  function resolveRows(): Row[] {
+    let resolved = [...rows];
+    if (ordering !== null) {
+      const { column, ascending } = ordering;
+      resolved.sort(
+        (a, b) => String(a[column]).localeCompare(String(b[column])) * (ascending ? 1 : -1),
       );
-      return builder;
+    }
+    if (take !== null) resolved = resolved.slice(0, take);
+    return resolved;
+  }
+
+  const table: FakeTable = {
+    select: () => table,
+    eq(column, value) {
+      rows = rows.filter((row) => row[column] === value);
+      return table;
     },
-    // `order` and `limit` are RECORDED, not applied, and are replayed only when
-    // the builder is awaited. PostgREST orders and limits the whole filtered set
-    // server-side, so a double that applied them the moment they were chained
-    // would truncate rows before a later `.in()`/`.ilike()` ever saw them.
-    // listActiveBusinesses chains exactly that way - `.limit()` first, `.in()`
-    // afterwards - and an eager `limit(1)` made two of the assertions below pass
-    // against a repo with NO status filter at all, because the one row that
-    // survived the truncation happened to be the approved one.
-    order(column: string, { ascending = true }: { ascending?: boolean } = {}) {
-      builder._order = { column, ascending };
-      return builder;
+    in(column, values) {
+      rows = rows.filter((row) => values.includes(row[column]));
+      return table;
     },
-    limit(count: number) {
-      builder._limit = count;
-      return builder;
+    is(column, value) {
+      rows = rows.filter((row) => (row[column] ?? null) === value);
+      return table;
     },
-    _resolve(): Row[] {
-      let rows = [...builder._rows];
-      const ordering = builder._order;
-      if (ordering) {
-        rows.sort(
-          (a, b) =>
-            String(a[ordering.column]).localeCompare(String(b[ordering.column])) *
-            (ordering.ascending ? 1 : -1),
-        );
-      }
-      if (builder._limit !== null) rows = rows.slice(0, builder._limit);
-      return rows;
+    ilike(column, pattern) {
+      const needle = pattern.replaceAll("%", "").toLowerCase();
+      rows = rows.filter((row) => String(row[column] ?? "").toLowerCase().includes(needle));
+      return table;
+    },
+    order(column, { ascending = true }: { ascending?: boolean } = {}) {
+      ordering = { column, ascending };
+      return table;
+    },
+    limit(count) {
+      take = count;
+      return table;
     },
     async maybeSingle() {
-      return { data: builder._resolve()[0] ?? null, error: null };
+      return { data: resolveRows()[0] ?? null, error: null };
     },
-    then(resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) {
-      return Promise.resolve({ data: builder._resolve(), error: null }).then(resolve, reject);
+    then(resolve, reject) {
+      return Promise.resolve({ data: resolveRows(), error: null }).then(resolve, reject);
     },
-  } as {
-    _rows: Row[];
-    _order: { column: string; ascending: boolean } | null;
-    _limit: number | null;
-    [method: string]: unknown;
   };
-  builder._order = null;
-  builder._limit = null;
-  return builder;
+
+  return table;
 }
 
 const mocks = vi.hoisted(() => ({ tables: {} as Record<string, readonly Row[]> }));

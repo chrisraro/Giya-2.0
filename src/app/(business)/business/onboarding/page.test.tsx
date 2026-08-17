@@ -89,6 +89,50 @@ async function advanceToFinish(
   fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 }
 
+describe("the hours step reaches the server (G1 section 2)", () => {
+  it("CRITICAL: hands registration the times the merchant actually typed", async () => {
+    render(<OnboardingPage />);
+    await advanceToFinish({
+      weekdayOpen: "07:30",
+      weekdayClose: "19:45",
+      weekendOpen: "10:00",
+      weekendClose: "14:15",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to dashboard" }));
+
+    await waitFor(() => expect(mocks.registerBusiness).toHaveBeenCalled());
+    expect(mocks.registerBusiness).toHaveBeenCalledWith({
+      name: "Kape Diaria",
+      type: "Cafe",
+      city: "Cebu",
+      address: "12 Real Street",
+      hours: {
+        weekdayOpen: "07:30",
+        weekdayClose: "19:45",
+        weekendOpen: "10:00",
+        weekendClose: "14:15",
+      },
+    });
+  });
+
+  it("CRITICAL: passes an edited weekend pair rather than the prefill", async () => {
+    // The narrow version of the same claim. The wizard prefills 09:00-15:00 for
+    // weekends, so an assertion that only checked "hours were passed" would
+    // stay green if the state wiring dropped the merchant's edits and sent the
+    // defaults.
+    render(<OnboardingPage />);
+    await advanceToFinish({ weekendOpen: "11:00", weekendClose: "16:30" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to dashboard" }));
+
+    await waitFor(() => expect(mocks.registerBusiness).toHaveBeenCalled());
+    const passed = mocks.registerBusiness.mock.calls[0]?.[0] as { hours: Record<string, string> };
+    expect(passed.hours.weekendOpen).toBe("11:00");
+    expect(passed.hours.weekendClose).toBe("16:30");
+  });
+});
+
 describe("where the wizard leaves a newly registered merchant (G1 section 3)", () => {
   it("CRITICAL: sends them into the portal, not to the approval waiting room", async () => {
     render(<OnboardingPage />);
@@ -102,6 +146,18 @@ describe("where the wizard leaves a newly registered merchant (G1 section 3)", (
     // alone while still stranding the merchant.
     expect(mocks.push).toHaveBeenCalledWith("/business/dashboard");
     expect(mocks.push).not.toHaveBeenCalledWith("/business/pending-approval");
+  });
+
+  it("still reaches the dashboard when only the hours write failed", async () => {
+    // The business was created. Stranding the merchant on the wizard would
+    // invite a second press of a button whose RPC is not idempotent.
+    mocks.registerBusiness.mockResolvedValue({ ok: true, hoursSaved: false });
+    render(<OnboardingPage />);
+    await advanceToFinish();
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to dashboard" }));
+
+    await waitFor(() => expect(mocks.push).toHaveBeenCalledWith("/business/dashboard"));
   });
 
   it("does not navigate at all when registration failed", async () => {

@@ -370,9 +370,14 @@ export default function BusinessOnboardingPage() {
   // Step 3: verification
   const [files, setFiles] = React.useState<File[]>([]);
 
-  // Hours and documents remain client-only for now; there is no server
-  // column for them yet.
-  // TODO(api): wire hours + documents once the schema supports them
+  // Hours now reach `businesses.opening_hours` (see `finish` below). Documents
+  // are still a client-side list and still go nowhere: the `business_documents`
+  // TABLE exists and is writable by an owner, but the private
+  // `business-documents` BUCKET the rows are supposed to point at was never
+  // created on this project - 0019 created `receipts`, 0064 created `avatars`,
+  // and nothing ever created this one. Uploading needs a migration G1 does not
+  // have; see .superpowers/sdd/briefs/g1-onboarding-report.md.
+  // TODO(api): upload documents once the business-documents bucket exists
 
   const [error, setError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
@@ -402,11 +407,25 @@ export default function BusinessOnboardingPage() {
     if (submitting) return;
     setError(null);
     setSubmitting(true);
-    const result = await registerBusiness({ name, type: businessType, city, address });
+    const result = await registerBusiness({
+      name,
+      type: businessType,
+      city,
+      address,
+      // The four times from step 2, expanded to the seven rows
+      // `businesses.opening_hours` stores by the action's own
+      // `toOpeningHoursEntries`. They used to stop here.
+      hours,
+    });
     if (!result.ok) {
       setSubmitting(false);
       setError(result.message);
       return;
+    }
+    if (!result.hoursSaved) {
+      // The business exists, so the merchant goes on to the dashboard either
+      // way. Saying so beats a silent drop, and Settings is one screen away.
+      console.error("[onboarding] the business was created but its hours were not saved");
     }
     // Refresh the session before navigating so the client picks up a fresh
     // token once the custom access token hook is enabled and stamps `biz`
