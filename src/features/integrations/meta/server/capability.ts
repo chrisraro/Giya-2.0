@@ -147,7 +147,7 @@ export const readGrantedScopes = cache(async function readGrantedScopes(
  * client that needs it and NOT derived from `META_V1_SCOPES` - see that
  * constant's header for why the two must be able to disagree.
  */
-async function capabilityFor(
+export async function capabilityFor(
   businessId: string,
   connection: MetaConnectionView,
   requiredScope: string,
@@ -164,7 +164,7 @@ async function capabilityFor(
 }
 
 /** The Page's own name, or the id Meta identifies it by. Neither is a secret. */
-function pageNameOf(connection: MetaConnectionView): string {
+export function pageNameOf(connection: MetaConnectionView): string {
   return connection.externalAccountName ?? connection.externalAccountId;
 }
 
