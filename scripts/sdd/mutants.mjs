@@ -59,6 +59,17 @@ function abort(message) {
   process.exit(2);
 }
 
+/**
+ * A manifest is written with "\n", but this repo checks tracked files out with
+ * CRLF on Windows, so a multi-line anchor matches zero times for a reason that
+ * has nothing to do with the code. Normalizing to the FILE's own dominant
+ * ending fixes that without weakening anything: the exactly-once rule below
+ * still runs, on the normalized form.
+ */
+function toFileEol(text, source) {
+  return source.includes("\r\n") ? text.replace(/\r?\n/g, "\r\n") : text.replace(/\r\n/g, "\n");
+}
+
 function runTests(tests) {
   const result = spawnSync(
     process.platform === "win32" ? "npx.cmd" : "npx",
@@ -79,6 +90,8 @@ for (const mutant of selected) {
     originals.set(abs, readFileSync(abs, "utf8"));
   }
   const source = originals.get(abs);
+  mutant.anchor = toFileEol(mutant.anchor, source);
+  mutant.replacement = toFileEol(mutant.replacement, source);
 
   const occurrences = source.split(mutant.anchor).length - 1;
   if (occurrences !== 1) {

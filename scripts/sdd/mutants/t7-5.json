@@ -288,6 +288,95 @@
       "replacement": "  return candidate;",
       "tests": ["src/lib/log.test.ts"],
       "kills": "off-platform the key is omitted, not emitted as an empty string"
+    },
+
+    {
+      "name": "M-handler-drop-request-id",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "      requestLogger(requestId).with({",
+      "replacement": "      requestLogger(\"\").with({",
+      "tests": ["src/lib/api/handler.test.ts"],
+      "kills": "THE BRIEF'S NAMED MUTANT - drop the id from the adopted call site"
+    },
+    {
+      "name": "M-handler-drop-route",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "        route: config.route,",
+      "replacement": "        route: \"unknown\",",
+      "tests": ["src/lib/api/handler.test.ts"],
+      "kills": "the line names the route that threw"
+    },
+    {
+      "name": "M-handler-drop-user",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "        user_id: userId ?? \"(anonymous)\",",
+      "replacement": "        user_id: \"(anonymous)\",",
+      "tests": ["src/lib/api/handler.test.ts"],
+      "kills": "'for which user' - a signed-in caller is named, not flattened to anonymous"
+    },
+    {
+      "name": "M-handler-anonymous-fallback",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "        user_id: userId ?? \"(anonymous)\",",
+      "replacement": "        user_id: userId,",
+      "tests": ["src/lib/api/handler.test.ts"],
+      "kills": "the user_id key is always present, never null - a sometimes-absent field is unfilterable"
+    },
+    {
+      "name": "M-handler-user-hoist",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "      userId = user?.id ?? null;",
+      "replacement": "      userId = null;",
+      "tests": ["src/lib/api/handler.test.ts"],
+      "kills": "the hoisted userId is actually assigned from the resolved session"
+    },
+    {
+      "name": "M-handler-drop-error",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "      log().error(\"unhandled error\", { err: error, status: 500 });",
+      "replacement": "      log().error(\"unhandled error\", { status: 500 });",
+      "tests": ["src/lib/api/handler.test.ts"],
+      "kills": "'which line threw' - the throw itself reaches the line, name/message/stack"
+    },
+    {
+      "name": "M-handler-drop-status",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "      log().error(\"unhandled error\", { err: error, status: 500 });",
+      "replacement": "      log().error(\"unhandled error\", { err: error, status: 200 });",
+      "tests": ["src/lib/api/handler.test.ts"],
+      "kills": "the line reports the status the caller actually received"
+    },
+    {
+      "name": "M-handler-log-apierror-too",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "      if (isApiError(error)) {",
+      "replacement": "      if (isApiError(error)) { log().error(\"unhandled error\", { err: error, status: 500 });",
+      "tests": ["src/lib/api/handler.test.ts"],
+      "kills": "a deliberate domain refusal is NOT logged as a fault - noise buries signal"
+    },
+    {
+      "name": "M-handler-idempotency-gate-error",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "        log().error(\"idempotency gate unavailable, failing closed\", {\n          err: redisError,\n          status: 503,\n        });",
+      "replacement": "        log().error(\"idempotency gate unavailable, failing closed\", { status: 503 });",
+      "tests": ["src/lib/api/handler.test.ts"],
+      "kills": "the fail-closed 503 says what Redis actually did, correlated to the request"
+    },
+    {
+      "name": "M-handler-request-id-screen",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "  return inbound && REQUEST_ID_PATTERN.test(inbound) ? inbound : randomUUID();",
+      "replacement": "  return inbound ?? randomUUID();",
+      "tests": ["src/lib/api/handler.test.ts"],
+      "kills": "an inbound id carrying JSON metacharacters cannot forge a log entry"
+    },
+    {
+      "name": "M-handler-request-id-propagate",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "  return inbound && REQUEST_ID_PATTERN.test(inbound) ? inbound : randomUUID();",
+      "replacement": "  return randomUUID();",
+      "tests": ["src/lib/api/handler.test.ts"],
+      "kills": "a well-formed inbound id survives into the line, so end-to-end correlation works"
     }
   ]
 }

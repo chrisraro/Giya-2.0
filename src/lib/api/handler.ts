@@ -6,6 +6,7 @@ import type { User } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 import type { z } from "zod";
 
+import { requestLogger } from "@/lib/log";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { del, get, redisKey, set, setNx } from "@/lib/redis";
 import { createClient } from "@/lib/supabase/server";
@@ -357,12 +358,30 @@ export function defineHandler<
     // responses too, not only on the happy path.
     const responseHeaders: Record<string, string> = {};
 
+    // Hoisted out of the try purely so the catch can name the caller. A 500
+    // that says WHICH request but not WHOSE is one bisect step short of
+    // useful, and the catch below is reachable from before step 2 has run
+    // (`createClient` and `auth.getUser` can both fail), so this has to have a
+    // value that is honest at every point rather than only after the session
+    // resolves. "(anonymous)" is emitted rather than the key being dropped:
+    // a field that is sometimes absent is a field nobody filters on.
+    let userId: string | null = null;
+
+    // A function, not a bound logger: `userId` is not known yet at this point
+    // and the whole reason it is hoisted is that it changes.
+    const log = () =>
+      requestLogger(requestId).with({
+        route: config.route,
+        user_id: userId ?? "(anonymous)",
+      });
+
     try {
       // --- 2. session ---------------------------------------------------
       const supabase = await createClient();
       const {
         data: { user },
       } = await supabase.auth.getUser();
+      userId = user?.id ?? null;
 
       if (config.requireSession && !user) {
         throw new ApiError(
@@ -519,7 +538,10 @@ export function defineHandler<
         }
       } catch (redisError) {
         // Fail CLOSED. See the block comment above readIdempotencyRecord.
-        console.error("[api] idempotency gate unavailable, failing closed", redisError);
+        log().error("idempotency gate unavailable, failing closed", {
+          err: redisError,
+          status: 503,
+        });
         throw new ApiError(
           503,
           API_ERROR_CODES.DEPENDENCY_UNAVAILABLE,
@@ -580,7 +602,7 @@ export function defineHandler<
         // Release the key so a transient failure does not become permanent
         // for it. Only successful executions are worth replaying.
         await del(recordKey).catch((releaseError: unknown) => {
-          console.error("[api] failed to release idempotency key", releaseError);
+          log().error("failed to release the idempotency key", { err: releaseError });
           return 0;
         });
         throw handlerError;
@@ -606,7 +628,7 @@ export function defineHandler<
       } catch (storeError) {
         // The side effect already happened; see the fail-closed note above
         // for why this direction is deliberately different.
-        console.error("[api] failed to persist idempotency record", storeError);
+        log().error("failed to persist the idempotency record", { err: storeError });
       }
 
       return jsonResponse(payload.body, payload.status, requestId, {
@@ -619,9 +641,18 @@ export function defineHandler<
       }
 
       // Anything not deliberately thrown as an ApiError is an unexpected
-      // fault. The message and stack stay server-side (Sentry/OTel correlate
-      // via request_id); the client gets a generic 500.
-      console.error(`[api] unhandled error in ${config.route} (request_id=${requestId})`, error);
+      // fault. The message and stack stay server-side; the client gets a
+      // generic 500 carrying only the request id, which is the join key
+      // between the two halves.
+      //
+      // The fields are the answer to t7-5-brief.md's question, one clause
+      // each: `request_id` (which request), `user_id` (which user), `err.stack`
+      // (which line threw) and `release`, which src/lib/log.ts stamps from the
+      // platform's commit sha (which deploy). Sentry, when a DSN is set, gets
+      // the same event through instrumentation.ts's onRequestError - it is a
+      // second destination for this fact, never the only one, because the
+      // shipping configuration has no DSN.
+      log().error("unhandled error", { err: error, status: 500 });
       return errorResponse(
         new ApiError(500, API_ERROR_CODES.INTERNAL, "Something went wrong. Please try again."),
         requestId,

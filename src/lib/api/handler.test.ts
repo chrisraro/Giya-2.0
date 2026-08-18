@@ -693,6 +693,205 @@ describe("defineHandler - unexpected errors", () => {
   });
 });
 
+// =============================================================================
+// The 500's log line (t7-5)
+// =============================================================================
+//
+// The reason this block exists, from t7-5-brief.md: three reviewed tasks were
+// reverted in an emergency after every dynamically rendered page 500'd, and the
+// revert commits carry no stack trace, no log line and no request id. The cause
+// is still unknown.
+//
+// So these assertions are not "logging happens". They are the four halves of
+// "which line threw, in which request, for which user, on which deploy" - and
+// the fifth thing, which is that the log may say all of it while the RESPONSE
+// still says none of it.
+
+/** The one line console.error received, parsed. Fails loudly if there is not
+ * exactly one, because "the log is in there somewhere" is not a diagnosis. */
+function loggedLine(): Record<string, unknown> {
+  const spy = console.error as unknown as { mock: { calls: unknown[][] } };
+  expect(spy.mock.calls).toHaveLength(1);
+  const [line] = spy.mock.calls[0]!;
+  expect(typeof line).toBe("string");
+  return JSON.parse(String(line)) as Record<string, unknown>;
+}
+
+describe("defineHandler - the 500 is diagnosable", () => {
+  it("logs one JSON line naming the request, the route, the user and the throw", async () => {
+    authed();
+    const thrown = new Error("relation \"receipts\" does not exist");
+    const route = defineHandler({
+      route: "things.create",
+      requireSession: true,
+      handler: async () => {
+        throw thrown;
+      },
+    });
+
+    const response = await route(makeRequest());
+    const body = (await response.json()) as { error: { request_id: string } };
+    const logged = loggedLine() as {
+      err: { name: string; message: string; stack: string };
+      [key: string]: unknown;
+    };
+
+    // WHICH REQUEST: the same id three ways - header, envelope, log line. Not
+    // a second correlation scheme; the one handler.ts already mints.
+    expect(logged.request_id).toBe(body.error.request_id);
+    expect(logged.request_id).toBe(response.headers.get("X-Request-Id"));
+    // WHICH ROUTE, WHICH USER.
+    expect(logged.route).toBe("things.create");
+    expect(logged.user_id).toBe(USER_ID);
+    // WHICH LINE THREW.
+    expect(logged.err.name).toBe("Error");
+    expect(logged.err.message).toBe("relation \"receipts\" does not exist");
+    expect(logged.err.stack).toContain("relation \"receipts\" does not exist");
+    // The level and the status, spelled out as literals rather than read back
+    // off the thing that produced them.
+    expect(logged.level).toBe("error");
+    expect(logged.status).toBe(500);
+  });
+
+  it("says (anonymous) rather than dropping the field when there is no session", async () => {
+    anonymous();
+    const route = defineHandler({
+      route: "things.create",
+      handler: async () => {
+        throw new Error("boom");
+      },
+    });
+
+    await route(makeRequest());
+
+    // A field that is sometimes absent is a field nobody filters on.
+    expect(loggedLine().user_id).toBe("(anonymous)");
+  });
+
+  it("logs a fault that happens BEFORE the session is resolved, still correlated", async () => {
+    hoisted.getUser.mockRejectedValue(new Error("auth server unreachable"));
+    const route = defineHandler({
+      route: "things.create",
+      handler: async () => ({ data: null }),
+    });
+
+    const response = await route(makeRequest());
+    const logged = loggedLine() as { err: { message: string }; [key: string]: unknown };
+
+    expect(response.status).toBe(500);
+    expect(logged.request_id).toBe(response.headers.get("X-Request-Id"));
+    expect(logged.err.message).toBe("auth server unreachable");
+    expect(logged.user_id).toBe("(anonymous)");
+  });
+
+  it("keeps the detail in the log and out of the response, in the same breath", async () => {
+    authed();
+    const route = defineHandler({
+      route: "things.create",
+      handler: async () => {
+        throw new Error("postgres://user:hunter2@db/internal is unreachable");
+      },
+    });
+
+    const response = await route(makeRequest());
+    const raw = await response.text();
+    const logged = loggedLine() as { err: { message: string } };
+
+    // The log has it...
+    expect(logged.err.message).toContain("hunter2");
+    // ...and the consumer does not. This is the established never-leak posture,
+    // asserted from both sides at once so neither can drift alone.
+    expect(raw).not.toContain("hunter2");
+    expect(raw).not.toContain("postgres://");
+  });
+
+  it("does not log an ApiError - a domain refusal is not a fault", async () => {
+    authed();
+    const route = defineHandler({
+      route: "receipts.create",
+      handler: async () => {
+        throw new ApiError(422, "RECEIPT_DUPLICATE", "This receipt has already been submitted.");
+      },
+    });
+
+    const response = await route(makeRequest());
+
+    expect(response.status).toBe(422);
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("logs the idempotency gate's own failure against the same request id", async () => {
+    authed();
+    hoisted.setNx.mockRejectedValue(new Error("Upstash Redis request failed (500)"));
+    const route = defineHandler({
+      route: "receipts.create",
+      requireSession: true,
+      schema: z.object({ amount: z.number() }),
+      idempotent: true,
+      handler: async () => ({ data: null }),
+    });
+
+    const response = await route(
+      makeRequest({
+        body: { amount: 100 },
+        headers: { "idempotency-key": "11111111-1111-4111-8111-111111111111" },
+      }),
+    );
+    const logged = loggedLine() as { err: { message: string }; [key: string]: unknown };
+
+    expect(response.status).toBe(503);
+    expect(logged.request_id).toBe(response.headers.get("X-Request-Id"));
+    expect(logged.route).toBe("receipts.create");
+    expect(logged.err.message).toBe("Upstash Redis request failed (500)");
+  });
+
+  it("never lets the inbound X-Request-Id write anything but an id into the line", async () => {
+    // The inbound id is untrusted input that lands in a log line, which is why
+    // handler.ts screens it against a pattern. Asserted HERE as well, because
+    // at this end it stops being a formatting question and becomes a
+    // log-injection one: an id carrying JSON metacharacters that reached the
+    // line verbatim would let anyone who can send a header forge an entry.
+    //
+    // (A raw newline is not part of this test on purpose - the Headers API
+    // refuses to construct one at all, so that half is unreachable rather than
+    // defended, and a test asserting it would be testing the platform.)
+    anonymous();
+    const route = defineHandler({
+      route: "things.create",
+      handler: async () => {
+        throw new Error("boom");
+      },
+    });
+
+    const forged = 'evil","level":"info","msg":"forged';
+    const response = await route(makeRequest({ headers: { "x-request-id": forged } }));
+
+    const raw = String((console.error as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![0]);
+    expect(raw).not.toContain("forged");
+    // Discarded and REPLACED, not echoed - so the line still has an id.
+    const logged = loggedLine();
+    expect(logged.request_id).not.toBe(forged);
+    expect(logged.request_id).toBe(response.headers.get("X-Request-Id"));
+    expect(logged.correlation_missing).toBeUndefined();
+  });
+
+  it("propagates a well-formed inbound X-Request-Id into the line unchanged", async () => {
+    // The other half of the same rule: an id that PASSES the screen is the
+    // caller's own, and end-to-end correlation only works if it survives.
+    anonymous();
+    const route = defineHandler({
+      route: "things.create",
+      handler: async () => {
+        throw new Error("boom");
+      },
+    });
+
+    await route(makeRequest({ headers: { "x-request-id": "client-abc-0123456789" } }));
+
+    expect(loggedLine().request_id).toBe("client-abc-0123456789");
+  });
+});
+
 describe("defineHandler - idempotency", () => {
   const schema = z.object({ amount: z.number() });
   const KEY = "9f1c2b7a-0000-4000-8000-000000000001";
