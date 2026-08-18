@@ -143,8 +143,35 @@ const SENSITIVE_KEY_PARTS: readonly string[] = [
 // that leaks the next one ("the rest looked safe").
 const JWT_PATTERN = /ey[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/;
 
-/** `Authorization: Bearer ...` / `Basic ...`, wherever it ended up. */
-const CREDENTIAL_PATTERN = /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/i;
+// `Authorization: Bearer ...` / `Basic ...`, wherever it ended up - but the
+// TAIL has to look like a credential, not merely be present.
+//
+// The first version of this rule needed only the word plus any 8-character
+// word, and replaced the WHOLE value. "basic authentication is disabled for
+// this business" and "the bearer responsible for delivery was unreachable"
+// both vanished, while "Bearer token missing" survived because "token" is six
+// characters - and that inconsistency is the tell that the rule was reading
+// length rather than shape. This is reachable prose, not a hypothetical:
+// src/workers/notify/email.ts logs `{ reason: result.reason }`, which is text
+// straight from Resend.
+const CREDENTIAL_PREFIX = /\b(?:bearer|basic)\s+([A-Za-z0-9._~+/=-]+)/gi;
+
+/** Long enough to be a credential, and shaped like one: real tokens carry
+ * digits, and the ones that do not are base64. English words are neither. */
+function looksLikeCredential(tail: string): boolean {
+  if (tail.length < 16) return false;
+  return /\d/.test(tail) || /^[A-Za-z0-9+/]+={0,2}$/.test(tail);
+}
+
+function hasCredential(value: string): boolean {
+  // Every match, not the first: prose mentioning "basic auth" early must not
+  // shield a real `Bearer <token>` later in the same string.
+  CREDENTIAL_PREFIX.lastIndex = 0;
+  for (const match of value.matchAll(CREDENTIAL_PREFIX)) {
+    if (looksLikeCredential(match[1] ?? "")) return true;
+  }
+  return false;
+}
 
 /** Supabase's own prefixed key formats, which are opaque and so match nothing
  * else above. `sb_secret_` is the service role; `sb_publishable_` is not a
@@ -166,7 +193,7 @@ function isSensitiveKey(key: string): boolean {
 function isSensitiveValue(value: string): boolean {
   return (
     JWT_PATTERN.test(value) ||
-    CREDENTIAL_PATTERN.test(value) ||
+    hasCredential(value) ||
     SUPABASE_KEY_PATTERN.test(value)
   );
 }
@@ -270,8 +297,6 @@ function walk(value: unknown, depth: number, seen: WeakSet<object>): unknown {
 
   // Each of these stringifies to `{}` on its own - the same trap as Error,
   // and each one is a shape this codebase genuinely puts in a log field.
-  // Each of the next four stringifies to  or  on its own - the same
-  // trap as Error, and each is a shape this codebase genuinely logs.
   if (object instanceof Headers) {
     return walk(Object.fromEntries(object.entries()), depth, seen);
   }
@@ -337,6 +362,42 @@ function resolveRelease(): string | null {
   return candidate.trim().length > 0 ? candidate : null;
 }
 
+/**
+ * `source` merged onto `into`, reading each value inside its own try.
+ *
+ * This exists because `{ ...bound, ...fields }` DOES NOT. A spread reads every
+ * getter eagerly, at `with()` time, outside every guard in this module - so a
+ * hostile field made `with()` itself throw, out of a logger constructor, into
+ * a catch block that was already handling a fault. That is strictly worse than
+ * the bug the per-field guards were added to fix: it did not cost the line, it
+ * cost the caller.
+ *
+ * `into` is always a value this function produced (or `{}`), so spreading it
+ * is safe; only `source` is caller-supplied and only `source` is walked
+ * defensively. Values are captured HERE rather than at emit time, which keeps
+ * `with()`'s existing bind-time semantics.
+ */
+function mergeFields(into: LogFields, source: LogFields): LogFields {
+  const merged: Record<string, unknown> = { ...into };
+
+  let keys: string[];
+  try {
+    keys = Object.keys(source);
+  } catch {
+    merged.log_error = "bound fields could not be read";
+    return merged;
+  }
+
+  for (const key of keys) {
+    try {
+      merged[key] = (source as Record<string, unknown>)[key];
+    } catch {
+      merged[key] = "[unserializable]";
+    }
+  }
+  return merged;
+}
+
 function consoleWrite(level: LogLevel, line: string): void {
   // Resolved per call, not captured at module load, so a test spy installed
   // after import is the one that receives the line.
@@ -370,15 +431,11 @@ function createLogger(
   // That is the exact failure this task exists to prevent, arriving through
   // the module built to prevent it. One bad field must cost one field.
   function addFields(entry: Record<string, unknown>, source: LogFields): void {
-    let keys: string[];
-    try {
-      keys = Object.keys(source);
-    } catch {
-      entry.log_error = "fields could not be read";
-      return;
-    }
-
-    for (const key of keys) {
+    // `Object.keys` is NOT caught here. A Proxy whose `ownKeys` throws is
+    // handled one level up, by the single guard around both calls in `emit`,
+    // so there is one guard for that case rather than two - and that one is
+    // reachable, which is the difference between a guard and a decoration.
+    for (const key of Object.keys(source)) {
       if (RESERVED_KEYS.has(key)) continue;
       try {
         // Read INSIDE the try: this is the line a throwing getter runs on.
@@ -401,8 +458,14 @@ function createLogger(
     if (!traceable) entry.correlation_missing = true;
     if (release !== null) entry.release = release;
 
-    addFields(entry, bound);
-    if (fields !== undefined) addFields(entry, fields);
+    try {
+      addFields(entry, bound);
+      if (fields !== undefined) addFields(entry, fields);
+    } catch {
+      // `Object.keys()` on a Proxy that refuses to be enumerated at all. The
+      // fields are gone; the line - level, message, correlation id - is not.
+      entry.log_error = "fields could not be read";
+    }
 
     try {
       write(level, JSON.stringify(entry));
@@ -435,7 +498,7 @@ function createLogger(
     error: (message, fields) => emit("error", message, fields),
     warn: (message, fields) => emit("warn", message, fields),
     info: (message, fields) => emit("info", message, fields),
-    with: (fields) => createLogger(correlation, options, { ...bound, ...fields }),
+    with: (fields) => createLogger(correlation, options, mergeFields(bound, fields)),
   };
 }
 

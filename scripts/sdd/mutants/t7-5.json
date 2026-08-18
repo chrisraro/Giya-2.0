@@ -84,7 +84,7 @@
     {
       "name": "M-log-with-bound-fields",
       "file": "src/lib/log.ts",
-      "anchor": "    with: (fields) => createLogger(correlation, options, { ...bound, ...fields }),",
+      "anchor": "    with: (fields) => createLogger(correlation, options, mergeFields(bound, fields)),",
       "replacement": "    with: (fields) => createLogger(correlation, options, {}),",
       "tests": [
         "src/lib/log.test.ts"
@@ -194,7 +194,7 @@
     {
       "name": "M-log-redact-bearer",
       "file": "src/lib/log.ts",
-      "anchor": "    CREDENTIAL_PATTERN.test(value) ||",
+      "anchor": "    hasCredential(value) ||",
       "replacement": "    false ||",
       "tests": [
         "src/lib/log.test.ts"
@@ -1040,12 +1040,12 @@
     {
       "name": "M-log-ownkeys-fields",
       "file": "src/lib/log.ts",
-      "anchor": "      entry.log_error = \"fields could not be read\";\n      return;",
-      "replacement": "      throw new Error(\"keys\");",
+      "anchor": "    } catch {\n      // `Object.keys()` on a Proxy that refuses to be enumerated at all. The\n      // fields are gone; the line - level, message, correlation id - is not.\n      entry.log_error = \"fields could not be read\";\n    }",
+      "replacement": "    } catch (rethrown) {\n      throw rethrown;\n    }",
       "tests": [
         "src/lib/log.test.ts"
       ],
-      "kills": "a top-level Proxy that refuses enumeration costs its fields, not the line"
+      "kills": "the ONE guard around both addFields calls - a Proxy that refuses enumeration costs the fields, not the line"
     },
     {
       "name": "M-log-ownkeys-nested",
@@ -1186,6 +1186,66 @@
         "src/instrumentation-client.test.ts"
       ],
       "kills": "the module body actually wires the browser SDK up on import"
+    },
+    {
+      "name": "M-log-with-eager-spread",
+      "file": "src/lib/log.ts",
+      "anchor": "    with: (fields) => createLogger(correlation, options, mergeFields(bound, fields)),",
+      "replacement": "    with: (fields) => createLogger(correlation, options, { ...bound, ...fields }),",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "THE ROUND-2 REGRESSION - a hostile bound field must not throw out of with() itself"
+    },
+    {
+      "name": "M-log-merge-fields-keys",
+      "file": "src/lib/log.ts",
+      "anchor": "    merged.log_error = \"bound fields could not be read\";\n    return merged;",
+      "replacement": "    throw new Error(\"bound keys\");",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a bound field set that refuses enumeration costs the fields, not the with() call"
+    },
+    {
+      "name": "M-log-merge-fields-getter",
+      "file": "src/lib/log.ts",
+      "anchor": "    } catch {\n      merged[key] = \"[unserializable]\";\n    }",
+      "replacement": "    } catch (rethrown) {\n      throw rethrown;\n    }",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a throwing getter in a BOUND field costs that field, not the with() call"
+    },
+    {
+      "name": "M-log-credential-width",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (tail.length < 16) return false;\n  return /\\d/.test(tail) || /^[A-Za-z0-9+/]+={0,2}$/.test(tail);",
+      "replacement": "  return tail.length >= 8;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "the credential rule reads SHAPE, not length - it must not swallow provider prose"
+    },
+    {
+      "name": "M-log-credential-shape-off",
+      "file": "src/lib/log.ts",
+      "anchor": "  return /\\d/.test(tail) || /^[A-Za-z0-9+/]+={0,2}$/.test(tail);",
+      "replacement": "  return false;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a real opaque bearer token is still caught after the narrowing"
+    },
+    {
+      "name": "M-log-credential-first-match-only",
+      "file": "src/lib/log.ts",
+      "anchor": "  for (const match of value.matchAll(CREDENTIAL_PREFIX)) {",
+      "replacement": "  for (const match of [CREDENTIAL_PREFIX.exec(value)].filter((x) => x !== null)) {",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "prose mentioning 'basic auth' cannot shield a real Bearer token later in the string"
     }
   ]
 }

@@ -52,8 +52,39 @@ this file, only names.
 | `INTEGRATION_TOKEN_AES_KEY` | self-generated | Encrypting stored third-party integration tokens (doc 42) | |
 | `PAYMONGO_SECRET_KEY` | PayMongo | Billing | Later phase, not MVP |
 | `PAYMONGO_WEBHOOK_SECRET` | PayMongo | Billing webhooks | Later phase, not MVP |
-| Sentry DSN | Sentry | Error tracking and OTel traces (doc 52) | Name to confirm when monitoring is wired |
+| `SENTRY_DSN` | Sentry | Error tracking, server and edge (doc 52) | Optional and safe to leave unset — that is the shipping default and the only configuration this app has ever run. Unset means `@sentry/nextjs` is never even imported: no init, no network call, no console output, no behaviour change (`src/instrumentation.ts`). **READ THIS BEFORE SETTING IT — see the note below the table.** |
+| `NEXT_PUBLIC_SENTRY_DSN` | Sentry | Error tracking, browser | A *separate* key, not an alias: Next inlines only `NEXT_PUBLIC_*` into the browser bundle, so a client reading `SENTRY_DSN` would read `undefined` forever. Setting the public one alone configures both halves; setting only `SENTRY_DSN` configures the server only. Session Replay is deliberately **not** enabled — it records the DOM, and these screens carry receipt photographs and balances. |
+| `SENTRY_TRACES_SAMPLE_RATE` | self-generated | Performance sampling | Optional. Defaults to `0` (tracing off). A value outside `0`–`1`, or a typo, is treated as `0` rather than becoming a sampling bill. |
 | Web push keys | Web Push / FCM | Push notifications | VAPID pair or FCM credentials depending on the transport chosen in the notifications slice |
+
+### Before you set a Sentry DSN, know what it will and will not see
+
+Turning Sentry on does **not** move error reporting into Sentry. It adds a
+second destination for part of it. The structured JSON log (`src/lib/log.ts`,
+one object per line on stdout/stderr) remains the complete record, and it is
+the only one that is complete.
+
+**Sentry will see:** faults in pages, server components, server actions and
+middleware — anything Next reports through `onRequestError`.
+
+**Sentry will NOT see `/api/v1` faults.** Every route under `/api/v1` goes
+through `src/lib/api/handler.ts`, which *catches* the fault and returns a 500
+envelope. From Next's side nothing failed, so `onRequestError` never fires.
+Those 500s exist only as a log line with `"msg":"unhandled error"`. **Do not
+build an alert that assumes an empty Sentry means a healthy API.** Closing this
+would mean an explicit `captureException` inside that handler; it was left out
+deliberately, because it puts the SDK on the request path of every API route
+for a configuration nobody had yet.
+
+**Stack traces from the browser will be minified.** `next.config.ts` is not
+wrapped with `withSentryConfig`, so nothing uploads source maps. Server traces
+and the log line are unaffected. Wrapping it is a build-config change and is
+the decision of whoever owns that file — see `src/instrumentation.ts`, which
+records exactly what the wrapper would and would not add for this app.
+
+Correlation is by `request_id`: the same value appears in the `X-Request-Id`
+response header, in the API error envelope, in the log line, and on the Sentry
+event. Doc 52's correlation contract is satisfied through that one column.
 
 ## Configured outside env
 

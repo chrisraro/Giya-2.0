@@ -362,6 +362,41 @@ describe("redaction", () => {
     expect(onlyLine("error")).not.toContain("dXNlcjpwYXNzd29yZA==");
   });
 
+  it("redacts an opaque bearer token that is neither a JWT nor a Supabase key", () => {
+    requestLogger("req-abc", { now: CLOCK }).error("failed", {
+      detail: "Bearer 9f8e7d6c5b4a39281706abcd",
+    });
+
+    expect(onlyLine("error")).not.toContain("9f8e7d6c5b4a39281706abcd");
+  });
+
+  it("does not eat English prose that happens to contain 'basic' or 'bearer'", () => {
+    // REACHABLE, not hypothetical: src/workers/notify/email.ts logs
+    // `{ reason: result.reason }`, which is provider text straight from
+    // Resend. A rule that swallows a failure reason has destroyed the
+    // evidence just as surely as one that lets a token through.
+    const prose = {
+      a: "basic authentication is disabled for this business",
+      b: "the bearer responsible for delivery was unreachable",
+      c: "Bearer token missing",
+      d: "basic plan limits reached",
+    };
+
+    requestLogger("req-abc", { now: CLOCK }).error("failed", prose);
+
+    expect(parsedLine("error")).toMatchObject(prose);
+  });
+
+  it("still finds a real credential later in a string that opens with prose", () => {
+    // The prose must not shield the token: this checks every match, not the
+    // first one.
+    requestLogger("req-abc", { now: CLOCK }).error("failed", {
+      detail: "basic auth failed, retried with Bearer 9f8e7d6c5b4a39281706abcd",
+    });
+
+    expect(onlyLine("error")).not.toContain("9f8e7d6c5b4a39281706abcd");
+  });
+
   it("still leaves an ordinary URL alone", () => {
     // The widened rules must not swallow the field that says WHERE the fault
     // was. Over-redaction is a defect in the other direction.
@@ -645,6 +680,58 @@ describe("correlation", () => {
   it("redacts the fields bound by with(), not only the ones passed at the call", () => {
     requestLogger("req-abc", { now: CLOCK }).with({ authorization: "Bearer nope" }).error("failed");
     expect(onlyLine("error")).not.toContain("nope");
+  });
+
+  it("does not let a hostile bound field throw out of with() itself", () => {
+    // `{ ...bound, ...fields }` read every getter EAGERLY, at with() time,
+    // outside every guard in this module - so the throw escaped a logger
+    // CONSTRUCTOR into a catch block already handling a fault. Strictly worse
+    // than the bug the per-field guards were added to fix: that one cost the
+    // line, this one cost the caller.
+    const hostile = {
+      safe: "still here",
+      get boom(): string {
+        throw new Error("bound getter exploded");
+      },
+    };
+
+    let log: ReturnType<typeof requestLogger> | undefined;
+    expect(() => {
+      log = requestLogger("req-abc", { now: CLOCK }).with(hostile);
+    }).not.toThrow();
+
+    log!.error("the real fault");
+
+    expect(parsedLine("error")).toMatchObject({
+      msg: "the real fault",
+      request_id: "req-abc",
+      safe: "still here",
+      boom: "[unserializable]",
+    });
+  });
+
+  it("does not let a bound field set that refuses enumeration throw out of with()", () => {
+    const hostile = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error("ownKeys exploded");
+        },
+      },
+    );
+
+    let log: ReturnType<typeof requestLogger> | undefined;
+    expect(() => {
+      log = requestLogger("req-abc", { now: CLOCK }).with(hostile);
+    }).not.toThrow();
+
+    log!.error("the real fault");
+
+    expect(parsedLine("error")).toMatchObject({
+      msg: "the real fault",
+      request_id: "req-abc",
+      log_error: "bound fields could not be read",
+    });
   });
 });
 
