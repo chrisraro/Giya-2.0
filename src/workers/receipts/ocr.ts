@@ -2,6 +2,7 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { jobLogger } from "@/lib/log";
 import type { Database } from "@/lib/supabase/types";
 
 import type { OcrProcessPayload } from "./schemas";
@@ -118,7 +119,12 @@ export type OcrProcessResult =
   /** The outcome could not be read. Ask for another delivery. */
   | { readonly kind: "unreadable"; readonly reason: string };
 
-const LOG_PREFIX = "[workers/receipts/ocr]";
+// The correlation key is the `job_id` the payload already carries and
+// src/lib/queue/claim.ts already leases - not a second scheme. `worker` and
+// `receipt_id` ride along as FIELDS rather than as a "[workers/receipts/ocr]"
+// prefix, because a prefix has to be parsed back out with a regex before
+// anything can be filtered on it, and the receipt id is the join key a
+// consumer's support ticket actually arrives with.
 
 /**
  * Run one receipt through the pipeline and classify what it did.
@@ -134,6 +140,10 @@ export async function runOcrProcess(
   deps: OcrProcessDeps,
 ): Promise<OcrProcessResult> {
   const receiptId = payload.receipt_id;
+  const log = jobLogger(payload.job_id).with({
+    worker: "ocr.process",
+    receipt_id: receiptId,
+  });
 
   try {
     // Doc 36 Stages 2-10. Idempotent by receipt status, by the `claimReceipt`
@@ -148,7 +158,7 @@ export async function runOcrProcess(
     // whatever state its last successful write put it in - which the status
     // read below would report accurately if it could run. It cannot be trusted
     // to, so this reports the fault instead.
-    console.error(`${LOG_PREFIX} processReceipt threw for receipt ${receiptId}`, error);
+    log.error("processReceipt threw", { err: error, outcome: "unreadable" });
     return { kind: "unreadable", reason: "processReceipt threw" };
   }
 
@@ -159,23 +169,24 @@ export async function runOcrProcess(
     .maybeSingle<{ status: string }>();
 
   if (error !== null) {
-    console.error(`${LOG_PREFIX} could not read the outcome of receipt ${receiptId}`, error);
+    log.error("could not read the receipt outcome", { err: error, outcome: "unreadable" });
     return { kind: "unreadable", reason: error.message };
   }
 
   if (data === null) {
-    console.error(`${LOG_PREFIX} receipt ${receiptId} does not exist`);
+    log.error("receipt does not exist", { outcome: "gone" });
     return { kind: "gone" };
   }
 
   if (TERMINAL_STATUSES.has(data.status)) {
-    console.info(`${LOG_PREFIX} receipt ${receiptId} is '${data.status}'; acking`);
+    log.info("terminal outcome; acking", { status: data.status, outcome: "terminal" });
     return { kind: "terminal", status: data.status };
   }
 
   // 'queued' or 'processing'. Doc 36 Stage 2 names both retry-eligible.
-  console.warn(
-    `${LOG_PREFIX} receipt ${receiptId} is still '${data.status}' after a pass; asking QStash to retry`,
-  );
+  log.warn("still not terminal after a pass; asking QStash to retry", {
+    status: data.status,
+    outcome: "retryable",
+  });
   return { kind: "retryable", status: data.status };
 }

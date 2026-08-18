@@ -1,11 +1,12 @@
 import "server-only";
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import type { User } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 import type { z } from "zod";
 
+import { requestLogger, resolveRequestId as resolveInboundRequestId } from "@/lib/log";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { del, get, redisKey, set, setNx } from "@/lib/redis";
 import { createClient } from "@/lib/supabase/server";
@@ -42,11 +43,10 @@ import {
 //   8. handler               -> domain errors as thrown ApiError
 //   9. envelope
 
-// Accepted shape for an inbound X-Request-Id. Client-supplied ids are useful
-// for end-to-end correlation but are untrusted input that lands in log lines,
-// so anything outside this alphabet is discarded and replaced rather than
-// echoed (log injection, absurd lengths, control characters).
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
+// The inbound X-Request-Id screen lives in src/lib/log.ts now, not here.
+// It moved because src/instrumentation.ts's `onRequestError` needs the same
+// rule for server components and pages - which never reach this file - and
+// two copies of a correlation scheme is two correlation schemes.
 
 // Idempotency-Key alphabet. UUIDs and ULIDs both satisfy it. The colon is
 // excluded on purpose: it is the Redis key separator, so allowing it would
@@ -178,8 +178,7 @@ interface IdempotencyRecord {
 }
 
 function resolveRequestId(request: NextRequest): string {
-  const inbound = request.headers.get("x-request-id");
-  return inbound && REQUEST_ID_PATTERN.test(inbound) ? inbound : randomUUID();
+  return resolveInboundRequestId(request.headers.get("x-request-id"));
 }
 
 function resolveClientIp(request: NextRequest): string {
@@ -357,12 +356,30 @@ export function defineHandler<
     // responses too, not only on the happy path.
     const responseHeaders: Record<string, string> = {};
 
+    // Hoisted out of the try purely so the catch can name the caller. A 500
+    // that says WHICH request but not WHOSE is one bisect step short of
+    // useful, and the catch below is reachable from before step 2 has run
+    // (`createClient` and `auth.getUser` can both fail), so this has to have a
+    // value that is honest at every point rather than only after the session
+    // resolves. "(anonymous)" is emitted rather than the key being dropped:
+    // a field that is sometimes absent is a field nobody filters on.
+    let userId: string | null = null;
+
+    // A function, not a bound logger: `userId` is not known yet at this point
+    // and the whole reason it is hoisted is that it changes.
+    const log = () =>
+      requestLogger(requestId).with({
+        route: config.route,
+        user_id: userId ?? "(anonymous)",
+      });
+
     try {
       // --- 2. session ---------------------------------------------------
       const supabase = await createClient();
       const {
         data: { user },
       } = await supabase.auth.getUser();
+      userId = user?.id ?? null;
 
       if (config.requireSession && !user) {
         throw new ApiError(
@@ -519,7 +536,10 @@ export function defineHandler<
         }
       } catch (redisError) {
         // Fail CLOSED. See the block comment above readIdempotencyRecord.
-        console.error("[api] idempotency gate unavailable, failing closed", redisError);
+        log().error("idempotency gate unavailable, failing closed", {
+          err: redisError,
+          status: 503,
+        });
         throw new ApiError(
           503,
           API_ERROR_CODES.DEPENDENCY_UNAVAILABLE,
@@ -580,7 +600,7 @@ export function defineHandler<
         // Release the key so a transient failure does not become permanent
         // for it. Only successful executions are worth replaying.
         await del(recordKey).catch((releaseError: unknown) => {
-          console.error("[api] failed to release idempotency key", releaseError);
+          log().error("failed to release the idempotency key", { err: releaseError });
           return 0;
         });
         throw handlerError;
@@ -606,7 +626,7 @@ export function defineHandler<
       } catch (storeError) {
         // The side effect already happened; see the fail-closed note above
         // for why this direction is deliberately different.
-        console.error("[api] failed to persist idempotency record", storeError);
+        log().error("failed to persist the idempotency record", { err: storeError });
       }
 
       return jsonResponse(payload.body, payload.status, requestId, {
@@ -619,9 +639,29 @@ export function defineHandler<
       }
 
       // Anything not deliberately thrown as an ApiError is an unexpected
-      // fault. The message and stack stay server-side (Sentry/OTel correlate
-      // via request_id); the client gets a generic 500.
-      console.error(`[api] unhandled error in ${config.route} (request_id=${requestId})`, error);
+      // fault. The message and stack stay server-side; the client gets a
+      // generic 500 carrying only the request id, which is the join key
+      // between the two halves.
+      //
+      // The fields are the answer to t7-5-brief.md's question, one clause
+      // each: `request_id` (which request), `user_id` (which user), `err.stack`
+      // (which line threw) and `release`, which src/lib/log.ts stamps from the
+      // platform's commit sha (which deploy).
+      //
+      // THIS LINE IS THE ONLY RECORD OF THIS FAULT. Sentry does NOT also get
+      // it, even with a DSN configured, and it is worth being exact about why
+      // because the opposite is the natural assumption: `onRequestError` fires
+      // from Next's OUTER catch (app-route.js), and this catch swallows the
+      // throw and returns a 500 Response - so from Next's side nothing failed
+      // and the hook never runs. Every /api/v1 500 is here and nowhere else.
+      //
+      // That is a deliberate consequence of the never-leak posture and not a
+      // gap to paper over locally: capturing to Sentry from inside this catch
+      // would import the SDK into the request path of every route. If /api/v1
+      // faults are wanted in Sentry, the honest fix is one explicit
+      // `captureException` behind the same DSN check, and it is a decision
+      // worth making on purpose rather than a comment worth assuming.
+      log().error("unhandled error", { err: error, status: 500 });
       return errorResponse(
         new ApiError(500, API_ERROR_CODES.INTERNAL, "Something went wrong. Please try again."),
         requestId,

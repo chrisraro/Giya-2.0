@@ -1,0 +1,1251 @@
+{
+  "task": "T7.5 - structured logs and env-optional Sentry",
+  "mutants": [
+    {
+      "name": "M-log-level-channel",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (level === \"error\") console.error(line);",
+      "replacement": "  if (level === \"error\") console.info(line);",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "an error must land on the error channel, not merely somewhere"
+    },
+    {
+      "name": "M-log-one-line",
+      "file": "src/lib/log.ts",
+      "anchor": "      write(level, JSON.stringify(entry));",
+      "replacement": "      write(level, JSON.stringify(entry, null, 2));",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "one entry is one line - a pretty-printed entry breaks every aggregator"
+    },
+    {
+      "name": "M-log-clock-injection",
+      "file": "src/lib/log.ts",
+      "anchor": "  const now = options.now ?? (() => new Date());",
+      "replacement": "  const now = () => new Date();",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "the timestamp comes from the injected clock, so tests assert a literal"
+    },
+    {
+      "name": "M-log-sink-injection",
+      "file": "src/lib/log.ts",
+      "anchor": "  const write = options.write ?? consoleWrite;",
+      "replacement": "  const write = consoleWrite;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "an injected sink replaces the console rather than being ignored"
+    },
+    {
+      "name": "M-log-correlation-key",
+      "file": "src/lib/log.ts",
+      "anchor": "  return createLogger({ key: \"request_id\", value: requestId }, options, {});",
+      "replacement": "  return createLogger({ key: \"job_id\", value: requestId }, options, {});",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a request logger emits request_id, not job_id"
+    },
+    {
+      "name": "M-log-reserved-keys",
+      "file": "src/lib/log.ts",
+      "anchor": "      if (RESERVED_KEYS.has(key)) continue;",
+      "replacement": "      if (false) continue;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a caller-supplied field cannot relabel level/time/msg/request_id"
+    },
+    {
+      "name": "M-log-correlation-missing-off",
+      "file": "src/lib/log.ts",
+      "anchor": "    if (!traceable) entry.correlation_missing = true;",
+      "replacement": "    if (false) entry.correlation_missing = true;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a blank correlation id is flagged, so untraceable lines are greppable"
+    },
+    {
+      "name": "M-log-correlation-missing-always",
+      "file": "src/lib/log.ts",
+      "anchor": "    if (!traceable) entry.correlation_missing = true;",
+      "replacement": "    if (true) entry.correlation_missing = true;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "the flag is not stamped on a line that HAS an id"
+    },
+    {
+      "name": "M-log-with-bound-fields",
+      "file": "src/lib/log.ts",
+      "anchor": "    with: (fields) => createLogger(correlation, options, mergeFields(bound, fields)),",
+      "replacement": "    with: (fields) => createLogger(correlation, options, {}),",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "fields bound by with() appear on every later entry"
+    },
+    {
+      "name": "M-log-error-serialize",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (!isErrorLike(value)) return value;",
+      "replacement": "  if (true) return value;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "THE TRAP - an Error handed straight to JSON.stringify becomes {}"
+    },
+    {
+      "name": "M-log-error-stack",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (typeof error.stack === \"string\") serialized.stack = error.stack;",
+      "replacement": "  if (false) serialized.stack = error.stack;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "the stack survives - 'which line threw' is the whole point"
+    },
+    {
+      "name": "M-log-error-cause",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (error.cause !== undefined) serialized.cause = error.cause;",
+      "replacement": "  if (false) serialized.cause = error.cause;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "the cause chain survives - the real fault is usually at the bottom"
+    },
+    {
+      "name": "M-log-error-code",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (error.code !== undefined) serialized.code = error.code;",
+      "replacement": "  if (false) serialized.code = error.code;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a driver error code (23505, 42501) survives"
+    },
+    {
+      "name": "M-log-error-cross-realm",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (Object.prototype.toString.call(value) !== \"[object Error]\") return false;",
+      "replacement": "  return false;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "an Error from another realm is still serialized, not silently emptied"
+    },
+    {
+      "name": "M-log-redact-keys-off",
+      "file": "src/lib/log.ts",
+      "anchor": "  return SENSITIVE_KEY_PARTS.some((part) => normalized.includes(part));",
+      "replacement": "  return false;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "every secret-shaped key is redacted"
+    },
+    {
+      "name": "M-log-redact-keys-everything",
+      "file": "src/lib/log.ts",
+      "anchor": "  return SENSITIVE_KEY_PARTS.some((part) => normalized.includes(part));",
+      "replacement": "  return true;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "route/user_id/receipt_id are NOT redacted - over-redaction is also a defect"
+    },
+    {
+      "name": "M-log-redact-at-emit",
+      "file": "src/lib/log.ts",
+      "anchor": "        entry[key] = isSensitiveKey(key) ? REDACTED : walk(value, 1, new WeakSet<object>());",
+      "replacement": "        entry[key] = walk(value, 1, new WeakSet<object>());",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a top-level secret field is redacted, including one bound by with()"
+    },
+    {
+      "name": "M-log-redact-nested",
+      "file": "src/lib/log.ts",
+      "anchor": "        result[key] = isSensitiveKey(key) ? REDACTED : walk(entry, depth + 1, seen);",
+      "replacement": "        result[key] = walk(entry, depth + 1, seen);",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "redaction reaches inside nested objects and arrays, not just the top"
+    },
+    {
+      "name": "M-log-redact-jwt",
+      "file": "src/lib/log.ts",
+      "anchor": "    JWT_PATTERN.test(value) ||",
+      "replacement": "    false ||",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a JWT is redacted by shape even under an innocent key"
+    },
+    {
+      "name": "M-log-redact-bearer",
+      "file": "src/lib/log.ts",
+      "anchor": "    hasCredential(value) ||",
+      "replacement": "    false ||",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a bearer or basic credential is redacted by shape, anywhere in the value"
+    },
+    {
+      "name": "M-log-circular",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (seen.has(object)) return \"[circular]\";",
+      "replacement": "  if (false) return \"[circular]\";",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a cycle is named, not walked"
+    },
+    {
+      "name": "M-log-circular-siblings",
+      "file": "src/lib/log.ts",
+      "anchor": "    seen.delete(object);\n  }\n}",
+      "replacement": "  }\n}",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a shared sibling object is printed twice, not misreported as a cycle"
+    },
+    {
+      "name": "M-log-depth-cap",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (depth >= MAX_DEPTH) return \"[truncated]\";",
+      "replacement": "  if (false) return \"[truncated]\";",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "the walk stops at a depth cap"
+    },
+    {
+      "name": "M-log-array-cap",
+      "file": "src/lib/log.ts",
+      "anchor": "      if (object.length > MAX_ARRAY_ITEMS) {",
+      "replacement": "      if (false) {",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a capped array says how many entries it dropped"
+    },
+    {
+      "name": "M-log-string-cap",
+      "file": "src/lib/log.ts",
+      "anchor": "      return value.length > MAX_STRING_LENGTH",
+      "replacement": "      return false && value.length > MAX_STRING_LENGTH",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a huge string is truncated rather than becoming the log line"
+    },
+    {
+      "name": "M-log-bigint",
+      "file": "src/lib/log.ts",
+      "anchor": "      return value.toString();",
+      "replacement": "      return value;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a bigint does not make JSON.stringify throw the entry away"
+    },
+    {
+      "name": "M-log-nonfinite",
+      "file": "src/lib/log.ts",
+      "anchor": "      return Number.isFinite(value) ? value : String(value);",
+      "replacement": "      return value;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "NaN/Infinity are named, not silently emitted as null"
+    },
+    {
+      "name": "M-log-headers",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (object instanceof Headers) {",
+      "replacement": "  if (false && object instanceof Headers) {",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a Headers instance does not stringify to {} (the Error trap, again)"
+    },
+    {
+      "name": "M-log-map",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (object instanceof Map) {",
+      "replacement": "  if (false && object instanceof Map) {",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a Map does not stringify to {}"
+    },
+    {
+      "name": "M-log-set",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (object instanceof Set) {",
+      "replacement": "  if (false && object instanceof Set) {",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a Set does not stringify to {}"
+    },
+    {
+      "name": "M-log-date",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (object instanceof Date) {",
+      "replacement": "  if (false && object instanceof Date) {",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a Date renders as an ISO string"
+    },
+    {
+      "name": "M-log-invalid-date",
+      "file": "src/lib/log.ts",
+      "anchor": "    return Number.isNaN(object.getTime()) ? \"[invalid date]\" : object.toISOString();",
+      "replacement": "    return object.toISOString();",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "an invalid Date is named rather than throwing the entry away"
+    },
+    {
+      "name": "M-log-regexp",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (object instanceof RegExp) {",
+      "replacement": "  if (false && object instanceof RegExp) {",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a RegExp does not stringify to {}"
+    },
+    {
+      "name": "M-log-never-throws",
+      "file": "src/lib/log.ts",
+      "anchor": "      } catch {\n        // NEVER THE REASON SOMETHING FAILS. The sink itself is gone. This",
+      "replacement": "      } catch (rethrown) {\n        throw rethrown;\n        // NEVER THE REASON SOMETHING FAILS. The sink itself is gone. This",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a sink that fails twice never becomes the fault it was reporting"
+    },
+    {
+      "name": "M-log-release",
+      "file": "src/lib/log.ts",
+      "anchor": "    if (release !== null) entry.release = release;",
+      "replacement": "    if (false) entry.release = release;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "'on which deploy' - the commit sha is stamped on the line"
+    },
+    {
+      "name": "M-log-release-blank",
+      "file": "src/lib/log.ts",
+      "anchor": "  return candidate.trim().length > 0 ? candidate : null;",
+      "replacement": "  return candidate;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "off-platform the key is omitted, not emitted as an empty string"
+    },
+    {
+      "name": "M-handler-drop-request-id",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "      requestLogger(requestId).with({",
+      "replacement": "      requestLogger(\"\").with({",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "THE BRIEF'S NAMED MUTANT - drop the id from the adopted call site"
+    },
+    {
+      "name": "M-handler-drop-route",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "        route: config.route,",
+      "replacement": "        route: \"unknown\",",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "the line names the route that threw"
+    },
+    {
+      "name": "M-handler-drop-user",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "        user_id: userId ?? \"(anonymous)\",",
+      "replacement": "        user_id: \"(anonymous)\",",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "'for which user' - a signed-in caller is named, not flattened to anonymous"
+    },
+    {
+      "name": "M-handler-anonymous-fallback",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "        user_id: userId ?? \"(anonymous)\",",
+      "replacement": "        user_id: userId,",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "the user_id key is always present, never null - a sometimes-absent field is unfilterable"
+    },
+    {
+      "name": "M-handler-user-hoist",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "      userId = user?.id ?? null;",
+      "replacement": "      userId = null;",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "the hoisted userId is actually assigned from the resolved session"
+    },
+    {
+      "name": "M-handler-drop-error",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "      log().error(\"unhandled error\", { err: error, status: 500 });",
+      "replacement": "      log().error(\"unhandled error\", { status: 500 });",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "'which line threw' - the throw itself reaches the line, name/message/stack"
+    },
+    {
+      "name": "M-handler-drop-status",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "      log().error(\"unhandled error\", { err: error, status: 500 });",
+      "replacement": "      log().error(\"unhandled error\", { err: error, status: 200 });",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "the line reports the status the caller actually received"
+    },
+    {
+      "name": "M-handler-log-apierror-too",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "      if (isApiError(error)) {",
+      "replacement": "      if (isApiError(error)) { log().error(\"unhandled error\", { err: error, status: 500 });",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "a deliberate domain refusal is NOT logged as a fault - noise buries signal"
+    },
+    {
+      "name": "M-handler-idempotency-gate-error",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "        log().error(\"idempotency gate unavailable, failing closed\", {\n          err: redisError,\n          status: 503,\n        });",
+      "replacement": "        log().error(\"idempotency gate unavailable, failing closed\", { status: 503 });",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "the fail-closed 503 says what Redis actually did, correlated to the request"
+    },
+    {
+      "name": "M-handler-request-id-delegates",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "  return resolveInboundRequestId(request.headers.get(\"x-request-id\"));",
+      "replacement": "  return resolveInboundRequestId(null);",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "the handler passes the INBOUND header to the shared screen, not nothing"
+    },
+    {
+      "name": "M-ocr-drop-job-id",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "  const log = jobLogger(payload.job_id).with({",
+      "replacement": "  const log = jobLogger(\"\").with({",
+      "tests": [
+        "src/workers/receipts/ocr.test.ts"
+      ],
+      "kills": "THE BRIEF'S NAMED MUTANT - drop the id from the adopted call site (ocr.process)"
+    },
+    {
+      "name": "M-ocr-drop-receipt-id",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "    receipt_id: receiptId,",
+      "replacement": "    receipt_id: \"unknown\",",
+      "tests": [
+        "src/workers/receipts/ocr.test.ts"
+      ],
+      "kills": "the line names the receipt - the id a support ticket actually arrives with"
+    },
+    {
+      "name": "M-ocr-drop-worker",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "    worker: \"ocr.process\",",
+      "replacement": "    worker: \"something.else\",",
+      "tests": [
+        "src/workers/receipts/ocr.test.ts"
+      ],
+      "kills": "the line names which worker wrote it"
+    },
+    {
+      "name": "M-ocr-drop-throw",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "    log.error(\"processReceipt threw\", { err: error, outcome: \"unreadable\" });",
+      "replacement": "    log.error(\"processReceipt threw\", { outcome: \"unreadable\" });",
+      "tests": [
+        "src/workers/receipts/ocr.test.ts"
+      ],
+      "kills": "the pipeline's own throw reaches the line, not just the fact that one happened"
+    },
+    {
+      "name": "M-ocr-drop-read-error",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "    log.error(\"could not read the receipt outcome\", { err: error, outcome: \"unreadable\" });",
+      "replacement": "    log.error(\"could not read the receipt outcome\", { outcome: \"unreadable\" });",
+      "tests": [
+        "src/workers/receipts/ocr.test.ts"
+      ],
+      "kills": "the failed status read says what the database actually answered"
+    },
+    {
+      "name": "M-ocr-gone-not-logged",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "    log.error(\"receipt does not exist\", { outcome: \"gone\" });",
+      "replacement": "    void 0;",
+      "tests": [
+        "src/workers/receipts/ocr.test.ts"
+      ],
+      "kills": "a signed job for a receipt that does not exist is still reported"
+    },
+    {
+      "name": "M-ocr-terminal-status-field",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "    log.info(\"terminal outcome; acking\", { status: data.status, outcome: \"terminal\" });",
+      "replacement": "    log.info(`terminal outcome ${data.status}; acking`, { outcome: \"terminal\" });",
+      "tests": [
+        "src/workers/receipts/ocr.test.ts"
+      ],
+      "kills": "the status is a FIELD, not a word inside a sentence a regex has to reach into"
+    },
+    {
+      "name": "M-ocr-retryable-level",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "  log.warn(\"still not terminal after a pass; asking QStash to retry\", {",
+      "replacement": "  log.info(\"still not terminal after a pass; asking QStash to retry\", {",
+      "tests": [
+        "src/workers/receipts/ocr.test.ts"
+      ],
+      "kills": "asking QStash for a retry is a warning, not routine info"
+    },
+    {
+      "name": "M-email-drop-job-id",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "  const log = jobLogger(payload.job_id).with({ worker: \"notify.email\" });",
+      "replacement": "  const log = jobLogger(\"\").with({ worker: \"notify.email\" });",
+      "tests": [
+        "src/workers/notify/email.test.ts"
+      ],
+      "kills": "THE BRIEF'S NAMED MUTANT - drop the id from the adopted call site (notify.email)"
+    },
+    {
+      "name": "M-email-batch-read-error",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "    log.error(\"could not read the batch\", {\n      err: error,\n      requested: payload.notification_ids.length,\n    });",
+      "replacement": "    log.error(\"could not read the batch\", { requested: payload.notification_ids.length });",
+      "tests": [
+        "src/workers/notify/email.test.ts"
+      ],
+      "kills": "the unreadable batch says what the database answered"
+    },
+    {
+      "name": "M-email-summary-counts",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "  log.info(\"batch complete\", {\n    requested: payload.notification_ids.length,\n    sent,",
+      "replacement": "  log.info(`batch complete: sent=${sent}`, {\n    requested: payload.notification_ids.length,",
+      "tests": [
+        "src/workers/notify/email.test.ts"
+      ],
+      "kills": "the batch counts are aggregatable fields, not numbers inside a sentence"
+    },
+    {
+      "name": "M-email-deliver-logger-thread",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "    const outcome = await deliver(row, { supabase, send, origin, resolveAddress, log });",
+      "replacement": "    const outcome = await deliver(row, { supabase, send, origin, resolveAddress, log: jobLogger(\"\") });",
+      "tests": [
+        "src/workers/notify/email.test.ts"
+      ],
+      "kills": "the correlated logger is THREADED into the per-row helpers, not rebuilt bare"
+    },
+    {
+      "name": "M-email-suppression-logger-thread",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "    const suppression = await suppressionReason(deps.supabase, row.user_id, row.kind, deps.log);",
+      "replacement": "    const suppression = await suppressionReason(deps.supabase, row.user_id, row.kind, jobLogger(\"\"));",
+      "tests": [
+        "src/workers/notify/email.test.ts"
+      ],
+      "kills": "the deepest call site (the preference read) still carries the job id"
+    },
+    {
+      "name": "M-email-retryable-row",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "        notification_id: row.id,\n        user_id: row.user_id,\n        reason: result.reason,",
+      "replacement": "        user_id: row.user_id,\n        reason: result.reason,",
+      "tests": [
+        "src/workers/notify/email.test.ts"
+      ],
+      "kills": "a retryable row names WHICH row was left pending"
+    },
+    {
+      "name": "M-email-row-throw",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "    deps.log.error(\"unexpected failure delivering a row\", {\n      err: error,",
+      "replacement": "    deps.log.error(\"unexpected failure delivering a row\", {",
+      "tests": [
+        "src/workers/notify/email.test.ts"
+      ],
+      "kills": "a per-row throw reaches the line rather than being counted and discarded"
+    },
+    {
+      "name": "M-email-preferences-error",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "    log.error(\"could not read preferences; failing closed\", { err: error, user_id: userId });",
+      "replacement": "    log.error(\"could not read preferences; failing closed\", { user_id: userId });",
+      "tests": [
+        "src/workers/notify/email.test.ts"
+      ],
+      "kills": "the fail-closed suppression says why the read failed"
+    },
+    {
+      "name": "M-email-address-leak",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "        reason: result.reason,",
+      "replacement": "        reason: result.reason,\n        address: await deps.resolveAddress(row.user_id),",
+      "tests": [
+        "src/workers/notify/email.test.ts"
+      ],
+      "kills": "the recipient's address never reaches a log line"
+    },
+    {
+      "name": "M-log-request-id-screen",
+      "file": "src/lib/log.ts",
+      "anchor": "  return inbound && REQUEST_ID_PATTERN.test(inbound) ? inbound : newRequestId();",
+      "replacement": "  return inbound ?? newRequestId();",
+      "tests": [
+        "src/lib/log.test.ts",
+        "src/lib/api/handler.test.ts",
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "the ONE screen - a malformed inbound id is discarded everywhere, not echoed"
+    },
+    {
+      "name": "M-log-request-id-no-propagate",
+      "file": "src/lib/log.ts",
+      "anchor": "  return inbound && REQUEST_ID_PATTERN.test(inbound) ? inbound : newRequestId();",
+      "replacement": "  return newRequestId();",
+      "tests": [
+        "src/lib/log.test.ts",
+        "src/lib/api/handler.test.ts",
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "the ONE screen - a well-formed inbound id propagates everywhere"
+    },
+    {
+      "name": "M-log-request-id-fallback",
+      "file": "src/lib/log.ts",
+      "anchor": "  return `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;",
+      "replacement": "  return \"\";",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a runtime with no Web Crypto still mints an id its own screen accepts"
+    },
+    {
+      "name": "M-sentry-dsn-malformed",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "  return DSN_PATTERN.test(trimmed) ? trimmed : null;",
+      "replacement": "  return trimmed;",
+      "tests": [
+        "src/lib/observability/sentry.test.ts",
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "a blank, whitespace or typo'd DSN reads as ABSENT, never handed to Sentry.init"
+    },
+    {
+      "name": "M-sentry-client-dsn-fallback",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "  const raw = options.client ? env.NEXT_PUBLIC_SENTRY_DSN : (env.SENTRY_DSN ?? env.NEXT_PUBLIC_SENTRY_DSN);",
+      "replacement": "  const raw = env.SENTRY_DSN ?? env.NEXT_PUBLIC_SENTRY_DSN;",
+      "tests": [
+        "src/lib/observability/sentry.test.ts",
+        "src/instrumentation-client.test.ts"
+      ],
+      "kills": "the browser reads only NEXT_PUBLIC_SENTRY_DSN - the other is unreachable there"
+    },
+    {
+      "name": "M-sentry-pii",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "    sendDefaultPii: false,",
+      "replacement": "    sendDefaultPii: true,",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "Sentry never decides for itself what counts as personal data here"
+    },
+    {
+      "name": "M-sentry-traces-default",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "    tracesSampleRate: Number.isFinite(rate) && rate >= 0 && rate <= 1 ? rate : 0,",
+      "replacement": "    tracesSampleRate: Number.isFinite(rate) ? rate : 1,",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "tracing is off by default and a typo'd rate cannot become a 100% bill"
+    },
+    {
+      "name": "M-sentry-release",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "    ...(release.length > 0 ? { release } : {}),",
+      "replacement": "    ...({} as Record<string, unknown>),",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "the release is set at RUNTIME, since no build plugin will inject one"
+    },
+    {
+      "name": "M-sentry-beforesend",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "    beforeSend: (event: SentryEventLike) => scrubEvent(event),",
+      "replacement": "    beforeSend: (event: SentryEventLike) => event,",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "events are scrubbed on the way out, not merely scrubbable"
+    },
+    {
+      "name": "M-sentry-beforesend-transaction",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "    beforeSendTransaction: (event: SentryEventLike) => scrubEvent(event),",
+      "replacement": "    beforeSendTransaction: (event: SentryEventLike) => event,",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "transactions are scrubbed too - they carry the same request object"
+    },
+    {
+      "name": "M-sentry-header-allowlist",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "    scrubbed.request = {\n      ...(path ? { url: path } : {}),\n      ...(method ? { method } : {}),\n      headers: kept,\n    };",
+      "replacement": "    scrubbed.request = { ...scrubbed.request, headers: kept };",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "the body, query string and cookies are DROPPED, not merely joined by an allowlist"
+    },
+    {
+      "name": "M-sentry-header-denylist",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "    for (const name of FORWARDED_HEADERS) {",
+      "replacement": "    for (const name of Object.keys(headers ?? {})) {",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "headers are ALLOWlisted - authorization, cookie and x-forwarded-for never forward"
+    },
+    {
+      "name": "M-sentry-user-pii",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "    scrubbed.user = scrubbed.user.id === undefined ? {} : { id: scrubbed.user.id };",
+      "replacement": "    scrubbed.user = { ...scrubbed.user };",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "the user's email, username and IP never reach Sentry; the id does"
+    },
+    {
+      "name": "M-sentry-redact-extra",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "      scrubbed[key] = redact(value) as Record<string, unknown>;",
+      "replacement": "      scrubbed[key] = value;",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "src/lib/log.ts's own redaction applies to anything forwarded - one scrubber, not two"
+    },
+    {
+      "name": "M-sentry-no-mutate",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "  const scrubbed: SentryEventLike = { ...event };",
+      "replacement": "  const scrubbed: SentryEventLike = event;",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "scrubbing does not mutate the caller's event"
+    },
+    {
+      "name": "M-instr-loads-without-dsn",
+      "file": "src/instrumentation.ts",
+      "anchor": "  const dsn = readDsn(env);\n  if (dsn === null) {",
+      "replacement": "  const dsn = readDsn(env);\n  if (false) {",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "THE SHIPPING PATH - with no DSN @sentry/nextjs is never even loaded"
+    },
+    {
+      "name": "M-instr-noise-without-dsn",
+      "file": "src/instrumentation.ts",
+      "anchor": "    sentry = null;\n    return;\n  }",
+      "replacement": "    sentry = null;\n    console.warn(\"[sentry] no SENTRY_DSN; error reporting is disabled\");\n    return;\n  }",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "the disabled path writes NOTHING to any console channel"
+    },
+    {
+      "name": "M-instr-log-is-conditional",
+      "file": "src/instrumentation.ts",
+      "anchor": "    requestLogger(requestId).error(\"unhandled error rendering a request\", {",
+      "replacement": "    if (sentry === null) return;\n    requestLogger(requestId).error(\"unhandled error rendering a request\", {",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "THE POINT OF THE TASK - a page fault is logged whether or not Sentry exists"
+    },
+    {
+      "name": "M-instr-drop-request-id",
+      "file": "src/instrumentation.ts",
+      "anchor": "    const requestId = resolveRequestId(headerValue(request.headers, \"x-request-id\"));",
+      "replacement": "    const requestId = \"\";",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "THE BRIEF'S NAMED MUTANT - drop the id from the adopted call site (page errors)"
+    },
+    {
+      "name": "M-instr-drop-error",
+      "file": "src/instrumentation.ts",
+      "anchor": "      err: error,\n      // `route_path` is the PATTERN",
+      "replacement": "      // `route_path` is the PATTERN",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "'which line threw' for a page - the throw itself reaches the line"
+    },
+    {
+      "name": "M-instr-drop-route-path",
+      "file": "src/instrumentation.ts",
+      "anchor": "      route_path: context.routePath,",
+      "replacement": "      route_path: \"unknown\",",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "the route PATTERN is on the line - it is what you group a page outage by"
+    },
+    {
+      "name": "M-instr-drop-path",
+      "file": "src/instrumentation.ts",
+      "anchor": "      path: request.path,",
+      "replacement": "      path: undefined,",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "the requested path is on the line - it is what you reproduce with"
+    },
+    {
+      "name": "M-instr-array-header",
+      "file": "src/instrumentation.ts",
+      "anchor": "  if (Array.isArray(raw)) return raw[0] ?? null;",
+      "replacement": "  if (Array.isArray(raw)) return null;",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "a repeated X-Request-Id header still correlates instead of minting a new id"
+    },
+    {
+      "name": "M-instr-forward",
+      "file": "src/instrumentation.ts",
+      "anchor": "    sentry?.captureRequestError(error, request, context);",
+      "replacement": "    void 0;",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "with a DSN the fault is forwarded as well as logged"
+    },
+    {
+      "name": "M-instr-never-throws",
+      "file": "src/instrumentation.ts",
+      "anchor": "  } catch {\n    // See above: never the reason something fails.",
+      "replacement": "  } catch (rethrown) {\n    throw rethrown;\n    // See above: never the reason something fails.",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "the hook cannot replace a diagnosable 500 with an undiagnosable one"
+    },
+    {
+      "name": "M-instr-boot-failure-silent",
+      "file": "src/instrumentation.ts",
+      "anchor": "    requestLogger(\"instrumentation-boot\").error(\"Sentry is configured but failed to start\", {",
+      "replacement": "    void ((): unknown => ({",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "a DSN that is set but does not start is reported - silence would read as 'no errors'"
+    },
+    {
+      "name": "M-instr-boot-failure-throws",
+      "file": "src/instrumentation.ts",
+      "anchor": "  try {\n    const loaded = await (deps.load ?? (() => import(\"@sentry/nextjs\") as Promise<SentryLike>))();\n    loaded.init(buildSentryOptions({ dsn, env }));\n    sentry = loaded;\n  } catch (error) {",
+      "replacement": "  {\n    const loaded = await (deps.load ?? (() => import(\"@sentry/nextjs\") as Promise<SentryLike>))();\n    loaded.init(buildSentryOptions({ dsn, env }));\n    sentry = loaded;\n  }\n  if (false) { const error: unknown = null;",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "a monitoring tool that fails to start cannot take the server down with it"
+    },
+    {
+      "name": "M-instr-stale-sdk",
+      "file": "src/instrumentation.ts",
+      "anchor": "    sentry = null;\n    return;\n  }",
+      "replacement": "    return;\n  }",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "a later register with no DSN actually stops the forwarding"
+    },
+    {
+      "name": "M-client-loads-without-dsn",
+      "file": "src/instrumentation-client.ts",
+      "anchor": "  const dsn = readDsn(env, { client: true });\n  resetTransitionWarning();\n  if (dsn === null) {",
+      "replacement": "  const dsn = readDsn(env, { client: true });\n  resetTransitionWarning();\n  if (false) {",
+      "tests": [
+        "src/instrumentation-client.test.ts"
+      ],
+      "kills": "THE SHIPPING PATH, browser side - nothing is loaded before hydration"
+    },
+    {
+      "name": "M-client-replay",
+      "file": "src/instrumentation-client.ts",
+      "anchor": "    loaded.init(buildSentryOptions({ dsn, env }));",
+      "replacement": "    loaded.init({ ...buildSentryOptions({ dsn, env }), replaysSessionSampleRate: 0.1 });",
+      "tests": [
+        "src/instrumentation-client.test.ts"
+      ],
+      "kills": "Session Replay is NOT switched on - these screens carry receipts and balances"
+    },
+    {
+      "name": "M-client-load-failure-throws",
+      "file": "src/instrumentation-client.ts",
+      "anchor": "  } catch (error) {\n    sentry = null;\n    deps.onError?.(error);",
+      "replacement": "  } catch (error) {\n    sentry = null;\n    throw error;\n    deps.onError?.(error);",
+      "tests": [
+        "src/instrumentation-client.test.ts"
+      ],
+      "kills": "a crash reporter that fails to load cannot become a blank screen"
+    },
+    {
+      "name": "M-client-transition-throws",
+      "file": "src/instrumentation-client.ts",
+      "anchor": "  if (hook === undefined) return;",
+      "replacement": "  if (false) return;",
+      "tests": [
+        "src/instrumentation-client.test.ts"
+      ],
+      "kills": "the disabled path is SILENT, not merely non-throwing (a survivor lived here)"
+    },
+    {
+      "name": "M-client-transition-forward",
+      "file": "src/instrumentation-client.ts",
+      "anchor": "    hook.call(sentry, href, navigationType);",
+      "replacement": "    void href, navigationType;",
+      "tests": [
+        "src/instrumentation-client.test.ts"
+      ],
+      "kills": "with a DSN a router transition is actually forwarded"
+    },
+    {
+      "name": "M-client-transition-warn-once",
+      "file": "src/instrumentation-client.ts",
+      "anchor": "    if (!warnedAboutTransitions) {",
+      "replacement": "    if (true) {",
+      "tests": [
+        "src/instrumentation-client.test.ts"
+      ],
+      "kills": "a throwing transition hook is reported ONCE, not once per navigation"
+    },
+    {
+      "name": "M-client-transition-warn-silent",
+      "file": "src/instrumentation-client.ts",
+      "anchor": "      console.warn(\"[sentry] router transition instrumentation failed\", error);",
+      "replacement": "      void error;",
+      "tests": [
+        "src/instrumentation-client.test.ts"
+      ],
+      "kills": "a throwing transition hook is reported at all - silence reads as healthy"
+    },
+    {
+      "name": "M-client-transition-warn-reset",
+      "file": "src/instrumentation-client.ts",
+      "anchor": "  resetTransitionWarning();",
+      "replacement": "  void 0;",
+      "tests": [
+        "src/instrumentation-client.test.ts"
+      ],
+      "kills": "a re-registration can warn again, rather than one warning per process"
+    },
+    {
+      "name": "M-log-jwt-anchored",
+      "file": "src/lib/log.ts",
+      "anchor": "const JWT_PATTERN = /ey[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]*/;",
+      "replacement": "const JWT_PATTERN = /^ey[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]*$/;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a JWT INSIDE a URL query is redacted - the anchored rule protected nothing real"
+    },
+    {
+      "name": "M-log-supabase-key",
+      "file": "src/lib/log.ts",
+      "anchor": "    SUPABASE_KEY_PATTERN.test(value)",
+      "replacement": "    false",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "an sb_secret_ / sb_publishable_ key is redacted on its own"
+    },
+    {
+      "name": "M-log-field-isolation",
+      "file": "src/lib/log.ts",
+      "anchor": "      } catch {\n        entry[key] = \"[unserializable]\";",
+      "replacement": "      } catch {\n        throw new Error(\"field\");",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "ONE throwing getter costs one field, not the entire log line"
+    },
+    {
+      "name": "M-log-field-isolation-nested",
+      "file": "src/lib/log.ts",
+      "anchor": "      } catch {\n        result[key] = \"[unserializable]\";",
+      "replacement": "      } catch {\n        throw new Error(\"field\");",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a throwing getter NESTED inside a field costs that field, not the line"
+    },
+    {
+      "name": "M-log-ownkeys-fields",
+      "file": "src/lib/log.ts",
+      "anchor": "    } catch {\n      // `Object.keys()` on a Proxy that refuses to be enumerated at all. The\n      // fields are gone; the line - level, message, correlation id - is not.\n      entry.log_error = \"fields could not be read\";\n    }",
+      "replacement": "    } catch (rethrown) {\n      throw rethrown;\n    }",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "the ONE guard around both addFields calls - a Proxy that refuses enumeration costs the fields, not the line"
+    },
+    {
+      "name": "M-log-ownkeys-nested",
+      "file": "src/lib/log.ts",
+      "anchor": "      return \"[unreadable]\";",
+      "replacement": "      throw new Error(\"keys\");",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a nested Proxy that refuses enumeration costs its field, not the line"
+    },
+    {
+      "name": "M-log-clock-fallback",
+      "file": "src/lib/log.ts",
+      "anchor": "      entry.log_error = \"clock unavailable\";",
+      "replacement": "      throw new Error(\"clock\");",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a throwing clock loses the timestamp, not the correlated line"
+    },
+    {
+      "name": "M-log-serialize-fallback",
+      "file": "src/lib/log.ts",
+      "anchor": "            log_error: \"entry could not be serialized\",",
+      "replacement": "            log_error: undefined,",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "an unwritable entry still yields a minimal correlated fallback line"
+    },
+    {
+      "name": "M-log-reserved-correlation-missing",
+      "file": "src/lib/log.ts",
+      "anchor": "  \"correlation_missing\",",
+      "replacement": "  \"reserved_placeholder\",",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a caller field cannot clear the untraceability marker"
+    },
+    {
+      "name": "M-log-error-cycle-add",
+      "file": "src/lib/log.ts",
+      "anchor": "    seen.add(object);\n    const result = walk(serializeError(object), depth, seen);",
+      "replacement": "    const result = walk(serializeError(object), depth, seen);",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a cycle through an Error's cause is named, not walked"
+    },
+    {
+      "name": "M-log-error-cycle-delete",
+      "file": "src/lib/log.ts",
+      "anchor": "    const result = walk(serializeError(object), depth, seen);\n    seen.delete(object);",
+      "replacement": "    const result = walk(serializeError(object), depth, seen);",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "the same Error as a SIBLING is printed twice, not misreported as a cycle"
+    },
+    {
+      "name": "M-sentry-url-query",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "    const path = stripQuery(url);",
+      "replacement": "    const path = url;",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "CRITICAL - an OAuth code in the URL query never reaches Sentry"
+    },
+    {
+      "name": "M-sentry-url-fragment",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "  const cut = url.search(/[?#]/);",
+      "replacement": "  const cut = url.search(/[?]/);",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "the fragment is stripped too, where an implicit-flow token lives"
+    },
+    {
+      "name": "M-sentry-url-throws",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "  const cut = url.search(/[?#]/);",
+      "replacement": "  const cut = new URL(url).search.length > 0 ? url.indexOf(\"?\") : -1;",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "a relative or malformed url does not throw inside beforeSend"
+    },
+    {
+      "name": "M-instr-drop-render-source",
+      "file": "src/instrumentation.ts",
+      "anchor": "      render_source: context.renderSource,",
+      "replacement": "      render_source: undefined,",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "renderSource is on the line - it separates the two candidate incident shapes"
+    },
+    {
+      "name": "M-instr-drop-method",
+      "file": "src/instrumentation.ts",
+      "anchor": "      method: request.method,",
+      "replacement": "      method: undefined,",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "the HTTP method is on the line"
+    },
+    {
+      "name": "M-handler-release-key-id",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "          log().error(\"failed to release the idempotency key\", { err: releaseError });",
+      "replacement": "          log().error(\"failed to release the idempotency key\", {});",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "the release failure says what Redis did, under the same request id"
+    },
+    {
+      "name": "M-handler-persist-record-id",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "        log().error(\"failed to persist the idempotency record\", { err: storeError });",
+      "replacement": "        log().error(\"failed to persist the idempotency record\", {});",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "the persist failure - whose ONLY trace is this line - says what Redis did"
+    },
+    {
+      "name": "M-client-autostart",
+      "file": "src/instrumentation-client.ts",
+      "anchor": "void registerClient();",
+      "replacement": "void 0;",
+      "tests": [
+        "src/instrumentation-client.test.ts"
+      ],
+      "kills": "the module body actually wires the browser SDK up on import"
+    },
+    {
+      "name": "M-log-with-eager-spread",
+      "file": "src/lib/log.ts",
+      "anchor": "    with: (fields) => createLogger(correlation, options, mergeFields(bound, fields)),",
+      "replacement": "    with: (fields) => createLogger(correlation, options, { ...bound, ...fields }),",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "THE ROUND-2 REGRESSION - a hostile bound field must not throw out of with() itself"
+    },
+    {
+      "name": "M-log-merge-fields-keys",
+      "file": "src/lib/log.ts",
+      "anchor": "    merged.log_error = \"bound fields could not be read\";\n    return merged;",
+      "replacement": "    throw new Error(\"bound keys\");",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a bound field set that refuses enumeration costs the fields, not the with() call"
+    },
+    {
+      "name": "M-log-merge-fields-getter",
+      "file": "src/lib/log.ts",
+      "anchor": "    } catch {\n      merged[key] = \"[unserializable]\";\n    }",
+      "replacement": "    } catch (rethrown) {\n      throw rethrown;\n    }",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a throwing getter in a BOUND field costs that field, not the with() call"
+    },
+    {
+      "name": "M-log-credential-width",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (tail.length < 16) return false;\n  return /\\d/.test(tail) || /^[A-Za-z0-9+/]+={0,2}$/.test(tail);",
+      "replacement": "  return tail.length >= 8;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "the credential rule reads SHAPE, not length - it must not swallow provider prose"
+    },
+    {
+      "name": "M-log-credential-shape-off",
+      "file": "src/lib/log.ts",
+      "anchor": "  return /\\d/.test(tail) || /^[A-Za-z0-9+/]+={0,2}$/.test(tail);",
+      "replacement": "  return false;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a real opaque bearer token is still caught after the narrowing"
+    },
+    {
+      "name": "M-log-credential-first-match-only",
+      "file": "src/lib/log.ts",
+      "anchor": "  for (const match of value.matchAll(CREDENTIAL_PREFIX)) {",
+      "replacement": "  for (const match of [CREDENTIAL_PREFIX.exec(value)].filter((x) => x !== null)) {",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "prose mentioning 'basic auth' cannot shield a real Bearer token later in the string"
+    }
+  ]
+}

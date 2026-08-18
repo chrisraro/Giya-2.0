@@ -9,7 +9,7 @@
 // directions: a rejected receipt retried until its budget is gone, or a
 // recoverable one abandoned to a 24-hour sweep.
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
@@ -182,5 +182,107 @@ describe("runOcrProcess - the branches that are not a status", () => {
       kind: "unreadable",
       reason: "processReceipt threw",
     });
+  });
+});
+
+// =============================================================================
+// The log line (t7-5)
+// =============================================================================
+//
+// A worker's correlation key is the `job_id` its payload already carries and
+// src/lib/queue/claim.ts already leases. Every line this worker writes has to
+// carry it, because a worker log without one cannot be joined to the job row,
+// to the QStash delivery, or to the receipt a consumer is asking about.
+
+/** Fresh spies, so a count assertion below measures THIS test. The file's
+ * `mute()` re-spies an already-spied console and the calls accumulate. */
+function muteFresh(): void {
+  vi.restoreAllMocks();
+  vi.spyOn(console, "info").mockImplementation(() => undefined);
+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+}
+
+/** The one line a channel received, parsed. */
+function line(channel: "error" | "warn" | "info"): Record<string, unknown> {
+  const spy = console[channel] as unknown as { mock: { calls: unknown[][] } };
+  expect(spy.mock.calls).toHaveLength(1);
+  return JSON.parse(String(spy.mock.calls[0]![0])) as Record<string, unknown>;
+}
+
+describe("runOcrProcess - every line is traceable", () => {
+  beforeEach(muteFresh);
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("names the job and the receipt when processReceipt throws", async () => {
+    const t = deps(
+      ok("approved"),
+      vi.fn(async () => {
+        throw new Error("OCR container refused the connection");
+      }),
+    );
+
+    await runOcrProcess(PAYLOAD, t.deps);
+
+    const logged = line("error") as { err: { message: string }; [key: string]: unknown };
+    expect(logged.job_id).toBe(JOB_ID);
+    expect(logged.receipt_id).toBe(RECEIPT_ID);
+    expect(logged.worker).toBe("ocr.process");
+    expect(logged.level).toBe("error");
+    expect(logged.err.message).toBe("OCR container refused the connection");
+  });
+
+  it("names the job when the outcome read itself fails", async () => {
+    const t = deps({ data: null, error: { message: 'relation "receipts" does not exist' } });
+
+    await runOcrProcess(PAYLOAD, t.deps);
+
+    const logged = line("error") as { err: { message: string }; [key: string]: unknown };
+    expect(logged.job_id).toBe(JOB_ID);
+    expect(logged.err.message).toBe('relation "receipts" does not exist');
+  });
+
+  it("names the job when the receipt does not exist", async () => {
+    const t = deps({ data: null, error: null });
+
+    await runOcrProcess(PAYLOAD, t.deps);
+
+    expect(line("error").job_id).toBe(JOB_ID);
+  });
+
+  it("names the job on the terminal ack, and reports the status as a field", async () => {
+    const t = deps(ok("rejected"));
+
+    await runOcrProcess(PAYLOAD, t.deps);
+
+    const logged = line("info");
+    expect(logged.job_id).toBe(JOB_ID);
+    // A FIELD, not a sentence. "receipt ... is 'rejected'; acking" needs a
+    // regex to filter on; `status` does not.
+    expect(logged.status).toBe("rejected");
+  });
+
+  it("names the job on the retry request, at warn", async () => {
+    const t = deps(ok("processing"));
+
+    await runOcrProcess(PAYLOAD, t.deps);
+
+    const logged = line("warn");
+    expect(logged.job_id).toBe(JOB_ID);
+    expect(logged.status).toBe("processing");
+    expect(logged.level).toBe("warn");
+  });
+
+  it("marks a line whose job_id is blank rather than emitting it untraceable", async () => {
+    // The payload is Zod-parsed upstream so this cannot arrive through the
+    // route - but the worker is an exported function, and this is the property
+    // that makes an untraceable line findable if it ever does.
+    const t = deps(ok("approved"));
+
+    await runOcrProcess({ job_id: "", receipt_id: RECEIPT_ID }, t.deps);
+
+    expect(line("info").correlation_missing).toBe(true);
   });
 });

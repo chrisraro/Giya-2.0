@@ -47,6 +47,18 @@ Error-budget policy: an SLO burning >25% of monthly budget in 7 days freezes fea
 
 ## Sentry configuration
 
+> **As built (T7.5), which is narrower than the target below.** Sentry is wired
+> behind `SENTRY_DSN` / `NEXT_PUBLIC_SENTRY_DSN` and **no DSN is set anywhere**;
+> unset means the SDK is never imported at all. When one is set it will see
+> page, server-component, server-action and middleware faults, and it will
+> **not** see `/api/v1` faults — `src/lib/api/handler.ts` catches those and
+> returns a 500 envelope, so Next never reports a failure. Those live only in
+> the structured log. Browser stack traces are minified (no `withSentryConfig`,
+> so no sourcemap upload — the release-tagging bullet below is therefore not
+> yet true either). The complete record is `src/lib/log.ts`'s JSON line, on
+> every surface, DSN or no DSN. Full rationale and the operator warning:
+> `53-env-credentials-checklist.md`.
+
 - **Projects/surfaces:** one Sentry project, environments `staging`/`production`, tagged per surface (`consumer|business|admin|api|worker|ocr-service`).
 - **Release tagging:** CI sets `release={git-sha}` on deploy + uploads sourcemaps (`50-environments-deployment.md` main.yml); "new error class in preview" blocks DoD (`../10-architecture/14-development-standards.md`).
 - **PII scrubbing on** (`../10-architecture/11-tech-stack.md`): server-side `beforeSend` strips emails, phones, TIN patterns, tokens, receipt image URLs; breadcrumbs exclude request bodies; worker payloads logged by `job_id` reference only. `request_id` attached to every event for envelope correlation.
