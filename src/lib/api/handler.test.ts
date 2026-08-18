@@ -845,6 +845,79 @@ describe("defineHandler - the 500 is diagnosable", () => {
     expect(logged.err.message).toBe("Upstash Redis request failed (500)");
   });
 
+  it("logs the failure to RELEASE an idempotency key, correlated, alongside the fault", async () => {
+    // The fourth adopted call site in this file, and the only one that fires
+    // while another fault is already unwinding: the handler threw, so the key
+    // is being released, and the release failed too. Both facts have to reach
+    // the log under the same request id or the second one is unattributable.
+    authed();
+    hoisted.del.mockRejectedValue(new Error("Upstash Redis request failed (500)"));
+    const route = defineHandler({
+      route: "receipts.create",
+      requireSession: true,
+      schema: z.object({ amount: z.number() }),
+      idempotent: true,
+      handler: async () => {
+        throw new Error("relation \"receipts\" does not exist");
+      },
+    });
+
+    const response = await route(
+      makeRequest({
+        body: { amount: 100 },
+        headers: { "idempotency-key": "11111111-1111-4111-8111-111111111111" },
+      }),
+    );
+
+    const spy = console.error as unknown as { mock: { calls: unknown[][] } };
+    const logged = spy.mock.calls.map(
+      (call) => JSON.parse(String(call[0])) as Record<string, unknown>,
+    );
+    const requestId = response.headers.get("X-Request-Id");
+
+    expect(logged).toHaveLength(2);
+    expect(logged.every((line) => line.request_id === requestId)).toBe(true);
+
+    const release = logged.find((line) => line.msg === "failed to release the idempotency key");
+    expect(release).toBeDefined();
+    expect((release as { err: { message: string } }).err.message).toBe(
+      "Upstash Redis request failed (500)",
+    );
+    // ...and the fault that started it all is still reported, not replaced.
+    const fault = logged.find((line) => line.msg === "unhandled error");
+    expect((fault as { err: { message: string } }).err.message).toBe(
+      'relation "receipts" does not exist',
+    );
+  });
+
+  it("logs the failure to PERSIST an idempotency record, correlated", async () => {
+    // The side effect already happened, so this one deliberately does not
+    // change what the caller receives - which is exactly why the log line is
+    // the only trace it leaves.
+    authed();
+    hoisted.set.mockRejectedValue(new Error("Upstash Redis request failed (500)"));
+    const route = defineHandler({
+      route: "receipts.create",
+      requireSession: true,
+      schema: z.object({ amount: z.number() }),
+      idempotent: true,
+      handler: async () => ({ data: { receipt_id: "r-1" } }),
+    });
+
+    const response = await route(
+      makeRequest({
+        body: { amount: 100 },
+        headers: { "idempotency-key": "11111111-1111-4111-8111-111111111111" },
+      }),
+    );
+    const logged = loggedLine() as { err: { message: string } } & Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(logged.msg).toBe("failed to persist the idempotency record");
+    expect(logged.request_id).toBe(response.headers.get("X-Request-Id"));
+    expect(logged.err.message).toBe("Upstash Redis request failed (500)");
+  });
+
   it("never lets the inbound X-Request-Id write anything but an id into the line", async () => {
     // The inbound id is untrusted input that lands in a log line, which is why
     // handler.ts screens it against a pattern. Asserted HERE as well, because

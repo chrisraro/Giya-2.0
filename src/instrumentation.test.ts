@@ -135,9 +135,32 @@ describe("onRequestError - with no SENTRY_DSN", () => {
     expect(logged.path).toBe("/business/b-1/rewards");
     expect(logged.route_type).toBe("render");
     expect(logged.router_kind).toBe("App Router");
+    expect(logged.method).toBe("GET");
     // Which line threw.
     expect(logged.err.message).toBe("Cannot read properties of undefined (reading 'id')");
     expect(typeof logged.err.stack).toBe("string");
+  });
+
+  it("records renderSource and revalidateReason, which separate the failure shapes", async () => {
+    // `renderSource` is what tells a module-evaluation failure apart from a
+    // per-request render failure - the two candidate shapes of the incident
+    // this task exists because of. Dropping it would leave the next
+    // investigation with the same ambiguity that stranded the last one.
+    await register({ env: {} });
+
+    await onRequestError(new Error("boom"), { path: "/wallet", method: "POST" }, {
+      routerKind: "App Router",
+      routePath: "/wallet",
+      routeType: "render",
+      renderSource: "react-server-components",
+      revalidateReason: "on-demand",
+    });
+
+    expect(onlyErrorLine()).toMatchObject({
+      method: "POST",
+      render_source: "react-server-components",
+      revalidate_reason: "on-demand",
+    });
   });
 
   it("mints an id when the request carries none, so the line is still traceable", async () => {

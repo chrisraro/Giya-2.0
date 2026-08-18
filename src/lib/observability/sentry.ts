@@ -112,6 +112,20 @@ export function readDsn(env: EnvLike, options: { client?: boolean } = {}): strin
 }
 
 /**
+ * Everything before the first `?` or `#`.
+ *
+ * Deliberately a string cut rather than `new URL()`: this runs inside
+ * `beforeSend` on the failure path, and `new URL()` throws on a relative or
+ * malformed value - which is exactly the sort of thing an error event carries.
+ * The fragment goes too; an OAuth implicit-flow token lives there.
+ */
+function stripQuery(url: string | undefined): string | undefined {
+  if (url === undefined) return undefined;
+  const cut = url.search(/[?#]/);
+  return cut === -1 ? url : url.slice(0, cut);
+}
+
+/**
  * `beforeSend`. Drops everything that could carry personal data and redacts
  * what is left with src/lib/log.ts's rules.
  */
@@ -128,7 +142,20 @@ export function scrubEvent(event: SentryEventLike): SentryEventLike {
     // Rebuilt from an allowlist rather than deleted key by key: a denylist has
     // to be updated every time a framework starts sending a new header, and
     // the update always lands after the disclosure.
-    scrubbed.request = { ...(url ? { url } : {}), ...(method ? { method } : {}), headers: kept };
+    //
+    // `url` IS STRIPPED, not merely kept. Deleting `query_string` and keeping
+    // `url` looks like it drops the query and does not: @sentry/core's
+    // `utils/request.js` writes the query into BOTH fields, so the same
+    // parameters survive in the URL. This app has
+    // /api/v1/businesses/[businessId]/integrations/meta/callback, whose query
+    // carries an OAuth `code`, and /api/v1/auth/reset-password. Dropping one
+    // of two copies is not dropping it.
+    const path = stripQuery(url);
+    scrubbed.request = {
+      ...(path ? { url: path } : {}),
+      ...(method ? { method } : {}),
+      headers: kept,
+    };
   }
 
   if (scrubbed.user) {

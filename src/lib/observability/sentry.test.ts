@@ -97,12 +97,17 @@ describe("buildSentryOptions", () => {
 
 describe("scrubEvent", () => {
   it("drops the request body, the query string and the cookies", () => {
+    // THE FIXTURE CARRIES A QUERY IN THE URL, and that is the point. The
+    // version of this test that shipped first used a bare path, so the words
+    // "the query string" could not disagree with the code: `query_string` was
+    // deleted, the identical parameters survived inside `url`, and the
+    // assertion passed. @sentry/core writes the query into both fields.
     const scrubbed = scrubEvent({
       request: {
-        url: "https://giya.test/api/v1/receipts",
+        url: "https://giya.test/api/v1/receipts?token=abc&cursor=42",
         method: "POST",
         data: { receipt_number: "R-1", total_centavos: 12_500 },
-        query_string: "token=abc",
+        query_string: "token=abc&cursor=42",
         cookies: { "sb-access-token": "eyJ.a.b" },
       },
     });
@@ -113,6 +118,43 @@ describe("scrubEvent", () => {
     // What is left is what identifies the request without describing anyone.
     expect(scrubbed.request?.url).toBe("https://giya.test/api/v1/receipts");
     expect(scrubbed.request?.method).toBe("POST");
+    expect(JSON.stringify(scrubbed)).not.toContain("token=abc");
+  });
+
+  it("does not send an OAuth authorization code, which this app really receives", () => {
+    // /api/v1/businesses/[businessId]/integrations/meta/callback. A `code` is
+    // exchangeable for a Meta page access token; it must not reach a
+    // third-party issue tracker, whatever the retention policy says.
+    const scrubbed = scrubEvent({
+      request: {
+        url: "https://giya.test/api/v1/businesses/b-1/integrations/meta/callback?code=AQD_meta_oauth_code&state=xyz",
+        method: "GET",
+      },
+    });
+
+    expect(scrubbed.request?.url).toBe(
+      "https://giya.test/api/v1/businesses/b-1/integrations/meta/callback",
+    );
+    expect(JSON.stringify(scrubbed)).not.toContain("AQD_meta_oauth_code");
+  });
+
+  it("strips a fragment too, where an implicit-flow token lives", () => {
+    const scrubbed = scrubEvent({
+      request: { url: "https://giya.test/reset-password#access_token=eyJ.a.b" },
+    });
+
+    expect(scrubbed.request?.url).toBe("https://giya.test/reset-password");
+  });
+
+  it("survives a relative or malformed url instead of throwing inside beforeSend", () => {
+    // beforeSend runs on the failure path, which is exactly where a
+    // half-formed URL comes from. `new URL()` would throw here and take the
+    // event with it.
+    expect(scrubEvent({ request: { url: "/wallet?code=secret" } }).request?.url).toBe("/wallet");
+    expect(scrubEvent({ request: { url: "not a url at all" } }).request?.url).toBe(
+      "not a url at all",
+    );
+    expect(scrubEvent({ request: { method: "GET" } }).request).not.toHaveProperty("url");
   });
 
   it("keeps only the correlation header, allowlisted rather than denylisted", () => {

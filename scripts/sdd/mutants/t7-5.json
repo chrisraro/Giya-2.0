@@ -54,8 +54,8 @@
     {
       "name": "M-log-reserved-keys",
       "file": "src/lib/log.ts",
-      "anchor": "        if (RESERVED_KEYS.has(key)) continue;",
-      "replacement": "        if (false) continue;",
+      "anchor": "      if (RESERVED_KEYS.has(key)) continue;",
+      "replacement": "      if (false) continue;",
       "tests": [
         "src/lib/log.test.ts"
       ],
@@ -64,8 +64,8 @@
     {
       "name": "M-log-correlation-missing-off",
       "file": "src/lib/log.ts",
-      "anchor": "      if (!traceable) entry.correlation_missing = true;",
-      "replacement": "      if (false) entry.correlation_missing = true;",
+      "anchor": "    if (!traceable) entry.correlation_missing = true;",
+      "replacement": "    if (false) entry.correlation_missing = true;",
       "tests": [
         "src/lib/log.test.ts"
       ],
@@ -74,8 +74,8 @@
     {
       "name": "M-log-correlation-missing-always",
       "file": "src/lib/log.ts",
-      "anchor": "      if (!traceable) entry.correlation_missing = true;",
-      "replacement": "      if (true) entry.correlation_missing = true;",
+      "anchor": "    if (!traceable) entry.correlation_missing = true;",
+      "replacement": "    if (true) entry.correlation_missing = true;",
       "tests": [
         "src/lib/log.test.ts"
       ],
@@ -174,8 +174,8 @@
     {
       "name": "M-log-redact-nested",
       "file": "src/lib/log.ts",
-      "anchor": "      result[key] = isSensitiveKey(key) ? REDACTED : walk(entry, depth + 1, seen);",
-      "replacement": "      result[key] = walk(entry, depth + 1, seen);",
+      "anchor": "        result[key] = isSensitiveKey(key) ? REDACTED : walk(entry, depth + 1, seen);",
+      "replacement": "        result[key] = walk(entry, depth + 1, seen);",
       "tests": [
         "src/lib/log.test.ts"
       ],
@@ -184,8 +184,8 @@
     {
       "name": "M-log-redact-jwt",
       "file": "src/lib/log.ts",
-      "anchor": "  return JWT_PATTERN.test(value) || BEARER_PATTERN.test(value);",
-      "replacement": "  return BEARER_PATTERN.test(value);",
+      "anchor": "    JWT_PATTERN.test(value) ||",
+      "replacement": "    false ||",
       "tests": [
         "src/lib/log.test.ts"
       ],
@@ -194,12 +194,12 @@
     {
       "name": "M-log-redact-bearer",
       "file": "src/lib/log.ts",
-      "anchor": "  return JWT_PATTERN.test(value) || BEARER_PATTERN.test(value);",
-      "replacement": "  return JWT_PATTERN.test(value);",
+      "anchor": "    CREDENTIAL_PATTERN.test(value) ||",
+      "replacement": "    false ||",
       "tests": [
         "src/lib/log.test.ts"
       ],
-      "kills": "a bearer credential is redacted by shape even under an innocent key"
+      "kills": "a bearer or basic credential is redacted by shape, anywhere in the value"
     },
     {
       "name": "M-log-circular",
@@ -274,8 +274,8 @@
     {
       "name": "M-log-headers",
       "file": "src/lib/log.ts",
-      "anchor": "  if (typeof Headers !== \"undefined\" && object instanceof Headers) {",
-      "replacement": "  if (false && typeof Headers !== \"undefined\" && object instanceof Headers) {",
+      "anchor": "  if (object instanceof Headers) {",
+      "replacement": "  if (false && object instanceof Headers) {",
       "tests": [
         "src/lib/log.test.ts"
       ],
@@ -334,18 +334,18 @@
     {
       "name": "M-log-never-throws",
       "file": "src/lib/log.ts",
-      "anchor": "    } catch {\n      // NEVER THE REASON SOMETHING FAILS.",
-      "replacement": "    } catch (rethrown) {\n      throw rethrown;\n      // NEVER THE REASON SOMETHING FAILS.",
+      "anchor": "      } catch {\n        // NEVER THE REASON SOMETHING FAILS. The sink itself is gone. This",
+      "replacement": "      } catch (rethrown) {\n        throw rethrown;\n        // NEVER THE REASON SOMETHING FAILS. The sink itself is gone. This",
       "tests": [
         "src/lib/log.test.ts"
       ],
-      "kills": "a broken sink or clock never replaces the fault being reported"
+      "kills": "a sink that fails twice never becomes the fault it was reporting"
     },
     {
       "name": "M-log-release",
       "file": "src/lib/log.ts",
-      "anchor": "      if (release !== null) entry.release = release;",
-      "replacement": "      if (false) entry.release = release;",
+      "anchor": "    if (release !== null) entry.release = release;",
+      "replacement": "    if (false) entry.release = release;",
       "tests": [
         "src/lib/log.test.ts"
       ],
@@ -740,7 +740,7 @@
     {
       "name": "M-sentry-header-allowlist",
       "file": "src/lib/observability/sentry.ts",
-      "anchor": "    scrubbed.request = { ...(url ? { url } : {}), ...(method ? { method } : {}), headers: kept };",
+      "anchor": "    scrubbed.request = {\n      ...(path ? { url: path } : {}),\n      ...(method ? { method } : {}),\n      headers: kept,\n    };",
       "replacement": "    scrubbed.request = { ...scrubbed.request, headers: kept };",
       "tests": [
         "src/lib/observability/sentry.test.ts"
@@ -996,6 +996,196 @@
         "src/instrumentation-client.test.ts"
       ],
       "kills": "a re-registration can warn again, rather than one warning per process"
+    },
+    {
+      "name": "M-log-jwt-anchored",
+      "file": "src/lib/log.ts",
+      "anchor": "const JWT_PATTERN = /ey[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]*/;",
+      "replacement": "const JWT_PATTERN = /^ey[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]*$/;",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a JWT INSIDE a URL query is redacted - the anchored rule protected nothing real"
+    },
+    {
+      "name": "M-log-supabase-key",
+      "file": "src/lib/log.ts",
+      "anchor": "    SUPABASE_KEY_PATTERN.test(value)",
+      "replacement": "    false",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "an sb_secret_ / sb_publishable_ key is redacted on its own"
+    },
+    {
+      "name": "M-log-field-isolation",
+      "file": "src/lib/log.ts",
+      "anchor": "      } catch {\n        entry[key] = \"[unserializable]\";",
+      "replacement": "      } catch {\n        throw new Error(\"field\");",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "ONE throwing getter costs one field, not the entire log line"
+    },
+    {
+      "name": "M-log-field-isolation-nested",
+      "file": "src/lib/log.ts",
+      "anchor": "      } catch {\n        result[key] = \"[unserializable]\";",
+      "replacement": "      } catch {\n        throw new Error(\"field\");",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a throwing getter NESTED inside a field costs that field, not the line"
+    },
+    {
+      "name": "M-log-ownkeys-fields",
+      "file": "src/lib/log.ts",
+      "anchor": "      entry.log_error = \"fields could not be read\";\n      return;",
+      "replacement": "      throw new Error(\"keys\");",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a top-level Proxy that refuses enumeration costs its fields, not the line"
+    },
+    {
+      "name": "M-log-ownkeys-nested",
+      "file": "src/lib/log.ts",
+      "anchor": "      return \"[unreadable]\";",
+      "replacement": "      throw new Error(\"keys\");",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a nested Proxy that refuses enumeration costs its field, not the line"
+    },
+    {
+      "name": "M-log-clock-fallback",
+      "file": "src/lib/log.ts",
+      "anchor": "      entry.log_error = \"clock unavailable\";",
+      "replacement": "      throw new Error(\"clock\");",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a throwing clock loses the timestamp, not the correlated line"
+    },
+    {
+      "name": "M-log-serialize-fallback",
+      "file": "src/lib/log.ts",
+      "anchor": "            log_error: \"entry could not be serialized\",",
+      "replacement": "            log_error: undefined,",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "an unwritable entry still yields a minimal correlated fallback line"
+    },
+    {
+      "name": "M-log-reserved-correlation-missing",
+      "file": "src/lib/log.ts",
+      "anchor": "  \"correlation_missing\",",
+      "replacement": "  \"reserved_placeholder\",",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a caller field cannot clear the untraceability marker"
+    },
+    {
+      "name": "M-log-error-cycle-add",
+      "file": "src/lib/log.ts",
+      "anchor": "    seen.add(object);\n    const result = walk(serializeError(object), depth, seen);",
+      "replacement": "    const result = walk(serializeError(object), depth, seen);",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "a cycle through an Error's cause is named, not walked"
+    },
+    {
+      "name": "M-log-error-cycle-delete",
+      "file": "src/lib/log.ts",
+      "anchor": "    const result = walk(serializeError(object), depth, seen);\n    seen.delete(object);",
+      "replacement": "    const result = walk(serializeError(object), depth, seen);",
+      "tests": [
+        "src/lib/log.test.ts"
+      ],
+      "kills": "the same Error as a SIBLING is printed twice, not misreported as a cycle"
+    },
+    {
+      "name": "M-sentry-url-query",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "    const path = stripQuery(url);",
+      "replacement": "    const path = url;",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "CRITICAL - an OAuth code in the URL query never reaches Sentry"
+    },
+    {
+      "name": "M-sentry-url-fragment",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "  const cut = url.search(/[?#]/);",
+      "replacement": "  const cut = url.search(/[?]/);",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "the fragment is stripped too, where an implicit-flow token lives"
+    },
+    {
+      "name": "M-sentry-url-throws",
+      "file": "src/lib/observability/sentry.ts",
+      "anchor": "  const cut = url.search(/[?#]/);",
+      "replacement": "  const cut = new URL(url).search.length > 0 ? url.indexOf(\"?\") : -1;",
+      "tests": [
+        "src/lib/observability/sentry.test.ts"
+      ],
+      "kills": "a relative or malformed url does not throw inside beforeSend"
+    },
+    {
+      "name": "M-instr-drop-render-source",
+      "file": "src/instrumentation.ts",
+      "anchor": "      render_source: context.renderSource,",
+      "replacement": "      render_source: undefined,",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "renderSource is on the line - it separates the two candidate incident shapes"
+    },
+    {
+      "name": "M-instr-drop-method",
+      "file": "src/instrumentation.ts",
+      "anchor": "      method: request.method,",
+      "replacement": "      method: undefined,",
+      "tests": [
+        "src/instrumentation.test.ts"
+      ],
+      "kills": "the HTTP method is on the line"
+    },
+    {
+      "name": "M-handler-release-key-id",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "          log().error(\"failed to release the idempotency key\", { err: releaseError });",
+      "replacement": "          log().error(\"failed to release the idempotency key\", {});",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "the release failure says what Redis did, under the same request id"
+    },
+    {
+      "name": "M-handler-persist-record-id",
+      "file": "src/lib/api/handler.ts",
+      "anchor": "        log().error(\"failed to persist the idempotency record\", { err: storeError });",
+      "replacement": "        log().error(\"failed to persist the idempotency record\", {});",
+      "tests": [
+        "src/lib/api/handler.test.ts"
+      ],
+      "kills": "the persist failure - whose ONLY trace is this line - says what Redis did"
+    },
+    {
+      "name": "M-client-autostart",
+      "file": "src/instrumentation-client.ts",
+      "anchor": "void registerClient();",
+      "replacement": "void 0;",
+      "tests": [
+        "src/instrumentation-client.test.ts"
+      ],
+      "kills": "the module body actually wires the browser SDK up on import"
     }
   ]
 }

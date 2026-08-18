@@ -206,6 +206,36 @@ describe("Error serialization", () => {
     expect(serializeError(foreign)).toMatchObject({ name: "ForeignError" });
   });
 
+  it("names a cycle through an Error's cause instead of walking it", () => {
+    // The exact twin of the plain-object cycle test, on the Error branch -
+    // which has its own `seen` bookkeeping and so can be broken independently.
+    // A retry wrapper that re-attaches the original error as its own cause
+    // produces this for real.
+    const looping = new Error("outer") as Error & { cause?: unknown };
+    looping.cause = looping;
+
+    expect(() =>
+      requestLogger("req-abc", { now: CLOCK }).error("failed", { err: looping }),
+    ).not.toThrow();
+
+    const err = (parsedLine("error") as { err: { message: string; cause: unknown } }).err;
+    expect(err.message).toBe("outer");
+    expect(err.cause).toBe("[circular]");
+  });
+
+  it("prints the same Error twice when it is a sibling, not an ancestor", () => {
+    const shared = new Error("one fault, two mentions");
+    requestLogger("req-abc", { now: CLOCK }).error("failed", {
+      batch: { first: shared, second: shared },
+    });
+
+    const parsed = parsedLine("error") as {
+      batch: { first: { message: string }; second: { message: string } };
+    };
+    expect(parsed.batch.first.message).toBe("one fault, two mentions");
+    expect(parsed.batch.second.message).toBe("one fault, two mentions");
+  });
+
   it("keeps the driver's error code, which is what names the actual fault", () => {
     // PostgREST/Postgres errors are the ones that reach these call sites, and
     // `23505` or `42501` says more than the message does.
@@ -292,6 +322,56 @@ describe("redaction", () => {
     });
 
     expect(onlyLine("error")).not.toContain("sb_secret_abcdefghijklmnop");
+  });
+
+  it("redacts a JWT that is INSIDE a URL, which is the realistic leak", () => {
+    // A Supabase REST URL is shaped exactly like this. An anchored ^...$ rule
+    // sees nothing here, which is how a review probe got a service-role key
+    // through: the rule read as protection and provided none for the one case
+    // this codebase actually produces.
+    const url =
+      "https://zlfxfzlnklqhajacngxf.supabase.co/rest/v1/receipts?apikey=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.c2lnbmF0dXJl&select=*";
+
+    requestLogger("req-abc", { now: CLOCK }).error("failed", { endpoint: url });
+
+    expect(onlyLine("error")).not.toContain("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
+    expect(parsedLine("error")).toMatchObject({ endpoint: "[redacted]" });
+  });
+
+  it("redacts a Supabase sb_secret_ key on its own, which matches no other rule", () => {
+    requestLogger("req-abc", { now: CLOCK }).error("failed", {
+      detail: "sb_secret_abc123DEADBEEF",
+    });
+
+    expect(onlyLine("error")).not.toContain("sb_secret_abc123DEADBEEF");
+  });
+
+  it("redacts a publishable key too - not a secret, still not log material", () => {
+    requestLogger("req-abc", { now: CLOCK }).error("failed", {
+      detail: "sb_publishable_abc123DEADBEEF",
+    });
+
+    expect(onlyLine("error")).not.toContain("sb_publishable_abc123DEADBEEF");
+  });
+
+  it("redacts HTTP Basic, not only Bearer", () => {
+    requestLogger("req-abc", { now: CLOCK }).error("failed", {
+      detail: "Basic dXNlcjpwYXNzd29yZA==",
+    });
+
+    expect(onlyLine("error")).not.toContain("dXNlcjpwYXNzd29yZA==");
+  });
+
+  it("still leaves an ordinary URL alone", () => {
+    // The widened rules must not swallow the field that says WHERE the fault
+    // was. Over-redaction is a defect in the other direction.
+    requestLogger("req-abc", { now: CLOCK }).error("failed", {
+      endpoint: "https://giya.test/api/v1/receipts?select=id&limit=20",
+    });
+
+    expect(parsedLine("error")).toMatchObject({
+      endpoint: "https://giya.test/api/v1/receipts?select=id&limit=20",
+    });
   });
 
   it("reaches into arrays and nested objects, not just the top level", () => {
@@ -388,6 +468,83 @@ describe("hostile values", () => {
     expect(parsedLine("info")).toMatchObject({ a: "NaN", b: "Infinity" });
   });
 
+  it("costs ONE FIELD, not the whole line, when a getter throws", () => {
+    // This was a real defect: `Object.entries` invokes getters, so one hostile
+    // property unwound past the field loop and the entire entry was lost -
+    // no msg, no request_id, not even the sibling that serialized fine.
+    // Silently. Which is the exact failure this module exists to prevent,
+    // arriving through the module built to prevent it.
+    const hostile = {
+      safe: "still here",
+      get boom(): string {
+        throw new Error("getter exploded");
+      },
+    };
+
+    requestLogger("req-abc", { now: CLOCK }).error("the real fault", { hostile });
+
+    const parsed = parsedLine("error");
+    expect(parsed.msg).toBe("the real fault");
+    expect(parsed.request_id).toBe("req-abc");
+    expect(parsed.hostile).toEqual({ safe: "still here", boom: "[unserializable]" });
+  });
+
+  it("costs one field when a TOP-LEVEL field's getter throws", () => {
+    const fields = {
+      safe: "still here",
+      get boom(): string {
+        throw new Error("getter exploded");
+      },
+    };
+
+    requestLogger("req-abc", { now: CLOCK }).error("the real fault", fields);
+
+    expect(parsedLine("error")).toMatchObject({
+      msg: "the real fault",
+      request_id: "req-abc",
+      safe: "still here",
+      boom: "[unserializable]",
+    });
+  });
+
+  it("keeps the line when a Proxy refuses to be enumerated at all", () => {
+    const hostile = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error("ownKeys exploded");
+        },
+      },
+    );
+
+    requestLogger("req-abc", { now: CLOCK }).error("the real fault", { hostile });
+
+    expect(parsedLine("error")).toMatchObject({
+      msg: "the real fault",
+      request_id: "req-abc",
+      hostile: "[unreadable]",
+    });
+  });
+
+  it("keeps the line when the TOP-LEVEL field set refuses to be enumerated", () => {
+    const fields = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error("ownKeys exploded");
+        },
+      },
+    );
+
+    requestLogger("req-abc", { now: CLOCK }).error("the real fault", fields);
+
+    expect(parsedLine("error")).toMatchObject({
+      msg: "the real fault",
+      request_id: "req-abc",
+      log_error: "fields could not be read",
+    });
+  });
+
   it("stops descending at a depth cap instead of walking a deep graph forever", () => {
     let deep: Record<string, unknown> = { bottom: true };
     for (let i = 0; i < 40; i += 1) deep = { next: deep };
@@ -450,6 +607,15 @@ describe("correlation", () => {
 
   it("marks an entry whose id is blank, so an untraceable line is greppable", () => {
     requestLogger("   ", { now: CLOCK }).error("failed");
+
+    expect(parsedLine("error")).toMatchObject({ correlation_missing: true });
+  });
+
+  it("does not let a caller field clear the untraceability marker", () => {
+    // The marker is the one field whose whole job is to be inconvenient. A
+    // caller-supplied `correlation_missing: false` erasing it would let the
+    // untraceable lines hide themselves.
+    requestLogger("   ", { now: CLOCK }).error("failed", { correlation_missing: false });
 
     expect(parsedLine("error")).toMatchObject({ correlation_missing: true });
   });
@@ -562,17 +728,50 @@ describe("robustness", () => {
     expect(() =>
       requestLogger("req-abc", { now: CLOCK, write }).error("the real fault"),
     ).not.toThrow();
-    expect(write).toHaveBeenCalledTimes(1);
+    // Twice: the entry, then the minimal fallback. Both failed, and that is
+    // the end of it - a third attempt would be a loop.
+    expect(write).toHaveBeenCalledTimes(2);
   });
 
-  it("swallows a clock that throws", () => {
-    expect(() =>
-      requestLogger("req-abc", {
-        now: () => {
-          throw new Error("no clock");
-        },
-      }).error("the real fault"),
-    ).not.toThrow();
+  it("falls back to a minimal line when the full entry cannot be serialized", () => {
+    const lines: string[] = [];
+    const write = vi.fn((_level: string, line: string) => {
+      // Fail only the first, full entry - as a sink with a size limit would.
+      if (lines.length === 0 && line.length > 200) {
+        lines.push(line);
+        throw new Error("line too long");
+      }
+      lines.push(line);
+    });
+
+    requestLogger("req-abc", { now: CLOCK, write }).error("the real fault", {
+      blob: "x".repeat(400),
+    });
+
+    const fallback = JSON.parse(lines[lines.length - 1]!) as Record<string, unknown>;
+    expect(fallback).toEqual({
+      level: "error",
+      time: STAMP,
+      msg: "the real fault",
+      request_id: "req-abc",
+      log_error: "entry could not be serialized",
+    });
+  });
+
+  it("still emits a correlated line when the clock throws", () => {
+    // Losing the timestamp must not lose the entry. The aggregator stamps its
+    // own receipt time anyway; nothing else can reconstruct the request id.
+    requestLogger("req-abc", {
+      now: () => {
+        throw new Error("no clock");
+      },
+    }).error("the real fault");
+
+    expect(parsedLine("error")).toMatchObject({
+      msg: "the real fault",
+      request_id: "req-abc",
+      log_error: "clock unavailable",
+    });
   });
 
   it("writes through an injected sink instead of the console when one is given", () => {

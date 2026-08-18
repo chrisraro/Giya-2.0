@@ -34,6 +34,19 @@ import {
 
 let sentry: SentryLike | null = null;
 
+// Counts completed registrations. This exists for exactly one reason: the
+// module body's `registerClient()` call at the bottom of this file is the ONLY
+// thing that wires the browser SDK up, and on the shipping path it has no
+// observable effect at all - so deleting it changed nothing any test could
+// see. A guard, or a wire, whose removal changes nothing observable is
+// untested. This makes it observable.
+let registrations = 0;
+
+/** How many times `registerClient` has completed in this module instance. */
+export function registrationCount(): number {
+  return registrations;
+}
+
 /** Reset alongside `sentry` so each registration gets one warning, not one
  * ever. Tests re-register between cases and would otherwise inherit silence. */
 function resetTransitionWarning(): void {
@@ -64,6 +77,7 @@ export async function registerClient(deps: RegisterClientDeps = {}): Promise<voi
   resetTransitionWarning();
   if (dsn === null) {
     sentry = null;
+    registrations += 1;
     return;
   }
 
@@ -75,6 +89,7 @@ export async function registerClient(deps: RegisterClientDeps = {}): Promise<voi
     sentry = null;
     deps.onError?.(error);
   }
+  registrations += 1;
 }
 
 /**

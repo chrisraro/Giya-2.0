@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { onRouterTransitionStart, registerClient } from "./instrumentation-client";
+import {
+  onRouterTransitionStart,
+  registerClient,
+  registrationCount,
+} from "./instrumentation-client";
 import type { SentryLike } from "@/lib/observability/sentry";
+
+// Captured at MODULE SCOPE, before any hook or test body has run, so it
+// records the state the import itself left behind and nothing else.
+const REGISTRATIONS_AT_IMPORT = registrationCount();
 
 // The browser half. Same subject as src/instrumentation.test.ts and for the
 // same reason: THE DISABLED PATH IS WHAT SHIPS. On the client the cost of
@@ -32,6 +40,16 @@ beforeEach(() => {
 afterEach(async () => {
   await registerClient({ env: {} });
   vi.restoreAllMocks();
+});
+
+describe("the module body", () => {
+  it("registers itself on import - nothing else ever calls it in production", () => {
+    // Next imports this file and calls the hooks it exports; it never calls
+    // `registerClient`. The bare call at the bottom of the module is the ONLY
+    // wire, and on the shipping path it has no other observable effect - so
+    // without this assertion it could be deleted and every test would pass.
+    expect(REGISTRATIONS_AT_IMPORT).toBe(1);
+  });
 });
 
 describe("registerClient - with no DSN (the shipping configuration)", () => {

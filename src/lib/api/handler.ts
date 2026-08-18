@@ -646,10 +646,21 @@ export function defineHandler<
       // The fields are the answer to t7-5-brief.md's question, one clause
       // each: `request_id` (which request), `user_id` (which user), `err.stack`
       // (which line threw) and `release`, which src/lib/log.ts stamps from the
-      // platform's commit sha (which deploy). Sentry, when a DSN is set, gets
-      // the same event through instrumentation.ts's onRequestError - it is a
-      // second destination for this fact, never the only one, because the
-      // shipping configuration has no DSN.
+      // platform's commit sha (which deploy).
+      //
+      // THIS LINE IS THE ONLY RECORD OF THIS FAULT. Sentry does NOT also get
+      // it, even with a DSN configured, and it is worth being exact about why
+      // because the opposite is the natural assumption: `onRequestError` fires
+      // from Next's OUTER catch (app-route.js), and this catch swallows the
+      // throw and returns a 500 Response - so from Next's side nothing failed
+      // and the hook never runs. Every /api/v1 500 is here and nowhere else.
+      //
+      // That is a deliberate consequence of the never-leak posture and not a
+      // gap to paper over locally: capturing to Sentry from inside this catch
+      // would import the SDK into the request path of every route. If /api/v1
+      // faults are wanted in Sentry, the honest fix is one explicit
+      // `captureException` behind the same DSN check, and it is a decision
+      // worth making on purpose rather than a comment worth assuming.
       log().error("unhandled error", { err: error, status: 500 });
       return errorResponse(
         new ApiError(500, API_ERROR_CODES.INTERNAL, "Something went wrong. Please try again."),

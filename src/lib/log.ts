@@ -47,9 +47,12 @@
 // A value-level scan for "things that look secret" is guesswork in both
 // directions: it misses an opaque token and it mangles a receipt total. Keys
 // are declared by the caller and are stable, so the key list is the primary
-// rule. Two value-level rules ride along because their shapes are unambiguous
-// and their blast radius is total - a JWT (every Supabase key and session
-// token) and an `Authorization`-style bearer credential.
+// rule. Three value-level rules ride along because their shapes are
+// unambiguous and their blast radius is total - a JWT (every Supabase key and
+// session token), an `Authorization`-style bearer or basic credential, and
+// Supabase's `sb_secret_` / `sb_publishable_` prefixes. All three match
+// ANYWHERE in the value rather than being anchored: the realistic leak is a
+// credential inside a URL, not a field whose whole value is the credential.
 //
 // WHAT THIS CANNOT DO: redact a secret pasted into the MESSAGE string, or into
 // a provider's own error text. That is why call sites pass structured fields
@@ -86,13 +89,6 @@ export interface LoggerOptions {
   readonly now?: () => Date;
   /** Injected sink. Defaults to the console channel matching the level. */
   readonly write?: (level: LogLevel, line: string) => void;
-  /**
-   * Deploy identity. Defaults to the platform's commit sha, then its
-   * deployment id, then nothing at all - and "nothing at all" omits the key
-   * rather than emitting `"release":null`, because a null in every line off
-   * platform is noise that teaches readers to ignore the field.
-   */
-  readonly release?: string | null;
 }
 
 // The keys the entry owns. A field of the same name is DROPPED, not merged:
@@ -136,10 +132,24 @@ const SENSITIVE_KEY_PARTS: readonly string[] = [
 ];
 
 /** A JWT: every Supabase key and every Supabase session is one of these. */
-const JWT_PATTERN = /^ey[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*$/;
+// DELIBERATELY NOT ANCHORED. An anchored `^...$` only catches a value that IS
+// the credential, and the realistic leak is a credential INSIDE a longer
+// string: a Supabase REST URL is shaped `...?apikey=eyJhbGci...`, and that is
+// the single most likely thing to end up in a log field on this codebase. An
+// anchored rule reads as protection and provides none for the actual case.
+//
+// Matching anywhere means the WHOLE value is redacted, not the matched span.
+// Returning a partially-redacted string would invite exactly the reasoning
+// that leaks the next one ("the rest looked safe").
+const JWT_PATTERN = /ey[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/;
 
-/** `Authorization: Bearer ...`, wherever it ended up. */
-const BEARER_PATTERN = /^bearer\s+\S+/i;
+/** `Authorization: Bearer ...` / `Basic ...`, wherever it ended up. */
+const CREDENTIAL_PATTERN = /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/i;
+
+/** Supabase's own prefixed key formats, which are opaque and so match nothing
+ * else above. `sb_secret_` is the service role; `sb_publishable_` is not a
+ * secret but is still a key, and a log is not where either belongs. */
+const SUPABASE_KEY_PATTERN = /\bsb_(?:secret|publishable)_[A-Za-z0-9_-]{4,}/;
 
 // Bounds. A log line is written on the failure path, which is exactly when a
 // value is most likely to be enormous or self-referential, and an unbounded
@@ -154,7 +164,11 @@ function isSensitiveKey(key: string): boolean {
 }
 
 function isSensitiveValue(value: string): boolean {
-  return JWT_PATTERN.test(value) || BEARER_PATTERN.test(value);
+  return (
+    JWT_PATTERN.test(value) ||
+    CREDENTIAL_PATTERN.test(value) ||
+    SUPABASE_KEY_PATTERN.test(value)
+  );
 }
 
 /**
@@ -193,7 +207,7 @@ export function serializeError(value: unknown): SerializedError | unknown {
 
   const error = value as Error & { cause?: unknown; code?: unknown };
   const serialized: Record<string, unknown> = {
-    name: String(error.name ?? "Error"),
+    name: String(error.name),
     message: String(error.message ?? ""),
   };
   if (typeof error.stack === "string") serialized.stack = error.stack;
@@ -256,7 +270,9 @@ function walk(value: unknown, depth: number, seen: WeakSet<object>): unknown {
 
   // Each of these stringifies to `{}` on its own - the same trap as Error,
   // and each one is a shape this codebase genuinely puts in a log field.
-  if (typeof Headers !== "undefined" && object instanceof Headers) {
+  // Each of the next four stringifies to  or  on its own - the same
+  // trap as Error, and each is a shape this codebase genuinely logs.
+  if (object instanceof Headers) {
     return walk(Object.fromEntries(object.entries()), depth, seen);
   }
   if (object instanceof Map) {
@@ -281,9 +297,26 @@ function walk(value: unknown, depth: number, seen: WeakSet<object>): unknown {
       return items;
     }
 
+    // Object.KEYS, not Object.entries. `entries` reads every value, so ONE
+    // throwing getter anywhere in the object would unwind past this frame and
+    // cost the entire log line - not just that field. Reading each value
+    // inside its own try means a hostile or half-constructed object costs
+    // exactly the field it broke.
     const result: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(object as Record<string, unknown>)) {
-      result[key] = isSensitiveKey(key) ? REDACTED : walk(entry, depth + 1, seen);
+    let keys: string[];
+    try {
+      keys = Object.keys(object);
+    } catch {
+      // A Proxy whose `ownKeys` throws. Nothing about this object is readable.
+      return "[unreadable]";
+    }
+    for (const key of keys) {
+      try {
+        const entry = (object as Record<string, unknown>)[key];
+        result[key] = isSensitiveKey(key) ? REDACTED : walk(entry, depth + 1, seen);
+      } catch {
+        result[key] = "[unserializable]";
+      }
     }
     return result;
   } finally {
@@ -294,8 +327,10 @@ function walk(value: unknown, depth: number, seen: WeakSet<object>): unknown {
   }
 }
 
-function resolveRelease(explicit: string | null | undefined): string | null {
-  if (explicit !== undefined) return explicit;
+// No injection seam for the release: nothing ever passed one, and an option
+// that only a deleted test could reach is dead weight on the public type.
+// Tests stub the environment instead, which is what production reads.
+function resolveRelease(): string | null {
   const env: Record<string, string | undefined> =
     typeof process === "undefined" ? {} : (process.env ?? {});
   const candidate = env.VERCEL_GIT_COMMIT_SHA ?? env.VERCEL_DEPLOYMENT_ID ?? "";
@@ -322,34 +357,77 @@ function createLogger(
 ): Logger {
   const now = options.now ?? (() => new Date());
   const write = options.write ?? consoleWrite;
-  const release = resolveRelease(options.release);
+  const release = resolveRelease();
   const traceable = correlation.value.trim().length > 0;
 
-  function emit(level: LogLevel, message: string, fields?: LogFields): void {
+  // Fields are added ONE AT A TIME, each in its own try. The alternative -
+  // building the whole field set inside one try - was what this module did,
+  // and it was wrong in a way no test here caught: a single throwing getter
+  // (or a Proxy with a hostile `ownKeys`) unwound to the outer catch and the
+  // ENTIRE LINE was lost. Not degraded. Nothing: no msg, no request_id, not
+  // even the sibling fields that serialized perfectly well.
+  //
+  // That is the exact failure this task exists to prevent, arriving through
+  // the module built to prevent it. One bad field must cost one field.
+  function addFields(entry: Record<string, unknown>, source: LogFields): void {
+    let keys: string[];
     try {
-      const entry: Record<string, unknown> = {
-        level,
-        time: now().toISOString(),
-        msg: message,
-        [correlation.key]: correlation.value,
-      };
-      if (!traceable) entry.correlation_missing = true;
-      if (release !== null) entry.release = release;
+      keys = Object.keys(source);
+    } catch {
+      entry.log_error = "fields could not be read";
+      return;
+    }
 
-      const merged = fields === undefined ? bound : { ...bound, ...fields };
-      for (const [key, value] of Object.entries(merged)) {
-        if (RESERVED_KEYS.has(key)) continue;
+    for (const key of keys) {
+      if (RESERVED_KEYS.has(key)) continue;
+      try {
+        // Read INSIDE the try: this is the line a throwing getter runs on.
+        const value = (source as Record<string, unknown>)[key];
         entry[key] = isSensitiveKey(key) ? REDACTED : walk(value, 1, new WeakSet<object>());
+      } catch {
+        entry[key] = "[unserializable]";
       }
+    }
+  }
 
+  function emit(level: LogLevel, message: string, fields?: LogFields): void {
+    const entry: Record<string, unknown> = { level, time: "", msg: message };
+    try {
+      entry.time = now().toISOString();
+    } catch {
+      entry.log_error = "clock unavailable";
+    }
+    entry[correlation.key] = correlation.value;
+    if (!traceable) entry.correlation_missing = true;
+    if (release !== null) entry.release = release;
+
+    addFields(entry, bound);
+    if (fields !== undefined) addFields(entry, fields);
+
+    try {
       write(level, JSON.stringify(entry));
     } catch {
-      // NEVER THE REASON SOMETHING FAILS. This module is called from catch
-      // blocks that are already handling a fault, and from a heartbeat that
-      // is explicitly fire-and-forget. A logger that throws would replace a
-      // diagnosable 500 with an undiagnosable one - the precise failure this
-      // whole task exists to prevent - so the last resort is to lose the line
-      // rather than the incident.
+      // The whole entry could not be written. Fall back to the smallest line
+      // that is still worth having - the level, the message and the
+      // correlation id - because "which request" plus "something broke here"
+      // is a bisect step, and silence is not.
+      try {
+        write(
+          level,
+          JSON.stringify({
+            level,
+            time: entry.time,
+            msg: message,
+            [correlation.key]: correlation.value,
+            log_error: "entry could not be serialized",
+          }),
+        );
+      } catch {
+        // NEVER THE REASON SOMETHING FAILS. The sink itself is gone. This
+        // module is called from catch blocks already handling a fault and
+        // from a fire-and-forget heartbeat; throwing from here would replace
+        // a diagnosable 500 with an undiagnosable one.
+      }
     }
   }
 
