@@ -377,6 +377,144 @@
       "replacement": "  return randomUUID();",
       "tests": ["src/lib/api/handler.test.ts"],
       "kills": "a well-formed inbound id survives into the line, so end-to-end correlation works"
+    },
+
+    {
+      "name": "M-ocr-drop-job-id",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "  const log = jobLogger(payload.job_id).with({",
+      "replacement": "  const log = jobLogger(\"\").with({",
+      "tests": ["src/workers/receipts/ocr.test.ts"],
+      "kills": "THE BRIEF'S NAMED MUTANT - drop the id from the adopted call site (ocr.process)"
+    },
+    {
+      "name": "M-ocr-drop-receipt-id",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "    receipt_id: receiptId,",
+      "replacement": "    receipt_id: \"unknown\",",
+      "tests": ["src/workers/receipts/ocr.test.ts"],
+      "kills": "the line names the receipt - the id a support ticket actually arrives with"
+    },
+    {
+      "name": "M-ocr-drop-worker",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "    worker: \"ocr.process\",",
+      "replacement": "    worker: \"something.else\",",
+      "tests": ["src/workers/receipts/ocr.test.ts"],
+      "kills": "the line names which worker wrote it"
+    },
+    {
+      "name": "M-ocr-drop-throw",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "    log.error(\"processReceipt threw\", { err: error, outcome: \"unreadable\" });",
+      "replacement": "    log.error(\"processReceipt threw\", { outcome: \"unreadable\" });",
+      "tests": ["src/workers/receipts/ocr.test.ts"],
+      "kills": "the pipeline's own throw reaches the line, not just the fact that one happened"
+    },
+    {
+      "name": "M-ocr-drop-read-error",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "    log.error(\"could not read the receipt outcome\", { err: error, outcome: \"unreadable\" });",
+      "replacement": "    log.error(\"could not read the receipt outcome\", { outcome: \"unreadable\" });",
+      "tests": ["src/workers/receipts/ocr.test.ts"],
+      "kills": "the failed status read says what the database actually answered"
+    },
+    {
+      "name": "M-ocr-gone-not-logged",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "    log.error(\"receipt does not exist\", { outcome: \"gone\" });",
+      "replacement": "    void 0;",
+      "tests": ["src/workers/receipts/ocr.test.ts"],
+      "kills": "a signed job for a receipt that does not exist is still reported"
+    },
+    {
+      "name": "M-ocr-terminal-status-field",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "    log.info(\"terminal outcome; acking\", { status: data.status, outcome: \"terminal\" });",
+      "replacement": "    log.info(`terminal outcome ${data.status}; acking`, { outcome: \"terminal\" });",
+      "tests": ["src/workers/receipts/ocr.test.ts"],
+      "kills": "the status is a FIELD, not a word inside a sentence a regex has to reach into"
+    },
+    {
+      "name": "M-ocr-retryable-level",
+      "file": "src/workers/receipts/ocr.ts",
+      "anchor": "  log.warn(\"still not terminal after a pass; asking QStash to retry\", {",
+      "replacement": "  log.info(\"still not terminal after a pass; asking QStash to retry\", {",
+      "tests": ["src/workers/receipts/ocr.test.ts"],
+      "kills": "asking QStash for a retry is a warning, not routine info"
+    },
+
+    {
+      "name": "M-email-drop-job-id",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "  const log = jobLogger(payload.job_id).with({ worker: \"notify.email\" });",
+      "replacement": "  const log = jobLogger(\"\").with({ worker: \"notify.email\" });",
+      "tests": ["src/workers/notify/email.test.ts"],
+      "kills": "THE BRIEF'S NAMED MUTANT - drop the id from the adopted call site (notify.email)"
+    },
+    {
+      "name": "M-email-batch-read-error",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "    log.error(\"could not read the batch\", {\n      err: error,\n      requested: payload.notification_ids.length,\n    });",
+      "replacement": "    log.error(\"could not read the batch\", { requested: payload.notification_ids.length });",
+      "tests": ["src/workers/notify/email.test.ts"],
+      "kills": "the unreadable batch says what the database answered"
+    },
+    {
+      "name": "M-email-summary-counts",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "  log.info(\"batch complete\", {\n    requested: payload.notification_ids.length,\n    sent,",
+      "replacement": "  log.info(`batch complete: sent=${sent}`, {\n    requested: payload.notification_ids.length,",
+      "tests": ["src/workers/notify/email.test.ts"],
+      "kills": "the batch counts are aggregatable fields, not numbers inside a sentence"
+    },
+    {
+      "name": "M-email-deliver-logger-thread",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "    const outcome = await deliver(row, { supabase, send, origin, resolveAddress, log });",
+      "replacement": "    const outcome = await deliver(row, { supabase, send, origin, resolveAddress, log: jobLogger(\"\") });",
+      "tests": ["src/workers/notify/email.test.ts"],
+      "kills": "the correlated logger is THREADED into the per-row helpers, not rebuilt bare"
+    },
+    {
+      "name": "M-email-suppression-logger-thread",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "    const suppression = await suppressionReason(deps.supabase, row.user_id, row.kind, deps.log);",
+      "replacement": "    const suppression = await suppressionReason(deps.supabase, row.user_id, row.kind, jobLogger(\"\"));",
+      "tests": ["src/workers/notify/email.test.ts"],
+      "kills": "the deepest call site (the preference read) still carries the job id"
+    },
+    {
+      "name": "M-email-retryable-row",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "        notification_id: row.id,\n        user_id: row.user_id,\n        reason: result.reason,",
+      "replacement": "        user_id: row.user_id,\n        reason: result.reason,",
+      "tests": ["src/workers/notify/email.test.ts"],
+      "kills": "a retryable row names WHICH row was left pending"
+    },
+    {
+      "name": "M-email-row-throw",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "    deps.log.error(\"unexpected failure delivering a row\", {\n      err: error,",
+      "replacement": "    deps.log.error(\"unexpected failure delivering a row\", {",
+      "tests": ["src/workers/notify/email.test.ts"],
+      "kills": "a per-row throw reaches the line rather than being counted and discarded"
+    },
+    {
+      "name": "M-email-preferences-error",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "    log.error(\"could not read preferences; failing closed\", { err: error, user_id: userId });",
+      "replacement": "    log.error(\"could not read preferences; failing closed\", { user_id: userId });",
+      "tests": ["src/workers/notify/email.test.ts"],
+      "kills": "the fail-closed suppression says why the read failed"
+    },
+    {
+      "name": "M-email-address-leak",
+      "file": "src/workers/notify/email.ts",
+      "anchor": "        reason: result.reason,",
+      "replacement": "        reason: result.reason,\n        address: await deps.resolveAddress(row.user_id),",
+      "tests": ["src/workers/notify/email.test.ts"],
+      "kills": "the recipient's address never reaches a log line"
     }
   ]
 }

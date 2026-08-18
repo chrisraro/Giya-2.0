@@ -6,6 +6,7 @@ import { notificationRoute } from "@/features/notifications/kinds";
 import { rejectionCopy } from "@/features/receipts/components/receipt-copy";
 import type { ReceiptRejectReason } from "@/features/receipts/types";
 import { getServerEnv } from "@/lib/env";
+import { jobLogger, type Logger } from "@/lib/log";
 import { renderEmail } from "@/lib/email/render";
 import type { EmailCopy } from "@/lib/email/render";
 import { sendEmail } from "@/lib/email/send";
@@ -74,7 +75,12 @@ import type { NotifyEmailPayload } from "./schemas";
 // `data.params.reject_reason`, which is one of six enum values the consumer is
 // already shown on their own status screen.
 
-const LOG_PREFIX = "[workers/notify.email]";
+// The correlation key is the `job_id` the payload already carries and
+// src/lib/queue/claim.ts already leases - not a second scheme. The logger is
+// THREADED THROUGH the per-row helpers rather than reconstructed in each of
+// them, because the deepest call sites here (a preference read, an address
+// lookup) are the ones whose old lines named a user and nothing else: findable
+// only by someone who already knew which incident they were looking at.
 
 export interface NotifyEmailDeps {
   /** SERVICE ROLE. `notifications` has no client write policy and `auth.admin`
@@ -128,8 +134,9 @@ export async function runNotifyEmail(
   const { supabase } = deps;
   const send = deps.send ?? sendEmail;
   const origin = deps.origin === undefined ? resolveOrigin() : deps.origin;
+  const log = jobLogger(payload.job_id).with({ worker: "notify.email" });
   const resolveAddress =
-    deps.resolveAddress ?? ((userId: string) => readAddress(supabase, userId));
+    deps.resolveAddress ?? ((userId: string) => readAddress(supabase, userId, log));
 
   let sent = 0;
   let skipped = 0;
@@ -150,7 +157,10 @@ export async function runNotifyEmail(
   if (error !== null) {
     // The batch could not even be read. Retryable: the rows are still pending
     // and a later delivery will find them.
-    console.error(`${LOG_PREFIX} could not read the batch`, error);
+    log.error("could not read the batch", {
+      err: error,
+      requested: payload.notification_ids.length,
+    });
     return { sent: 0, skipped: 0, failedTerminal: 0, failedRetryable: payload.notification_ids.length };
   }
 
@@ -160,16 +170,20 @@ export async function runNotifyEmail(
   skipped += payload.notification_ids.length - found.length;
 
   for (const row of found) {
-    const outcome = await deliver(row, { supabase, send, origin, resolveAddress });
+    const outcome = await deliver(row, { supabase, send, origin, resolveAddress, log });
     if (outcome === "sent") sent += 1;
     else if (outcome === "skipped") skipped += 1;
     else if (outcome === "terminal") failedTerminal += 1;
     else failedRetryable += 1;
   }
 
-  console.info(
-    `${LOG_PREFIX} batch of ${payload.notification_ids.length}: sent=${sent} skipped=${skipped} terminal=${failedTerminal} retryable=${failedRetryable}`,
-  );
+  log.info("batch complete", {
+    requested: payload.notification_ids.length,
+    sent,
+    skipped,
+    terminal: failedTerminal,
+    retryable: failedRetryable,
+  });
 
   return { sent, skipped, failedTerminal, failedRetryable };
 }
@@ -181,6 +195,7 @@ interface DeliverDeps {
   readonly send: typeof sendEmail;
   readonly origin: string | null;
   readonly resolveAddress: (userId: string) => Promise<string | null>;
+  readonly log: Logger;
 }
 
 async function deliver(row: NotificationRow, deps: DeliverDeps): Promise<DeliveryOutcome> {
@@ -189,9 +204,9 @@ async function deliver(row: NotificationRow, deps: DeliverDeps): Promise<Deliver
     // fan-out. The window between the two is small and the rule is not about
     // size: an opt-out that arrives after the row was written must win, because
     // the consumer's last word is the one that counts.
-    const suppression = await suppressionReason(deps.supabase, row.user_id, row.kind);
+    const suppression = await suppressionReason(deps.supabase, row.user_id, row.kind, deps.log);
     if (suppression !== null) {
-      await markRow(deps.supabase, row.id, "failed", suppression);
+      await markRow(deps.supabase, row.id, "failed", suppression, deps.log);
       return "skipped";
     }
 
@@ -200,7 +215,7 @@ async function deliver(row: NotificationRow, deps: DeliverDeps): Promise<Deliver
       // No address on the account. Terminal by nature - an address does not
       // appear because we asked five times - and recorded on the row so an
       // operator can see why this consumer never hears from us.
-      await markRow(deps.supabase, row.id, "failed", "no email address on the account");
+      await markRow(deps.supabase, row.id, "failed", "no email address on the account", deps.log);
       return "skipped";
     }
 
@@ -218,7 +233,7 @@ async function deliver(row: NotificationRow, deps: DeliverDeps): Promise<Deliver
     });
 
     if (result.ok) {
-      await markRow(deps.supabase, row.id, "sent", null);
+      await markRow(deps.supabase, row.id, "sent", null, deps.log);
       return "sent";
     }
 
@@ -228,17 +243,25 @@ async function deliver(row: NotificationRow, deps: DeliverDeps): Promise<Deliver
       // do - which is exactly the message being dropped silently. The job row
       // carries the failure; the notification row carries only outcomes that
       // are final.
-      console.warn(`${LOG_PREFIX} retryable failure on ${row.id}: ${result.reason}`);
+      deps.log.warn("retryable send failure; row left pending", {
+        notification_id: row.id,
+        user_id: row.user_id,
+        reason: result.reason,
+      });
       return "retryable";
     }
 
-    await markRow(deps.supabase, row.id, "failed", result.reason);
+    await markRow(deps.supabase, row.id, "failed", result.reason, deps.log);
     return "terminal";
   } catch (error) {
     // One row's fault must not abandon the rest of the batch. Treated as
     // retryable because an unexpected exception is not evidence that another
     // attempt would fail the same way.
-    console.error(`${LOG_PREFIX} unexpected failure delivering ${row.id}`, error);
+    deps.log.error("unexpected failure delivering a row", {
+      err: error,
+      notification_id: row.id,
+      user_id: row.user_id,
+    });
     return "retryable";
   }
 }
@@ -267,6 +290,7 @@ async function suppressionReason(
   supabase: SupabaseClient<Database>,
   userId: string,
   kind: string,
+  log: Logger,
 ): Promise<string | null> {
   const { data, error } = await supabase
     .from("profiles")
@@ -275,7 +299,7 @@ async function suppressionReason(
     .maybeSingle<{ is_suspended: boolean; consumers: { email_enabled: boolean } | null }>();
 
   if (error !== null) {
-    console.error(`${LOG_PREFIX} could not read preferences for ${userId}`, error);
+    log.error("could not read preferences; failing closed", { err: error, user_id: userId });
     return "preferences unreadable";
   }
   if (data === null) return "no profile";
@@ -327,17 +351,18 @@ async function suppressionReason(
 async function readAddress(
   supabase: SupabaseClient<Database>,
   userId: string,
+  log: Logger,
 ): Promise<string | null> {
   try {
     const { data, error } = await supabase.auth.admin.getUserById(userId);
     if (error !== null || data.user === null) {
-      console.error(`${LOG_PREFIX} could not read the address for ${userId}`, error);
+      log.error("could not read the address", { err: error, user_id: userId });
       return null;
     }
     const email = data.user.email;
     return email === undefined || email.length === 0 ? null : email;
   } catch (error) {
-    console.error(`${LOG_PREFIX} unexpected failure reading the address for ${userId}`, error);
+    log.error("unexpected failure reading the address", { err: error, user_id: userId });
     return null;
   }
 }
@@ -389,6 +414,7 @@ async function markRow(
   notificationId: string,
   status: "sent" | "failed",
   error: string | null,
+  log: Logger,
 ): Promise<void> {
   const { error: updateError } = await supabase
     .from("notifications")
@@ -407,10 +433,11 @@ async function markRow(
     // The email is already out. This is bookkeeping, and losing it must not
     // change what the route tells QStash - reporting a failure here would
     // re-send a message that has already arrived.
-    console.error(
-      `${LOG_PREFIX} sent ${notificationId} but could not record the outcome`,
-      updateError,
-    );
+    log.error("sent, but could not record the outcome on the row", {
+      err: updateError,
+      notification_id: notificationId,
+      status,
+    });
   }
 }
 

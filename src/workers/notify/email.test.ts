@@ -504,3 +504,118 @@ describe("emailCopy", () => {
     expect(copy.action).toEqual({ label: "Open Giya", href: "/scan/r1" });
   });
 });
+
+// =============================================================================
+// The log line (t7-5)
+// =============================================================================
+//
+// This worker logs from five places and two of them are inside per-row helpers
+// three calls deep. Those are exactly the lines that used to be untraceable:
+// "[workers/notify.email] could not read preferences for u1" names a USER but
+// not the job, the batch, or the delivery - so it can be found only by someone
+// who already knows which incident they are looking at.
+
+const JOB = "0198f0a1-0000-7000-8000-000000000001";
+
+/** The one line a channel received, parsed. Fails loudly if there is not
+ * exactly one: "the log is in there somewhere" is not a diagnosis. */
+function line(channel: "error" | "warn" | "info"): Record<string, unknown> {
+  const spy = console[channel] as unknown as { mock: { calls: unknown[][] } };
+  expect(spy.mock.calls).toHaveLength(1);
+  return JSON.parse(String(spy.mock.calls[0]![0])) as Record<string, unknown>;
+}
+
+describe("runNotifyEmail - every line is traceable", () => {
+  it("names the job when the batch cannot even be read", async () => {
+    const { client } = supabaseDouble({ readError: { message: "connection terminated" } });
+
+    await runNotifyEmail(
+      { job_id: JOB, notification_ids: ["n1"] },
+      { supabase: client, send: sendDouble(), ...deps() },
+    );
+
+    const logged = line("error") as { err: { message: string }; [key: string]: unknown };
+    expect(logged.job_id).toBe(JOB);
+    expect(logged.worker).toBe("notify.email");
+    expect(logged.err.message).toBe("connection terminated");
+  });
+
+  it("carries the job id on the batch summary, with the counts as fields", async () => {
+    const { client } = supabaseDouble();
+
+    await runNotifyEmail(
+      { job_id: JOB, notification_ids: ["n1"] },
+      { supabase: client, send: sendDouble(), ...deps() },
+    );
+
+    const logged = line("info");
+    expect(logged.job_id).toBe(JOB);
+    // Counts as FIELDS. The old line was "batch of 1: sent=1 skipped=0 ..." -
+    // a shape you can read but cannot aggregate.
+    expect(logged).toMatchObject({ requested: 1, sent: 1, skipped: 0, terminal: 0, retryable: 0 });
+  });
+
+  it("carries the job id out of a per-row retryable failure, three frames down", async () => {
+    const { client } = supabaseDouble();
+    const send = sendDouble({ ok: false, retryable: true, reason: "resend 502" });
+
+    await runNotifyEmail(
+      { job_id: JOB, notification_ids: ["n1"] },
+      { supabase: client, send, ...deps() },
+    );
+
+    const logged = line("warn");
+    expect(logged.job_id).toBe(JOB);
+    expect(logged.notification_id).toBe("n1");
+    expect(logged.reason).toBe("resend 502");
+  });
+
+  it("carries the job id out of an unexpected per-row throw", async () => {
+    const { client } = supabaseDouble();
+    const send = vi.fn<Send>(async () => {
+      throw new Error("render blew up");
+    });
+
+    await runNotifyEmail(
+      { job_id: JOB, notification_ids: ["n1"] },
+      { supabase: client, send, ...deps() },
+    );
+
+    const logged = line("error") as { err: { message: string }; [key: string]: unknown };
+    expect(logged.job_id).toBe(JOB);
+    expect(logged.notification_id).toBe("n1");
+    expect(logged.err.message).toBe("render blew up");
+  });
+
+  it("carries the job id out of the preference read, the deepest call site", async () => {
+    const { client } = supabaseDouble({ profileError: { message: "permission denied for profiles" } });
+
+    await runNotifyEmail(
+      { job_id: JOB, notification_ids: ["n1"] },
+      { supabase: client, send: sendDouble(), ...deps() },
+    );
+
+    const logged = line("error") as { err: { message: string }; [key: string]: unknown };
+    expect(logged.job_id).toBe(JOB);
+    expect(logged.user_id).toBe("u1");
+    expect(logged.err.message).toBe("permission denied for profiles");
+  });
+
+  it("does not put the recipient's address in a log line", async () => {
+    // The address is authentication data (0002 keeps it out of `profiles` on
+    // purpose). It is not a secret in the credential sense, but a worker log
+    // that pairs an email address with a rejection reason is a disclosure, and
+    // `user_id` identifies the row just as well for anyone with database
+    // access.
+    const { client } = supabaseDouble();
+    const send = sendDouble({ ok: false, retryable: true, reason: "resend 502" });
+
+    await runNotifyEmail(
+      { job_id: JOB, notification_ids: ["n1"] },
+      { supabase: client, send, resolveAddress: async () => "consumer@example.com", origin: ORIGIN },
+    );
+
+    const spy = console.warn as unknown as { mock: { calls: unknown[][] } };
+    expect(String(spy.mock.calls[0]![0])).not.toContain("consumer@example.com");
+  });
+});
