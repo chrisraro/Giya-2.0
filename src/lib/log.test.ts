@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { jobLogger, redact, requestLogger, serializeError } from "./log";
+import {
+  REQUEST_ID_PATTERN,
+  jobLogger,
+  redact,
+  requestLogger,
+  resolveRequestId,
+  serializeError,
+} from "./log";
 
 // =============================================================================
 // src/lib/log.ts - the structured log line.
@@ -472,6 +479,54 @@ describe("correlation", () => {
   it("redacts the fields bound by with(), not only the ones passed at the call", () => {
     requestLogger("req-abc", { now: CLOCK }).with({ authorization: "Bearer nope" }).error("failed");
     expect(onlyLine("error")).not.toContain("nope");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// The request id, in one place
+// -----------------------------------------------------------------------------
+
+describe("resolveRequestId", () => {
+  it("keeps a well-formed inbound id, so end-to-end correlation survives", () => {
+    expect(resolveRequestId("client-abc-0123456789")).toBe("client-abc-0123456789");
+  });
+
+  it("replaces anything that is not one, rather than echoing it", () => {
+    for (const hostile of [
+      null,
+      undefined,
+      "",
+      "short",
+      'evil","level":"info","msg":"forged',
+      "a".repeat(65),
+      "has spaces",
+      "semi;colon",
+    ]) {
+      const resolved = resolveRequestId(hostile);
+      expect(resolved).not.toBe(hostile);
+      expect(REQUEST_ID_PATTERN.test(resolved)).toBe(true);
+    }
+  });
+
+  it("produces an id that its own screen would accept, with Web Crypto", () => {
+    expect(typeof globalThis.crypto.randomUUID).toBe("function");
+    expect(REQUEST_ID_PATTERN.test(resolveRequestId(null))).toBe(true);
+  });
+
+  it("produces an id that its own screen would accept, without Web Crypto", () => {
+    // A runtime with no `crypto.randomUUID` must not yield a blank or
+    // malformed id - the next hop screens it and would throw it away, and a
+    // request that loses its id at the first boundary is untraceable from
+    // there on.
+    const original = globalThis.crypto;
+    try {
+      Object.defineProperty(globalThis, "crypto", { value: undefined, configurable: true });
+      const generated = resolveRequestId(null);
+      expect(REQUEST_ID_PATTERN.test(generated)).toBe(true);
+      expect(generated).not.toBe(resolveRequestId(null));
+    } finally {
+      Object.defineProperty(globalThis, "crypto", { value: original, configurable: true });
+    }
   });
 });
 

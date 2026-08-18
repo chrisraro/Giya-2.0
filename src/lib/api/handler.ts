@@ -1,12 +1,12 @@
 import "server-only";
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import type { User } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 import type { z } from "zod";
 
-import { requestLogger } from "@/lib/log";
+import { requestLogger, resolveRequestId as resolveInboundRequestId } from "@/lib/log";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { del, get, redisKey, set, setNx } from "@/lib/redis";
 import { createClient } from "@/lib/supabase/server";
@@ -43,11 +43,10 @@ import {
 //   8. handler               -> domain errors as thrown ApiError
 //   9. envelope
 
-// Accepted shape for an inbound X-Request-Id. Client-supplied ids are useful
-// for end-to-end correlation but are untrusted input that lands in log lines,
-// so anything outside this alphabet is discarded and replaced rather than
-// echoed (log injection, absurd lengths, control characters).
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
+// The inbound X-Request-Id screen lives in src/lib/log.ts now, not here.
+// It moved because src/instrumentation.ts's `onRequestError` needs the same
+// rule for server components and pages - which never reach this file - and
+// two copies of a correlation scheme is two correlation schemes.
 
 // Idempotency-Key alphabet. UUIDs and ULIDs both satisfy it. The colon is
 // excluded on purpose: it is the Redis key separator, so allowing it would
@@ -179,8 +178,7 @@ interface IdempotencyRecord {
 }
 
 function resolveRequestId(request: NextRequest): string {
-  const inbound = request.headers.get("x-request-id");
-  return inbound && REQUEST_ID_PATTERN.test(inbound) ? inbound : randomUUID();
+  return resolveInboundRequestId(request.headers.get("x-request-id"));
 }
 
 function resolveClientIp(request: NextRequest): string {

@@ -361,6 +361,44 @@ function createLogger(
   };
 }
 
+// -----------------------------------------------------------------------------
+// THE REQUEST ID, IN ONE PLACE
+// -----------------------------------------------------------------------------
+// This pattern and this resolver used to live inside src/lib/api/handler.ts,
+// which was fine while /api/v1 was the only thing that logged. It is not any
+// more: src/instrumentation.ts's `onRequestError` reports faults in SERVER
+// COMPONENTS AND PAGES, which never touch defineHandler at all - and that is
+// the half the incident behind this task actually happened in. Two resolvers
+// would be two correlation schemes wearing one name, so there is one.
+//
+// The screen matters as much as the id. An inbound X-Request-Id is untrusted
+// input that lands in a log line, so anything outside this alphabet is
+// DISCARDED AND REPLACED rather than echoed - otherwise whoever can set a
+// header can forge a log entry, and absurd lengths and control characters get
+// a free ride into the aggregator.
+
+/** The accepted shape of an inbound `X-Request-Id`. */
+export const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
+
+/** The inbound id if it is one, otherwise a fresh one. Never returns blank. */
+export function resolveRequestId(inbound: string | null | undefined): string {
+  return inbound && REQUEST_ID_PATTERN.test(inbound) ? inbound : newRequestId();
+}
+
+function newRequestId(): string {
+  const webCrypto = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (typeof webCrypto?.randomUUID === "function") {
+    return webCrypto.randomUUID();
+  }
+  // No Web Crypto - an older runtime, or a test environment that does not
+  // expose it. The id has to be unique enough to separate concurrent requests
+  // in a log and nothing more; it is not a secret and nothing authenticates
+  // on it, so a weaker source here is a legibility question, not a security
+  // one. It still has to satisfy REQUEST_ID_PATTERN or the next hop would
+  // discard it.
+  return `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
 /**
  * A logger for a request context. `requestId` is the id
  * src/lib/api/handler.ts already mints and echoes on `X-Request-Id` - the same
