@@ -1,0 +1,293 @@
+{
+  "task": "T7.5 - structured logs and env-optional Sentry",
+  "mutants": [
+    {
+      "name": "M-log-level-channel",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (level === \"error\") console.error(line);",
+      "replacement": "  if (level === \"error\") console.info(line);",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "an error must land on the error channel, not merely somewhere"
+    },
+    {
+      "name": "M-log-one-line",
+      "file": "src/lib/log.ts",
+      "anchor": "      write(level, JSON.stringify(entry));",
+      "replacement": "      write(level, JSON.stringify(entry, null, 2));",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "one entry is one line - a pretty-printed entry breaks every aggregator"
+    },
+    {
+      "name": "M-log-clock-injection",
+      "file": "src/lib/log.ts",
+      "anchor": "  const now = options.now ?? (() => new Date());",
+      "replacement": "  const now = () => new Date();",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "the timestamp comes from the injected clock, so tests assert a literal"
+    },
+    {
+      "name": "M-log-sink-injection",
+      "file": "src/lib/log.ts",
+      "anchor": "  const write = options.write ?? consoleWrite;",
+      "replacement": "  const write = consoleWrite;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "an injected sink replaces the console rather than being ignored"
+    },
+    {
+      "name": "M-log-correlation-key",
+      "file": "src/lib/log.ts",
+      "anchor": "  return createLogger({ key: \"request_id\", value: requestId }, options, {});",
+      "replacement": "  return createLogger({ key: \"job_id\", value: requestId }, options, {});",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a request logger emits request_id, not job_id"
+    },
+    {
+      "name": "M-log-reserved-keys",
+      "file": "src/lib/log.ts",
+      "anchor": "        if (RESERVED_KEYS.has(key)) continue;",
+      "replacement": "        if (false) continue;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a caller-supplied field cannot relabel level/time/msg/request_id"
+    },
+    {
+      "name": "M-log-correlation-missing-off",
+      "file": "src/lib/log.ts",
+      "anchor": "      if (!traceable) entry.correlation_missing = true;",
+      "replacement": "      if (false) entry.correlation_missing = true;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a blank correlation id is flagged, so untraceable lines are greppable"
+    },
+    {
+      "name": "M-log-correlation-missing-always",
+      "file": "src/lib/log.ts",
+      "anchor": "      if (!traceable) entry.correlation_missing = true;",
+      "replacement": "      if (true) entry.correlation_missing = true;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "the flag is not stamped on a line that HAS an id"
+    },
+    {
+      "name": "M-log-with-bound-fields",
+      "file": "src/lib/log.ts",
+      "anchor": "    with: (fields) => createLogger(correlation, options, { ...bound, ...fields }),",
+      "replacement": "    with: (fields) => createLogger(correlation, options, {}),",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "fields bound by with() appear on every later entry"
+    },
+    {
+      "name": "M-log-error-serialize",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (!isErrorLike(value)) return value;",
+      "replacement": "  if (true) return value;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "THE TRAP - an Error handed straight to JSON.stringify becomes {}"
+    },
+    {
+      "name": "M-log-error-stack",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (typeof error.stack === \"string\") serialized.stack = error.stack;",
+      "replacement": "  if (false) serialized.stack = error.stack;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "the stack survives - 'which line threw' is the whole point"
+    },
+    {
+      "name": "M-log-error-cause",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (error.cause !== undefined) serialized.cause = error.cause;",
+      "replacement": "  if (false) serialized.cause = error.cause;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "the cause chain survives - the real fault is usually at the bottom"
+    },
+    {
+      "name": "M-log-error-code",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (error.code !== undefined) serialized.code = error.code;",
+      "replacement": "  if (false) serialized.code = error.code;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a driver error code (23505, 42501) survives"
+    },
+    {
+      "name": "M-log-error-cross-realm",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (Object.prototype.toString.call(value) !== \"[object Error]\") return false;",
+      "replacement": "  return false;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "an Error from another realm is still serialized, not silently emptied"
+    },
+    {
+      "name": "M-log-redact-keys-off",
+      "file": "src/lib/log.ts",
+      "anchor": "  return SENSITIVE_KEY_PARTS.some((part) => normalized.includes(part));",
+      "replacement": "  return false;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "every secret-shaped key is redacted"
+    },
+    {
+      "name": "M-log-redact-keys-everything",
+      "file": "src/lib/log.ts",
+      "anchor": "  return SENSITIVE_KEY_PARTS.some((part) => normalized.includes(part));",
+      "replacement": "  return true;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "route/user_id/receipt_id are NOT redacted - over-redaction is also a defect"
+    },
+    {
+      "name": "M-log-redact-at-emit",
+      "file": "src/lib/log.ts",
+      "anchor": "        entry[key] = isSensitiveKey(key) ? REDACTED : walk(value, 1, new WeakSet<object>());",
+      "replacement": "        entry[key] = walk(value, 1, new WeakSet<object>());",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a top-level secret field is redacted, including one bound by with()"
+    },
+    {
+      "name": "M-log-redact-nested",
+      "file": "src/lib/log.ts",
+      "anchor": "      result[key] = isSensitiveKey(key) ? REDACTED : walk(entry, depth + 1, seen);",
+      "replacement": "      result[key] = walk(entry, depth + 1, seen);",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "redaction reaches inside nested objects and arrays, not just the top"
+    },
+    {
+      "name": "M-log-redact-jwt",
+      "file": "src/lib/log.ts",
+      "anchor": "  return JWT_PATTERN.test(value) || BEARER_PATTERN.test(value);",
+      "replacement": "  return BEARER_PATTERN.test(value);",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a JWT is redacted by shape even under an innocent key"
+    },
+    {
+      "name": "M-log-redact-bearer",
+      "file": "src/lib/log.ts",
+      "anchor": "  return JWT_PATTERN.test(value) || BEARER_PATTERN.test(value);",
+      "replacement": "  return JWT_PATTERN.test(value);",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a bearer credential is redacted by shape even under an innocent key"
+    },
+    {
+      "name": "M-log-circular",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (seen.has(object)) return \"[circular]\";",
+      "replacement": "  if (false) return \"[circular]\";",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a cycle is named, not walked"
+    },
+    {
+      "name": "M-log-circular-siblings",
+      "file": "src/lib/log.ts",
+      "anchor": "    seen.delete(object);\n  }\n}",
+      "replacement": "  }\n}",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a shared sibling object is printed twice, not misreported as a cycle"
+    },
+    {
+      "name": "M-log-depth-cap",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (depth >= MAX_DEPTH) return \"[truncated]\";",
+      "replacement": "  if (false) return \"[truncated]\";",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "the walk stops at a depth cap"
+    },
+    {
+      "name": "M-log-array-cap",
+      "file": "src/lib/log.ts",
+      "anchor": "      if (object.length > MAX_ARRAY_ITEMS) {",
+      "replacement": "      if (false) {",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a capped array says how many entries it dropped"
+    },
+    {
+      "name": "M-log-string-cap",
+      "file": "src/lib/log.ts",
+      "anchor": "      return value.length > MAX_STRING_LENGTH",
+      "replacement": "      return false && value.length > MAX_STRING_LENGTH",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a huge string is truncated rather than becoming the log line"
+    },
+    {
+      "name": "M-log-bigint",
+      "file": "src/lib/log.ts",
+      "anchor": "      return value.toString();",
+      "replacement": "      return value;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a bigint does not make JSON.stringify throw the entry away"
+    },
+    {
+      "name": "M-log-nonfinite",
+      "file": "src/lib/log.ts",
+      "anchor": "      return Number.isFinite(value) ? value : String(value);",
+      "replacement": "      return value;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "NaN/Infinity are named, not silently emitted as null"
+    },
+    {
+      "name": "M-log-headers",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (typeof Headers !== \"undefined\" && object instanceof Headers) {",
+      "replacement": "  if (false && typeof Headers !== \"undefined\" && object instanceof Headers) {",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a Headers instance does not stringify to {} (the Error trap, again)"
+    },
+    {
+      "name": "M-log-map",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (object instanceof Map) {",
+      "replacement": "  if (false && object instanceof Map) {",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a Map does not stringify to {}"
+    },
+    {
+      "name": "M-log-set",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (object instanceof Set) {",
+      "replacement": "  if (false && object instanceof Set) {",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a Set does not stringify to {}"
+    },
+    {
+      "name": "M-log-date",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (object instanceof Date) {",
+      "replacement": "  if (false && object instanceof Date) {",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a Date renders as an ISO string"
+    },
+    {
+      "name": "M-log-invalid-date",
+      "file": "src/lib/log.ts",
+      "anchor": "    return Number.isNaN(object.getTime()) ? \"[invalid date]\" : object.toISOString();",
+      "replacement": "    return object.toISOString();",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "an invalid Date is named rather than throwing the entry away"
+    },
+    {
+      "name": "M-log-regexp",
+      "file": "src/lib/log.ts",
+      "anchor": "  if (object instanceof RegExp) {",
+      "replacement": "  if (false && object instanceof RegExp) {",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a RegExp does not stringify to {}"
+    },
+    {
+      "name": "M-log-never-throws",
+      "file": "src/lib/log.ts",
+      "anchor": "    } catch {\n      // NEVER THE REASON SOMETHING FAILS.",
+      "replacement": "    } catch (rethrown) {\n      throw rethrown;\n      // NEVER THE REASON SOMETHING FAILS.",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "a broken sink or clock never replaces the fault being reported"
+    },
+    {
+      "name": "M-log-release",
+      "file": "src/lib/log.ts",
+      "anchor": "      if (release !== null) entry.release = release;",
+      "replacement": "      if (false) entry.release = release;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "'on which deploy' - the commit sha is stamped on the line"
+    },
+    {
+      "name": "M-log-release-blank",
+      "file": "src/lib/log.ts",
+      "anchor": "  return candidate.trim().length > 0 ? candidate : null;",
+      "replacement": "  return candidate;",
+      "tests": ["src/lib/log.test.ts"],
+      "kills": "off-platform the key is omitted, not emitted as an empty string"
+    }
+  ]
+}
