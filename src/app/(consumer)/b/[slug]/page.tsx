@@ -19,7 +19,7 @@ import { PromotionCard } from "@/features/promotions/components/promotion-card";
 import { isFavorite } from "@/features/favorites/server/repo";
 import { FavoriteButton } from "@/features/favorites/components/favorite-button";
 import { FacebookPageEmbed } from "@/features/integrations/meta/components/facebook-page-embed";
-import { getFacebookPageEmbed } from "@/lib/integrations/meta-oembed";
+import { getFacebookPageEmbed, getMetaAppIdForSdk } from "@/lib/integrations/meta-oembed";
 
 export const revalidate = 60;
 
@@ -182,7 +182,7 @@ export default async function PublicBusinessPage({
 
       {business.facebookUrl && facebookEmbed ? (
         <div className="mt-6 px-4">
-          <FacebookPageEmbed embed={facebookEmbed} pageUrl={business.facebookUrl} />
+          <FacebookPageEmbed embed={facebookEmbed} pageUrl={business.facebookUrl} appId={getMetaAppIdForSdk()} />
         </div>
       ) : null}
 

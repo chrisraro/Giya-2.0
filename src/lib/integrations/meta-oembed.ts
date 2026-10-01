@@ -64,6 +64,19 @@ function getAppToken(): string | null {
 }
 
 /**
+ * The app id for the browser SDK (`appId=` on sdk.js), so embeds and plugins
+ * are attributed to Giya's Meta app rather than rendered anonymously. Public by
+ * nature - Meta prints it in every plugin iframe URL - unlike the token above.
+ */
+export function getMetaAppIdForSdk(): string | null {
+  try {
+    return getServerEnv().META_APP_ID ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The oEmbed HTML for a Facebook Page URL; `pending_review` while Meta has not
  * approved oEmbed Read for this app; `unavailable` for everything else (a URL
  * outside the allowlist, no credentials, a timeout, any other error, a body
