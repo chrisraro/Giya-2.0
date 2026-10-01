@@ -33,7 +33,7 @@ export const metadata: Metadata = {
 };
 
 export default async function MetaReviewPage() {
-  const html = await getFacebookPageEmbed(META_PAGE_URL);
+  const embed = await getFacebookPageEmbed(META_PAGE_URL);
 
   return (
     <main className="mx-auto max-w-md px-4 py-10">
@@ -44,7 +44,17 @@ export default async function MetaReviewPage() {
         rendered from embed HTML our server retrieves from Meta&apos;s oEmbed Read endpoint. On each
         business profile it shows that business&apos;s own Page instead.
       </p>
-      <FacebookPageEmbed html={html} pageUrl={META_PAGE_URL} className="mt-6" />
+      {embed.status === "pending_review" ? (
+        // Stated on the page, not only in the submission notes: the reviewer
+        // should never have to guess which mechanism drew the card.
+        <p data-testid="pending-review-note" className="mt-3 text-body-s text-on-surface-variant">
+          Giya&apos;s oEmbed Read access is awaiting Meta App Review, and until it is approved
+          Meta&apos;s oEmbed endpoint declines our request. Meanwhile this card shows the same Page
+          through Facebook&apos;s Page Plugin. Once approved, it renders the embed returned by oEmbed
+          Read with no further change.
+        </p>
+      ) : null}
+      <FacebookPageEmbed embed={embed} pageUrl={META_PAGE_URL} className="mt-6" />
     </main>
   );
 }

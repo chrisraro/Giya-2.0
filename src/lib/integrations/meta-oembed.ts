@@ -28,6 +28,23 @@ const OEMBED_TIMEOUT_MS = 5_000;
 export const OEMBED_REVALIDATE_SECONDS = 86_400;
 
 const oembedResponseSchema = z.object({ html: z.string().min(1) });
+const graphErrorSchema = z.object({ error: z.object({ code: z.number() }) });
+
+/**
+ * Graph error #10 on this endpoint means "oEmbed Read must be reviewed and
+ * approved" - a valid token, a feature not yet granted. It is named apart
+ * from every other failure because the answer to it is different: the Page
+ * can still be shown through Facebook's review-free Page Plugin, which the
+ * component does, while a dead token or an outage leaves only the link.
+ */
+const OEMBED_NOT_APPROVED_CODE = 10;
+
+export type FacebookPageEmbed =
+  | { readonly status: "ok"; readonly html: string }
+  | { readonly status: "pending_review" }
+  | { readonly status: "unavailable" };
+
+const UNAVAILABLE: FacebookPageEmbed = { status: "unavailable" };
 
 /**
  * `app_id|client_token`, or null when oEmbed is not configured. The client
@@ -47,16 +64,22 @@ function getAppToken(): string | null {
 }
 
 /**
- * The oEmbed HTML for a Facebook Page URL, or null on any failure: a URL
- * outside the allowlist, no credentials, a timeout, a non-2xx answer, or a
- * body without `html`. Never throws.
+ * The oEmbed HTML for a Facebook Page URL; `pending_review` while Meta has not
+ * approved oEmbed Read for this app; `unavailable` for everything else (a URL
+ * outside the allowlist, no credentials, a timeout, any other error, a body
+ * without `html`). Never throws.
  */
-export async function getFacebookPageEmbed(pageUrl: string): Promise<string | null> {
+export async function getFacebookPageEmbed(pageUrl: string): Promise<FacebookPageEmbed> {
   const safeUrl = toFacebookPageUrl(pageUrl);
-  if (safeUrl === null) return null;
+  if (safeUrl === null) return UNAVAILABLE;
 
   const token = getAppToken();
-  if (token === null) return null;
+  if (token === null) {
+    // Without this line a missing variable and a Meta outage look identical
+    // in production: both render the plain link.
+    console.warn("[integrations/meta-oembed] not configured: META_APP_ID and META_CLIENT_TOKEN (or META_APP_SECRET) are required");
+    return UNAVAILABLE;
+  }
 
   const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/oembed_page`);
   url.searchParams.set("url", safeUrl);
@@ -71,21 +94,27 @@ export async function getFacebookPageEmbed(pageUrl: string): Promise<string | nu
     });
 
     if (!response.ok) {
-      // Status only. The body can echo the request, and the request carries
-      // the token in a header that some error shapes copy.
-      console.warn(`[integrations/meta-oembed] oembed_page answered HTTP ${response.status}`);
-      return null;
+      // Status and Graph error code only. The message text can echo the
+      // request, and the request carries the token in a header that some
+      // error shapes copy.
+      const body: unknown = await response.json().catch(() => null);
+      const parsedError = graphErrorSchema.safeParse(body);
+      const code = parsedError.success ? parsedError.data.error.code : undefined;
+      console.warn(
+        `[integrations/meta-oembed] oembed_page answered HTTP ${response.status}${code === undefined ? "" : ` (code ${code})`}`,
+      );
+      return code === OEMBED_NOT_APPROVED_CODE ? { status: "pending_review" } : UNAVAILABLE;
     }
 
     const parsed = oembedResponseSchema.safeParse(await response.json());
     if (!parsed.success) {
       console.warn("[integrations/meta-oembed] oembed_page returned no html");
-      return null;
+      return UNAVAILABLE;
     }
-    return parsed.data.html;
+    return { status: "ok", html: parsed.data.html };
   } catch (error) {
     const name = error instanceof Error ? error.name : "unknown";
     console.warn(`[integrations/meta-oembed] oembed_page request failed (${name})`);
-    return null;
+    return UNAVAILABLE;
   }
 }
