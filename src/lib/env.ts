@@ -217,6 +217,12 @@ const serverEnvSchema = z.object({
   // open redirect for whoever wants to register our URL against their app.
   META_WEBHOOK_VERIFY_TOKEN: z.string().min(1).optional(),
 
+  // Meta oEmbed Read (src/lib/integrations/meta-oembed.ts): App Dashboard ->
+  // Settings -> Advanced -> Client token. Paired with META_APP_ID to form the
+  // `app_id|client_token` app token. Optional: without it oEmbed falls back to
+  // META_APP_SECRET, and with neither every Page embed renders as a plain link.
+  META_CLIENT_TOKEN: z.string().min(1).optional(),
+
   // The AES-256-GCM key (or key list) for the `integration_connections` token
   // columns. Optional here for one specific reason: it is read straight from
   // process.env by src/lib/crypto/token-cipher.ts, which validates it far more
@@ -335,6 +341,7 @@ export function getServerEnv(): ServerEnv {
     META_APP_ID: emptyToUndefined(process.env.META_APP_ID),
     META_APP_SECRET: emptyToUndefined(process.env.META_APP_SECRET),
     META_WEBHOOK_VERIFY_TOKEN: emptyToUndefined(process.env.META_WEBHOOK_VERIFY_TOKEN),
+    META_CLIENT_TOKEN: emptyToUndefined(process.env.META_CLIENT_TOKEN),
     INTEGRATION_TOKEN_AES_KEY: emptyToUndefined(process.env.INTEGRATION_TOKEN_AES_KEY),
     EMAIL_FROM: emptyToUndefined(process.env.EMAIL_FROM),
     METRICS_TOKEN: emptyToUndefined(process.env.METRICS_TOKEN),

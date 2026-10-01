@@ -45,6 +45,7 @@ this file, only names.
 | `RESEND_WEBHOOK_SECRET` | Resend | Delivery and bounce webhooks | |
 | `META_APP_ID` | Meta | Facebook auth and marketing integrations | |
 | `META_APP_SECRET` | Meta | Same | The old Giya codebase held only placeholders, so these must be created fresh |
+| `META_CLIENT_TOKEN` | Meta | oEmbed Read: Facebook Page embeds on `/b/[slug]` and `/meta-review` | App Dashboard → Settings → Advanced → Client token. Without it (and without `META_APP_SECRET`) embeds show only the Page link |
 | `NEXT_PUBLIC_MAPS_BROWSER_KEY` | Maps provider | Store locator, browser side | |
 | `MAPS_SERVER_KEY` | Maps provider | Geocoding, server side | |
 | `METRICS_TOKEN` | self-generated | Bearer-guards `GET /api/internal/metrics` (doc 52's per-minute probe) | Optional and safe to leave unset - the route answers 404 rather than running open. Generate a random value ≥16 characters when the probe is wired into the alert router; shorter values are treated as not configured (`src/app/api/internal/metrics/route.ts`). Reused as the same bearer for `POST /api/jobs/ops.job_health_check` (task 2.5) - both are operator-only diagnostic/action routes behind the same trust boundary, so this does not introduce a second credential. |

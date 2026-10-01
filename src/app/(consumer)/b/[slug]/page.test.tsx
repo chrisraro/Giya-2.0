@@ -17,6 +17,11 @@ const mocks = vi.hoisted(() => ({
   getPublicMenu: vi.fn(),
   getPublicRewards: vi.fn(),
   getMyBalanceForBusiness: vi.fn(),
+  getFacebookPageEmbed: vi.fn(),
+}));
+
+vi.mock("@/lib/integrations/meta-oembed", () => ({
+  getFacebookPageEmbed: mocks.getFacebookPageEmbed,
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -48,6 +53,7 @@ function business(overrides: Partial<PublicBusiness> = {}): PublicBusiness {
     businessTypeName: null,
     addressText: null,
     coordinates: null,
+    facebookUrl: null,
     ...overrides,
   };
 }
@@ -214,5 +220,47 @@ describe("public business page affordability", () => {
     expect(consoleError).toHaveBeenCalled();
 
     consoleError.mockRestore();
+  });
+});
+
+describe("public business page Facebook embed (Meta oEmbed Read)", () => {
+  beforeEach(() => {
+    mocks.getUser.mockResolvedValue({ data: { user: null } });
+    mocks.getPublicRewards.mockResolvedValue([]);
+  });
+
+  it("renders the business's own Page from the oEmbed html", async () => {
+    mocks.getBusinessBySlug.mockResolvedValue(
+      business({ facebookUrl: "https://www.facebook.com/kapediaria" }),
+    );
+    mocks.getFacebookPageEmbed.mockResolvedValue('<div class="fb-page">embed</div>');
+
+    render(await PublicBusinessPage({ params: params() }));
+
+    expect(mocks.getFacebookPageEmbed).toHaveBeenCalledWith("https://www.facebook.com/kapediaria");
+    expect(screen.getByTestId("facebook-page-embed")).toHaveTextContent("embed");
+    expect(screen.getByRole("link", { name: "Visit Facebook Page" })).toHaveAttribute(
+      "href",
+      "https://www.facebook.com/kapediaria",
+    );
+  });
+
+  it("falls back to the Page link alone when the embed could not be fetched", async () => {
+    mocks.getBusinessBySlug.mockResolvedValue(
+      business({ facebookUrl: "https://www.facebook.com/kapediaria" }),
+    );
+    mocks.getFacebookPageEmbed.mockResolvedValue(null);
+
+    render(await PublicBusinessPage({ params: params() }));
+
+    expect(screen.queryByTestId("facebook-page-embed")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Visit Facebook Page" })).toBeInTheDocument();
+  });
+
+  it("shows no Facebook section and calls no Meta API when the business has no Page", async () => {
+    render(await PublicBusinessPage({ params: params() }));
+
+    expect(mocks.getFacebookPageEmbed).not.toHaveBeenCalled();
+    expect(screen.queryByRole("link", { name: "Visit Facebook Page" })).not.toBeInTheDocument();
   });
 });
