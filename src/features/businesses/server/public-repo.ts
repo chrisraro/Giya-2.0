@@ -1,3 +1,4 @@
+import { toFacebookPageUrl } from "@/lib/integrations/facebook-url";
 import { isValidCoordinates, type Coordinates } from "@/lib/maps/coordinates";
 import { createClient } from "@/lib/supabase/server";
 
@@ -36,6 +37,13 @@ export type PublicBusiness = {
    * read as no pin (see `toCoordinates`).
    */
   coordinates: Coordinates | null;
+  /**
+   * The merchant's Facebook Page (`socials.facebook`), or null when unset or
+   * not an https facebook.com URL. Validated HERE because it is fed to Meta
+   * oEmbed Read, and a URL that never passes the allowlist should never reach
+   * the page as something that looks like a Page link.
+   */
+  facebookUrl: string | null;
 };
 
 /**
@@ -132,7 +140,7 @@ export async function getBusinessBySlug(slug: string): Promise<PublicBusiness | 
     // the row type from the select as a string LITERAL, and splitting it over
     // two quoted parts collapses that inference to an error type.
     .select(
-      "id, slug, name, description, logo_url, cover_url, opening_hours, city_id, business_type_id, address_line, barangay, postal_code, lat, lng",
+      "id, slug, name, description, logo_url, cover_url, opening_hours, city_id, business_type_id, address_line, barangay, postal_code, lat, lng, socials",
     )
     .eq("slug", slug)
     .eq("status", "active")
@@ -174,7 +182,14 @@ export async function getBusinessBySlug(slug: string): Promise<PublicBusiness | 
       postalCode: business.postal_code,
     }),
     coordinates: toPublicCoordinates(business.lat, business.lng),
+    facebookUrl: facebookFromSocials(business.socials),
   };
+}
+
+/** `socials` is free-form jsonb; only an allowlisted https Facebook URL survives. */
+function facebookFromSocials(socials: unknown): string | null {
+  if (typeof socials !== "object" || socials === null || Array.isArray(socials)) return null;
+  return toFacebookPageUrl((socials as Record<string, unknown>).facebook);
 }
 
 /**

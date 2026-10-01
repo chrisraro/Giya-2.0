@@ -68,6 +68,7 @@ describe("getBusinessBySlug", () => {
     postal_code: "5000",
     lat: 10.3156,
     lng: 123.8854,
+    socials: { facebook: "https://www.facebook.com/kapediaria", instagram: null },
   };
 
   it("returns null when no active, non-deleted business matches the slug", async () => {
@@ -110,9 +111,27 @@ describe("getBusinessBySlug", () => {
       businessTypeName: "Cafe",
       addressText: "12 Real Street, San Jose, Cebu City, 5000",
       coordinates: { lat: 10.3156, lng: 123.8854 },
+      facebookUrl: "https://www.facebook.com/kapediaria",
     });
     expect(table("ref_cities").eq).toHaveBeenCalledWith("id", "city-1");
     expect(table("ref_business_types").eq).toHaveBeenCalledWith("id", "type-1");
+  });
+
+  // ------------------------------------------------------------- the Facebook Page
+
+  it.each([
+    ["a lookalike host", { facebook: "https://facebook.com.evil.com/x" }],
+    ["plain http", { facebook: "http://www.facebook.com/x" }],
+    ["no facebook key", {}],
+    ["a non-object", "https://www.facebook.com/x"],
+  ])("reads no Facebook Page from %s", async (_label, socials) => {
+    table("businesses").__result = { data: { ...BUSINESS_ROW, socials }, error: null };
+    table("ref_cities").__result = { data: { name: "Cebu City" }, error: null };
+    table("ref_business_types").__result = { data: { name: "Cafe" }, error: null };
+
+    const result = await repo.getBusinessBySlug("kape-diaria");
+
+    expect(result?.facebookUrl).toBeNull();
   });
 
   // ------------------------------------------------------------- the map pin

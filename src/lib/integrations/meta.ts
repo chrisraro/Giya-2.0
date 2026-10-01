@@ -5,6 +5,7 @@ import { z } from "zod";
 import { getServerEnv } from "@/lib/env";
 
 import { CircuitOpenError, withCircuitBreaker } from "./circuit-breaker";
+import { META_GRAPH_VERSION } from "./meta-version";
 
 // =============================================================================
 // The Meta Graph API client. THE ONLY PLACE THIS CODEBASE TALKS TO META.
@@ -57,8 +58,8 @@ import { CircuitOpenError, withCircuitBreaker } from "./circuit-breaker";
 // which has no token yet, and the token exchange, whose subject IS the token)
 // send their parameters in a POST body instead.
 
-/** Pinned. An unpinned Graph version is a silent breaking change on Meta's schedule. */
-export const META_GRAPH_VERSION = "v21.0";
+// Declared in ./meta-version (client-safe, shared with the oEmbed SDK loader).
+export { META_GRAPH_VERSION };
 
 const GRAPH_BASE = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
 

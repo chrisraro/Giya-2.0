@@ -18,6 +18,8 @@ import { getActivePromotionsForBusiness } from "@/features/promotions/server/rep
 import { PromotionCard } from "@/features/promotions/components/promotion-card";
 import { isFavorite } from "@/features/favorites/server/repo";
 import { FavoriteButton } from "@/features/favorites/components/favorite-button";
+import { FacebookPageEmbed } from "@/features/integrations/meta/components/facebook-page-embed";
+import { getFacebookPageEmbed } from "@/lib/integrations/meta-oembed";
 
 export const revalidate = 60;
 
@@ -57,7 +59,7 @@ export default async function PublicBusinessPage({
     data: { user },
   } = await supabase.auth.getUser();
 
-  const [menuGroups, rewards, balance, promotions, isFav] = await Promise.all([
+  const [menuGroups, rewards, balance, promotions, isFav, facebookEmbedHtml] = await Promise.all([
     getPublicMenu(business.id),
     getPublicRewards(business.id),
     user
@@ -71,6 +73,8 @@ export default async function PublicBusinessPage({
       : Promise.resolve(null),
     getActivePromotionsForBusiness(business.id).catch(() => []),
     isFavorite(business.id).catch(() => false),
+    // Never throws: a missing or failed embed degrades to the plain Page link.
+    business.facebookUrl ? getFacebookPageEmbed(business.facebookUrl) : Promise.resolve(null),
   ]);
 
   const rewardAffordability =
@@ -173,6 +177,12 @@ export default async function PublicBusinessPage({
               );
             })}
           </ul>
+        </div>
+      ) : null}
+
+      {business.facebookUrl ? (
+        <div className="mt-6 px-4">
+          <FacebookPageEmbed html={facebookEmbedHtml} pageUrl={business.facebookUrl} />
         </div>
       ) : null}
 
