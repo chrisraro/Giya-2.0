@@ -59,7 +59,7 @@ export default async function PublicBusinessPage({
     data: { user },
   } = await supabase.auth.getUser();
 
-  const [menuGroups, rewards, balance, promotions, isFav, facebookEmbedHtml] = await Promise.all([
+  const [menuGroups, rewards, balance, promotions, isFav, facebookEmbed] = await Promise.all([
     getPublicMenu(business.id),
     getPublicRewards(business.id),
     user
@@ -180,9 +180,9 @@ export default async function PublicBusinessPage({
         </div>
       ) : null}
 
-      {business.facebookUrl ? (
+      {business.facebookUrl && facebookEmbed ? (
         <div className="mt-6 px-4">
-          <FacebookPageEmbed html={facebookEmbedHtml} pageUrl={business.facebookUrl} />
+          <FacebookPageEmbed embed={facebookEmbed} pageUrl={business.facebookUrl} />
         </div>
       ) : null}
 

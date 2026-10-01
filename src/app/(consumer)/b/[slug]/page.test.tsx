@@ -233,7 +233,7 @@ describe("public business page Facebook embed (Meta oEmbed Read)", () => {
     mocks.getBusinessBySlug.mockResolvedValue(
       business({ facebookUrl: "https://www.facebook.com/kapediaria" }),
     );
-    mocks.getFacebookPageEmbed.mockResolvedValue('<div class="fb-page">embed</div>');
+    mocks.getFacebookPageEmbed.mockResolvedValue({ status: "ok", html: '<div class="fb-page">embed</div>' });
 
     render(await PublicBusinessPage({ params: params() }));
 
@@ -249,12 +249,24 @@ describe("public business page Facebook embed (Meta oEmbed Read)", () => {
     mocks.getBusinessBySlug.mockResolvedValue(
       business({ facebookUrl: "https://www.facebook.com/kapediaria" }),
     );
-    mocks.getFacebookPageEmbed.mockResolvedValue(null);
+    mocks.getFacebookPageEmbed.mockResolvedValue({ status: "unavailable" });
 
     render(await PublicBusinessPage({ params: params() }));
 
     expect(screen.queryByTestId("facebook-page-embed")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("facebook-page-plugin")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Visit Facebook Page" })).toBeInTheDocument();
+  });
+
+  it("shows the business's Page through the Page Plugin while oEmbed Read is pending review", async () => {
+    mocks.getBusinessBySlug.mockResolvedValue(
+      business({ facebookUrl: "https://www.facebook.com/kapediaria" }),
+    );
+    mocks.getFacebookPageEmbed.mockResolvedValue({ status: "pending_review" });
+
+    render(await PublicBusinessPage({ params: params() }));
+
+    expect(screen.getByTestId("facebook-page-plugin")).toBeInTheDocument();
   });
 
   it("shows no Facebook section and calls no Meta API when the business has no Page", async () => {
