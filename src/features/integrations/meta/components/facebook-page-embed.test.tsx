@@ -28,6 +28,12 @@ describe("FacebookPageEmbed", () => {
     expect(screen.getByTestId("facebook-jssdk")).toBeInTheDocument();
   });
 
+  it("attributes the SDK to Giya's app id when one is given", () => {
+    render(<FacebookPageEmbed embed={{ status: "pending_review" }} pageUrl={PAGE} appId="849285887880230" />);
+
+    expect(screen.getByTestId("facebook-jssdk").getAttribute("data-src")).toMatch(/&appId=849285887880230$/);
+  });
+
   it("shows only the Page link, and no SDK, when the embed is unavailable", () => {
     const { container } = render(<FacebookPageEmbed embed={{ status: "unavailable" }} pageUrl={PAGE} />);
 

@@ -42,10 +42,12 @@ export interface FacebookPageEmbedProps {
   embed: FacebookPageEmbedResult;
   /** Must already have passed toFacebookPageUrl. */
   pageUrl: string;
+  /** Giya's Meta app id (public), so the SDK attributes the embed to our app. */
+  appId?: string | null;
   className?: string;
 }
 
-export function FacebookPageEmbed({ embed, pageUrl, className }: FacebookPageEmbedProps) {
+export function FacebookPageEmbed({ embed, pageUrl, appId, className }: FacebookPageEmbedProps) {
   const embedRef = useRef<HTMLDivElement>(null);
   const showsPage = embed.status !== "unavailable";
 
@@ -86,7 +88,7 @@ export function FacebookPageEmbed({ embed, pageUrl, className }: FacebookPageEmb
       {showsPage ? (
         <Script
           id="facebook-jssdk"
-          src={`https://connect.facebook.net/en_US/sdk.js#xfbml=1&version=${META_GRAPH_VERSION}`}
+          src={`https://connect.facebook.net/en_US/sdk.js#xfbml=1&version=${META_GRAPH_VERSION}${appId ? `&appId=${encodeURIComponent(appId)}` : ""}`}
           strategy="lazyOnload"
           crossOrigin="anonymous"
         />

@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/integrations/meta-oembed", () => ({
   getFacebookPageEmbed: mocks.getFacebookPageEmbed,
+  getMetaAppIdForSdk: () => null,
 }));
 
 vi.mock("@/lib/supabase/server", () => ({

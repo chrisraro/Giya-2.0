@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 
 import { FacebookPageEmbed } from "@/features/integrations/meta/components/facebook-page-embed";
-import { getFacebookPageEmbed } from "@/lib/integrations/meta-oembed";
+import { getFacebookPageEmbed, getMetaAppIdForSdk } from "@/lib/integrations/meta-oembed";
 
 // /meta-review - the page Meta App Review opens to verify oEmbed Read.
 //
@@ -40,9 +40,12 @@ export default async function MetaReviewPage() {
       <h1 className="text-headline-s text-on-surface">Facebook Page embeds on Giya</h1>
       <p className="mt-3 text-body-m text-on-surface-variant">
         Giya shows a business&apos;s public Facebook Page on its Giya profile so customers can see the
-        shop&apos;s latest posts. Below, the same component displays Meta&apos;s official Facebook Page,
-        rendered from embed HTML our server retrieves from Meta&apos;s oEmbed Read endpoint. On each
-        business profile it shows that business&apos;s own Page instead.
+        shop&apos;s latest posts. Below, the same component displays Meta&apos;s official Facebook Page;
+        on each business profile it shows that business&apos;s own Page instead.
+        {/* Claimed only when true: in the pending-review state the note below explains instead. */}
+        {embed.status === "ok"
+          ? " This card is rendered from the embed HTML our server retrieves from Meta's oEmbed Read endpoint."
+          : null}
       </p>
       {embed.status === "pending_review" ? (
         // Stated on the page, not only in the submission notes: the reviewer
@@ -54,7 +57,7 @@ export default async function MetaReviewPage() {
           Read with no further change.
         </p>
       ) : null}
-      <FacebookPageEmbed embed={embed} pageUrl={META_PAGE_URL} className="mt-6" />
+      <FacebookPageEmbed embed={embed} pageUrl={META_PAGE_URL} appId={getMetaAppIdForSdk()} className="mt-6" />
     </main>
   );
 }
