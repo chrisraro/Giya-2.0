@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 import { AVATAR_ACTION_BODY_LIMIT_BYTES } from "./src/features/identity/avatar";
+import { buildSecurityHeaders } from "./src/lib/security-headers";
 
 const nextConfig: NextConfig = {
   experimental: {
@@ -28,6 +29,22 @@ const nextConfig: NextConfig = {
        */
       bodySizeLimit: AVATAR_ACTION_BODY_LIMIT_BYTES,
     },
+  },
+  // Doc 15 "Transport & headers": baseline headers on every route. Built from env at
+  // config load; the CSP is report-only (see src/lib/security-headers.ts).
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: buildSecurityHeaders(
+          {
+            NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
+            SENTRY_DSN: process.env.SENTRY_DSN,
+          },
+          { dev: process.env.NODE_ENV !== "production" },
+        ),
+      },
+    ];
   },
 };
 
