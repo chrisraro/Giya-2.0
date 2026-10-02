@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { ApiError, API_ERROR_CODES } from "@/lib/api/errors";
+import { ApiError, API_ERROR_CODES, dependencyUnavailable } from "@/lib/api/errors";
 import { defineHandler } from "@/lib/api/handler";
 import { withMinDelay } from "@/lib/auth/timing";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -98,6 +98,8 @@ export const POST = defineHandler<ForgotPasswordResponse, ForgotPasswordBody>({
     limit: IP_RATE_LIMIT,
     windowSeconds: IP_RATE_LIMIT_WINDOW_SECONDS,
     keyBy: "ip",
+    // Brute-force/amplification throttle: a Redis outage must not remove it.
+    failMode: "closed",
   },
   handler: async ({ body, request, supabase }) => {
     // The email-scoped budget can only be checked here, inside the handler,
@@ -113,7 +115,9 @@ export const POST = defineHandler<ForgotPasswordResponse, ForgotPasswordBody>({
       ),
       limit: EMAIL_RATE_LIMIT,
       windowSeconds: EMAIL_RATE_LIMIT_WINDOW_SECONDS,
+      failMode: "closed",
     });
+    if (emailLimit.unavailable) throw dependencyUnavailable();
     if (!emailLimit.ok) {
       throw rateLimitedError(emailLimit.resetSeconds);
     }

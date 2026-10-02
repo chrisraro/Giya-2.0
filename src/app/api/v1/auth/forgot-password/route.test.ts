@@ -287,4 +287,37 @@ describe("timing", () => {
       vi.useRealTimers();
     }
   });
+
+  describe("limiter outage", () => {
+    const DOWN = { ok: false, remaining: 0, resetSeconds: 600, unavailable: true };
+
+    it("fails closed when the per-IP limiter is down", async () => {
+      mocks.checkRateLimit.mockImplementation(async ({ key }: { key: string }) =>
+        key.includes(":ip:") ? DOWN : RL_OK,
+      );
+
+      const response = await callRoute();
+      const json = (await response.json()) as { error: { code: string } };
+
+      expect(response.status).toBe(503);
+      expect(json.error.code).toBe("DEPENDENCY_UNAVAILABLE");
+      expect(mocks.resetPasswordForEmail).not.toHaveBeenCalled();
+    });
+
+    it("fails closed when the per-address limiter is down, and both budgets opt in", async () => {
+      mocks.checkRateLimit.mockImplementation(async ({ key }: { key: string }) =>
+        key.includes(":ip:") ? RL_OK : DOWN,
+      );
+
+      const response = await callRoute();
+      const json = (await response.json()) as { error: { code: string } };
+
+      expect(response.status).toBe(503);
+      expect(json.error.code).toBe("DEPENDENCY_UNAVAILABLE");
+      expect(mocks.resetPasswordForEmail).not.toHaveBeenCalled();
+      const calls = mocks.checkRateLimit.mock.calls as [{ failMode?: string }][];
+      expect(calls).toHaveLength(2);
+      for (const [arg] of calls) expect(arg.failMode).toBe("closed");
+    });
+  });
 });

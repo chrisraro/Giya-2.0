@@ -1,3 +1,4 @@
+import { isLiveAt } from "@/features/campaigns/lifecycle";
 import { createClient } from "@/lib/supabase/server";
 
 import type {
@@ -120,11 +121,11 @@ export async function listClaimableRewards(): Promise<ClaimableRewardDTO[]> {
   const now = new Date();
   const liveCampaignIds = new Set(
     (campaigns ?? [])
-      .filter((c) => {
-        const startsOk = !c.starts_at || new Date(c.starts_at) <= now;
-        const endsOk = !c.ends_at || new Date(c.ends_at) > now;
-        return startsOk && endsOk;
-      })
+      // Shared window rule (campaigns/lifecycle.ts): starts inclusive, ends
+      // exclusive. Status/deleted_at are already filtered in the query above.
+      .filter((c) =>
+        isLiveAt({ status: "active", starts_at: c.starts_at, ends_at: c.ends_at }, now),
+      )
       .map((c) => c.id),
   );
 
