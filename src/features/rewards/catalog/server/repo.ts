@@ -55,7 +55,7 @@ export async function getCampaign(
   campaignId: string,
 ): Promise<CampaignRow | null> {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("campaigns")
     .select("*")
     .eq("id", campaignId)
@@ -63,18 +63,24 @@ export async function getCampaign(
     .is("deleted_at", null)
     .maybeSingle();
 
+  // A failed read is not "no such row": callers turn null into 404 / "not found".
+  if (error) throw new Error(`getCampaign: read failed: ${error.message}`);
+
   return data ?? null;
 }
 
 export async function getReward(businessId: string, rewardId: string): Promise<RewardRow | null> {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("rewards")
     .select("*")
     .eq("id", rewardId)
     .eq("business_id", businessId)
     .is("deleted_at", null)
     .maybeSingle();
+
+  // A failed read is not "no such row": callers turn null into 404 / "not found".
+  if (error) throw new Error(`getReward: read failed: ${error.message}`);
 
   return data ?? null;
 }

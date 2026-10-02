@@ -509,3 +509,41 @@ describe("getPublicMenu", () => {
     ]);
   });
 });
+
+describe("read failures are errors, not empty results", () => {
+  it("listRefCities throws when the read errors and returns [] when genuinely empty", async () => {
+    table("ref_cities").__result = { data: [], error: null };
+    await expect(repo.listRefCities()).resolves.toEqual([]);
+
+    table("ref_cities").__result = { data: null, error: { message: "connection reset" } };
+    await expect(repo.listRefCities()).rejects.toThrow("listRefCities");
+  });
+
+  it("listRefBusinessTypes throws when the read errors and returns [] when genuinely empty", async () => {
+    table("ref_business_types").__result = { data: [], error: null };
+    await expect(repo.listRefBusinessTypes()).resolves.toEqual([]);
+
+    table("ref_business_types").__result = { data: null, error: { message: "connection reset" } };
+    await expect(repo.listRefBusinessTypes()).rejects.toThrow("listRefBusinessTypes");
+  });
+
+  it("listActiveBusinesses logs and renders unlabeled when the cosmetic name lookups fail", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    table("businesses").__result = {
+      data: [
+        { id: "b1", slug: "s", name: "Kape", logo_url: null, city_id: "c1", business_type_id: "t1", lat: null, lng: null },
+      ],
+      error: null,
+    };
+    table("ref_cities").__result = { data: null, error: { message: "connection reset" } };
+    table("ref_business_types").__result = { data: null, error: { message: "connection reset" } };
+
+    const rows = await repo.listActiveBusinesses({ limit: 10 });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.cityName).toBeNull();
+    expect(rows[0]?.businessTypeName).toBeNull();
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+});

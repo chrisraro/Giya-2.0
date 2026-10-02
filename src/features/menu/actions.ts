@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { BUSINESS_SUSPENDED_MESSAGE } from "@/features/businesses/server/resolve-owner-business";
+import { guardReadFailure } from "@/lib/actions/read-failure";
 import { createClient } from "@/lib/supabase/server";
 
 import {
@@ -53,7 +54,8 @@ async function requireOwnerBusiness(): Promise<
     return { ok: false, result: NOT_SIGNED_IN };
   }
 
-  const business = await repo.resolveOwnerBusiness();
+  const business = await guardReadFailure("menu", () => repo.resolveOwnerBusiness());
+  if (business !== null && "ok" in business) return { ok: false, result: business };
   if (!business) {
     return { ok: false, result: NO_BUSINESS };
   }
@@ -160,7 +162,7 @@ export async function createProduct(input: {
   const parsed = productSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.createProduct(auth.businessId, parsed.data);
+  const result = await guardReadFailure("menu", () => service.createProduct(auth.businessId, parsed.data));
   if (result.ok) revalidatePath(MENU_PATH);
   return result;
 }
@@ -185,7 +187,7 @@ export async function updateProduct(input: {
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
   const { productId, ...patch } = parsed.data;
-  const result = await service.updateProduct(auth.businessId, productId, patch);
+  const result = await guardReadFailure("menu", () => service.updateProduct(auth.businessId, productId, patch));
   if (result.ok) revalidatePath(MENU_PATH);
   return result;
 }
@@ -267,7 +269,7 @@ export async function addVariant(input: {
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
   const { productId, ...variantInput } = parsed.data;
-  const result = await service.addVariant(auth.businessId, productId, variantInput);
+  const result = await guardReadFailure("menu", () => service.addVariant(auth.businessId, productId, variantInput));
   if (result.ok) revalidatePath(MENU_PATH);
   return result;
 }
@@ -302,7 +304,7 @@ export async function addAddon(input: {
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
   const { productId, ...addonInput } = parsed.data;
-  const result = await service.addAddon(auth.businessId, productId, addonInput);
+  const result = await guardReadFailure("menu", () => service.addAddon(auth.businessId, productId, addonInput));
   if (result.ok) revalidatePath(MENU_PATH);
   return result;
 }

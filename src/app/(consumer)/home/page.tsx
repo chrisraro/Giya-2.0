@@ -47,7 +47,10 @@ export default async function HomePage() {
         return null;
       }),
       getMyUnreadNotificationCount(),
-      listPublicPromotions(5).catch(() => []),
+      listPublicPromotions(5).catch((error: unknown) => {
+        console.error("[home] promotions read failed; rendering /home without them", error);
+        return [];
+      }),
       // THE RAIL DEGRADES; THE PAGE DOES NOT FAIL.
       //
       // `listMyFavorites` throws on a query error rather than returning [],

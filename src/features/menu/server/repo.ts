@@ -30,7 +30,7 @@ type Result<T> = { data: T | null; error: { message: string } | null };
 
 async function productExistsForBusiness(businessId: string, productId: string): Promise<boolean> {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("products")
     .select("id")
     .eq("id", productId)
@@ -38,18 +38,24 @@ async function productExistsForBusiness(businessId: string, productId: string): 
     .is("deleted_at", null)
     .maybeSingle();
 
+  // A failed read must not surface as "Product/Category not found."
+  if (error) throw new Error(`menu existence check failed: ${error.message}`);
+
   return data !== null;
 }
 
 async function categoryExistsForBusiness(businessId: string, categoryId: string): Promise<boolean> {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("menu_categories")
     .select("id")
     .eq("id", categoryId)
     .eq("business_id", businessId)
     .is("deleted_at", null)
     .maybeSingle();
+
+  // A failed read must not surface as "Product/Category not found."
+  if (error) throw new Error(`menu existence check failed: ${error.message}`);
 
   return data !== null;
 }

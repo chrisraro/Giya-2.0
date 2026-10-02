@@ -299,7 +299,13 @@ async function refNames(
   ids: readonly string[],
 ): Promise<Map<string, string>> {
   if (ids.length === 0) return new Map();
-  const { data } = await supabase.from(table).select("id, name").in("id", [...ids]);
+  const { data, error } = await supabase.from(table).select("id, name").in("id", [...ids]);
+  // Names are cosmetic labels on an otherwise good listing: log and fall back
+  // to no label rather than failing the whole page.
+  if (error) {
+    console.error(`[businesses] ${table} name lookup failed; rendering without labels`, error);
+    return new Map();
+  }
   return new Map((data ?? []).map((row) => [row.id, row.name]));
 }
 
@@ -473,12 +479,15 @@ function groupBy<Row, Item>(
 
 export async function listRefCities(): Promise<{ id: string; name: string }[]> {
   const supabase = await createClient();
-  const { data } = await supabase.from("ref_cities").select("id, name").order("name");
+  const { data, error } = await supabase.from("ref_cities").select("id, name").order("name");
+  // A filter picker that silently empties looks like "no cities exist".
+  if (error) throw new Error(`listRefCities: read failed: ${error.message}`);
   return data ?? [];
 }
 
 export async function listRefBusinessTypes(): Promise<{ id: string; name: string }[]> {
   const supabase = await createClient();
-  const { data } = await supabase.from("ref_business_types").select("id, name").order("name");
+  const { data, error } = await supabase.from("ref_business_types").select("id, name").order("name");
+  if (error) throw new Error(`listRefBusinessTypes: read failed: ${error.message}`);
   return data ?? [];
 }
