@@ -134,6 +134,12 @@ That fires the moment anything **schedules** a post, **retries** one in the back
 
 No billing code before SCALE (`../00-product/00-vision.md`). Constraints binding future work: webhook-driven truth (payment status from signature-verified webhooks, never client redirects); idempotency keys on every create call and webhook processing (replayable); entitlement activation = flipping `businesses.plan`/`plan_limits` inside the webhook transaction + `audit_logs`; all card data stays with PayMongo (no PAN touches Giya); webhook endpoint isolated at `/api/webhooks/paymongo` in the service-role zone. Schema hooks already exist (`../20-data/21-schema-identity.md`).
 
+> **Endpoint removed until specified.** The `/api/webhooks/paymongo` stub was deleted: it had no signature verification and trusted body metadata to change a business's plan (inert only because of column grants). When billing is built it must: verify an HMAC over the **raw** body before any parsing; add replay protection (timestamp tolerance + provider event id `SET NX`); and apply entitlement changes only through a service-role RPC that writes an `audit_logs` row.
+
+## POS ingest [SCALE] — endpoint removed until specified
+
+The `/api/v1/pos/ingest` stub was deleted along with its `src/features/pos` payload parser: it was unauthenticated, answered "queued" for data it discarded, and echoed `error.message` to callers. A real endpoint must go through `defineHandler` (`../10-architecture/13-api-standards.md`), authenticate with a per-merchant API key, and actually enqueue the work (QStash, `39-background-jobs.md`) before answering.
+
 ## QRCode.js — QR generation [MVP]
 
 - **Contexts:** (1) durable marketing QRs from `qr_codes` rows (`business`,`campaign`,`reward`,`menu`) encoding `https://giya.ph/q/{short_code}` — never raw entity IDs (`../10-architecture/11-tech-stack.md`); (2) **ephemeral redemption QRs** encoding the short-lived signed JWT (jti single-use, TTL 5 min, `../10-architecture/15-security.md`) — rendered client-side, never persisted.
