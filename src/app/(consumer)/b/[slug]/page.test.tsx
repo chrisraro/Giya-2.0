@@ -277,3 +277,22 @@ describe("public business page Facebook embed (Meta oEmbed Read)", () => {
     expect(screen.queryByRole("link", { name: "Visit Facebook Page" })).not.toBeInTheDocument();
   });
 });
+
+describe("public business page optional reads", () => {
+  it("logs when the promotions and favourite reads fail, and still renders the page", async () => {
+    // The page's mocked Supabase client has no `from`, so both real reads throw.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.getUser.mockResolvedValue({ data: { user: { id: "user-1" } } });
+    mocks.getPublicRewards.mockResolvedValue([]);
+    mocks.getMyBalanceForBusiness.mockResolvedValue(null);
+
+    render(await PublicBusinessPage({ params: params() }));
+
+    expect(screen.getByText("Kape Diaria")).toBeInTheDocument();
+    const messages = consoleError.mock.calls.map((call) => String(call[0]));
+    expect(messages.some((m) => m.includes("[storefront] promotions read failed"))).toBe(true);
+    expect(messages.some((m) => m.includes("[storefront] favourite check failed"))).toBe(true);
+
+    consoleError.mockRestore();
+  });
+});

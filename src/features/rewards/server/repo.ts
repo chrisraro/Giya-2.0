@@ -98,15 +98,24 @@ export async function listClaimableRewards(): Promise<ClaimableRewardDTO[]> {
 
   const rewards = data as unknown as ClaimableRewardRow[] | null;
 
-  if (error || !rewards || rewards.length === 0) return [];
+  // A failed read is not an empty catalogue: returning [] here rendered an
+  // outage as "no rewards". Let the route's error boundary show a retry.
+  if (error) throw new Error(`listClaimableRewards: rewards read failed: ${error.message}`);
+  if (!rewards || rewards.length === 0) return [];
 
   const campaignIds = Array.from(new Set(rewards.map((r) => r.campaign_id)));
-  const { data: campaigns } = await supabase
+  const { data: campaigns, error: campaignsError } = await supabase
     .from("campaigns")
     .select("id, starts_at, ends_at")
     .in("id", campaignIds)
     .eq("status", "active")
     .is("deleted_at", null);
+
+  // Ignoring this filtered every reward out (no live campaigns) - same
+  // outage-as-empty failure as above.
+  if (campaignsError) {
+    throw new Error(`listClaimableRewards: campaigns read failed: ${campaignsError.message}`);
+  }
 
   const now = new Date();
   const liveCampaignIds = new Set(

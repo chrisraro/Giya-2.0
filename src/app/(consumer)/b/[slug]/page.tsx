@@ -71,8 +71,14 @@ export default async function PublicBusinessPage({
           return null;
         })
       : Promise.resolve(null),
-    getActivePromotionsForBusiness(business.id).catch(() => []),
-    isFavorite(business.id).catch(() => false),
+    getActivePromotionsForBusiness(business.id).catch((error: unknown) => {
+      console.error("[storefront] promotions read failed; rendering without them", error);
+      return [];
+    }),
+    isFavorite(business.id).catch((error: unknown) => {
+      console.error("[storefront] favourite check failed; rendering as not favourited", error);
+      return false;
+    }),
     // Never throws: a missing or failed embed degrades to the plain Page link.
     business.facebookUrl ? getFacebookPageEmbed(business.facebookUrl) : Promise.resolve(null),
   ]);

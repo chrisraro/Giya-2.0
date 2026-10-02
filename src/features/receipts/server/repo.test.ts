@@ -357,3 +357,18 @@ describe("getMyReceipt", () => {
     expect(recordedFor("receipt_line_items")[0]?.order).toEqual([["sort", { ascending: true }]]);
   });
 });
+
+describe("loadBusinessNames failure", () => {
+  it("logs and lists the receipt unnamed rather than failing the whole list", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    state.results.set("receipts", { data: [receiptRow()], error: null });
+    state.results.set("businesses", { data: null, error: { message: "connection reset" } });
+
+    const { rows } = await listMyReceipts({ userId: USER_ID, limit: 25, cursor: null });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.businessName).toBeNull();
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+});

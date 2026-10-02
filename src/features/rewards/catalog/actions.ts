@@ -8,6 +8,8 @@ import {
   resolveStaffAccess,
 } from "@/features/businesses/server/resolve-owner-business";
 
+import { guardReadFailure } from "@/lib/actions/read-failure";
+
 import { REWARD_CATALOG_ROLES } from "./roles";
 import { createRewardSchema, setRewardActiveSchema, updateRewardSchema } from "./schemas";
 import * as service from "./server/service";
@@ -33,7 +35,8 @@ async function requireCatalogBusiness(): Promise<
   { ok: true; businessId: string } | { ok: false; result: ActionResult<never> }
 > {
   // Doc 30 section 2.8: a suspended business cannot publish or edit rewards.
-  const access = await resolveStaffAccess(REWARD_CATALOG_ROLES);
+  const access = await guardReadFailure("rewards", () => resolveStaffAccess(REWARD_CATALOG_ROLES));
+  if (!access.ok && "message" in access) return { ok: false, result: access };
   if (!access.ok) {
     return {
       ok: false,
@@ -53,7 +56,7 @@ export async function createReward(input: unknown): Promise<ActionResult<RewardR
   const parsed = createRewardSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.createReward(auth.businessId, parsed.data);
+  const result = await guardReadFailure("rewards", () => service.createReward(auth.businessId, parsed.data));
   if (result.ok) revalidatePath(REWARDS_PATH);
   return result;
 }
@@ -65,7 +68,7 @@ export async function updateReward(input: unknown): Promise<ActionResult<RewardR
   const parsed = updateRewardSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.updateReward(auth.businessId, parsed.data);
+  const result = await guardReadFailure("rewards", () => service.updateReward(auth.businessId, parsed.data));
   if (result.ok) revalidatePath(REWARDS_PATH);
   return result;
 }

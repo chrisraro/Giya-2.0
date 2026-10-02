@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
+import { guardReadFailure } from "@/lib/actions/read-failure";
 import { createClient } from "@/lib/supabase/server";
 import { BUSINESS_ROLES, BUSINESS_SUSPENDED_MESSAGE, resolveStaffAccess } from "@/features/businesses/server/resolve-owner-business";
 
@@ -77,7 +78,8 @@ async function requireOwnerBusiness(): Promise<
   }
 
   // Doc 30 section 2.8: a suspended business cannot activate campaigns or change earning rules.
-  const access = await resolveStaffAccess(BUSINESS_ROLES);
+  const access = await guardReadFailure("campaigns", () => resolveStaffAccess(BUSINESS_ROLES));
+  if (!access.ok && "message" in access) return { ok: false, result: access };
   if (!access.ok) {
     return {
       ok: false,
@@ -147,10 +149,10 @@ export async function activateCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.activateCampaign(auth.businessId, parsed.data.campaignId, {
+  const result = await guardReadFailure("campaigns", () => service.activateCampaign(auth.businessId, parsed.data.campaignId, {
     ...auth.actor,
     requestId: randomUUID(),
-  });
+  }));
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
@@ -164,10 +166,10 @@ export async function pauseCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.pauseCampaign(auth.businessId, parsed.data.campaignId, {
+  const result = await guardReadFailure("campaigns", () => service.pauseCampaign(auth.businessId, parsed.data.campaignId, {
     ...auth.actor,
     requestId: randomUUID(),
-  });
+  }));
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
@@ -181,10 +183,10 @@ export async function archiveCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.archiveCampaign(auth.businessId, parsed.data.campaignId, {
+  const result = await guardReadFailure("campaigns", () => service.archiveCampaign(auth.businessId, parsed.data.campaignId, {
     ...auth.actor,
     requestId: randomUUID(),
-  });
+  }));
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
@@ -198,10 +200,10 @@ export async function resumeCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.resumeCampaign(auth.businessId, parsed.data.campaignId, {
+  const result = await guardReadFailure("campaigns", () => service.resumeCampaign(auth.businessId, parsed.data.campaignId, {
     ...auth.actor,
     requestId: randomUUID(),
-  });
+  }));
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
@@ -215,10 +217,10 @@ export async function endCampaign(input: {
   const parsed = campaignIdInputSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.endCampaign(auth.businessId, parsed.data.campaignId, {
+  const result = await guardReadFailure("campaigns", () => service.endCampaign(auth.businessId, parsed.data.campaignId, {
     ...auth.actor,
     requestId: randomUUID(),
-  });
+  }));
   if (result.ok) revalidatePath(CAMPAIGNS_PATH);
   return result;
 }
