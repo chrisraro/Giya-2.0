@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { OfflineBanner } from "@/components/pwa/offline-banner";
 import { BottomNav } from "@/components/shell/bottom-nav";
 import { createClient } from "@/lib/supabase/server";
 
@@ -91,6 +92,7 @@ export default async function ConsumerLayout({ children }: { children: React.Rea
 
   return (
     <div className="min-h-dvh bg-surface pb-24">
+      <OfflineBanner />
       {children}
       <BottomNav />
     </div>

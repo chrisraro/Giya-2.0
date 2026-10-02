@@ -22,6 +22,7 @@ class RedirectError extends Error {
 }
 
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/home",
   redirect: (to: string) => {
     throw new RedirectError(to);
   },
@@ -61,6 +62,23 @@ async function renderLayout(): Promise<React.ReactElement> {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("consumer shell", () => {
+  it("mounts the offline banner so offline users get an in-app signal", async () => {
+    const { render, screen, act } = await import("@testing-library/react");
+    signedOut();
+    Object.defineProperty(window.navigator, "onLine", { value: false, configurable: true });
+    try {
+      render(await renderLayout());
+      expect(screen.getByRole("status")).toHaveTextContent(/offline/i);
+    } finally {
+      Object.defineProperty(window.navigator, "onLine", { value: true, configurable: true });
+      act(() => {
+        window.dispatchEvent(new Event("online"));
+      });
+    }
+  });
 });
 
 describe("consumer onboarding gate", () => {

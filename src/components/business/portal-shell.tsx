@@ -4,6 +4,7 @@ import * as React from "react";
 import { usePathname } from "next/navigation";
 import { Sidebar } from "@/components/business/sidebar";
 import { Topbar } from "@/components/business/topbar";
+import { OfflineBanner } from "@/components/pwa/offline-banner";
 
 const PAGE_TITLES: Record<string, string> = {
   "/business/dashboard": "Dashboard",
@@ -62,6 +63,7 @@ export function PortalShell({
 
   return (
     <div className="min-h-dvh bg-surface text-on-surface">
+      <OfflineBanner />
       <Sidebar
         mobileOpen={mobileNavOpen}
         onMobileClose={closeMobileNav}
