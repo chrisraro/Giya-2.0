@@ -206,7 +206,9 @@ describe("mintRedemptionToken", () => {
 
     expect(a.jti).not.toBe(b.jti);
     expect(firstJti).not.toBeNull();
-    const displacedJti = firstJti as string;
+    // String(): TS narrows `firstJti` to `null` because it is only assigned
+    // inside a mock callback; the assertion above proves it is set.
+    const displacedJti = String(firstJti);
     const survivingJti = a.jti === displacedJti ? b.jti : a.jti;
 
     // Exactly one live jti: the one that landed first was displaced and

@@ -33,9 +33,11 @@ describe("md3-tokens.css", () => {
 
   it("light primary is tone 40 of the coral seed palette", () => {
     // Deterministic: derived from seed #E8563F via HCT; assert format only + not the raw seed
-    const m = css().match(/:root, \.light \{[^}]*--md-sys-color-primary:\s*(#[0-9a-f]{6})/is);
+    // No `s` flag: `[^}]*` already spans newlines, and the flag needs ES2018
+    // (tsconfig targets ES2017), which failed `next build`'s type check.
+    const m = css().match(/:root, \.light \{[^}]*--md-sys-color-primary:\s*(#[0-9a-f]{6})/i);
     expect(m).not.toBeNull();
-    expect(m![1]).toMatch(/^#[0-9a-f]{6}$/i);
-    expect(m![1].toLowerCase()).not.toBe("#e8563f"); // tonal mapping, not raw seed
+    expect(m?.[1]).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(m?.[1]?.toLowerCase()).not.toBe("#e8563f"); // tonal mapping, not raw seed
   });
 });
