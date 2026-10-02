@@ -276,49 +276,23 @@ export async function purgeBusiness(
     p_reason: reason.reason,
   });
 
-  if (rpcError === null) {
-    return { ok: true };
+  return rpcError === null ? { ok: true } : purgeFailure(rpcError, "purge_business");
+}
+
+/**
+ * A failed purge STAYS failed. This used to fall back to force_delete_business
+ * (which deleted the tenant's audit_logs and wrote no audit row) and then to
+ * ~17 table-by-table deletes with their errors ignored - turning any RPC error
+ * into an unaudited, possibly half-finished wipe of the ledger. One audited,
+ * transactional RPC or nothing (golden rules 3 and 6). 0081 is what raises
+ * PURGE_FORBIDDEN for anyone but an active super_admin.
+ */
+function purgeFailure(error: { message?: string }, rpcName: string): BusinessDecisionOutcome {
+  if ((error.message ?? "").includes("PURGE_FORBIDDEN")) {
+    return fail("FORBIDDEN", "Only a super admin can purge businesses.");
   }
-
-  const { error: forceError } = await (deps.supabase.rpc as any)("force_delete_business", {
-    p_business_id: input.businessId,
-  });
-
-  if (forceError === null) {
-    return { ok: true };
-  }
-
-  try {
-    const bId = input.businessId;
-    const from = deps.supabase.from.bind(deps.supabase) as any;
-    await from("reward_claims").update({ points_txn_id: null }).eq("business_id", bId);
-    await from("points_transactions").update({ claim_id: null }).eq("business_id", bId);
-    await from("redemptions").delete().eq("business_id", bId);
-    await from("reward_claims").delete().eq("business_id", bId);
-    await from("points_transactions").delete().eq("business_id", bId);
-    await from("rewards").delete().eq("business_id", bId);
-    await from("loyalty_cards").delete().eq("business_id", bId);
-    await from("loyalty_programs").delete().eq("business_id", bId);
-    await from("campaigns").delete().eq("business_id", bId);
-    await from("promotions").delete().eq("business_id", bId);
-    await from("points_rules").delete().eq("business_id", bId);
-    await from("receipt_line_items").delete().eq("business_id", bId);
-    await from("receipts").delete().eq("business_id", bId);
-    await from("products").delete().eq("business_id", bId);
-    await from("business_food_types").delete().eq("business_id", bId);
-    await from("integration_connections").delete().eq("business_id", bId);
-    await from("business_staff").delete().eq("business_id", bId);
-    const { error: deleteError } = await from("businesses").delete().eq("id", bId);
-
-    if (deleteError) {
-      console.error("[admin/business-decisions] purge fall-back delete failed", deleteError);
-      return fail("WRITE_FAILED", "Failed to purge business data.");
-    }
-    return { ok: true };
-  } catch (err) {
-    console.error("[admin/business-decisions] purge catch error", err);
-    return fail("WRITE_FAILED", "An unexpected error occurred while deleting the business.");
-  }
+  console.error(`[admin/business-decisions] ${rpcName} failed`, error);
+  return fail("WRITE_FAILED", "That did not go through. Nothing was deleted.");
 }
 
 /**
@@ -340,37 +314,5 @@ export async function purgeAllBusinesses(
     p_reason: reason.reason,
   });
 
-  if (rpcError === null) {
-    return { ok: true };
-  }
-
-  try {
-    const from = deps.supabase.from.bind(deps.supabase) as any;
-    await from("reward_claims").update({ points_txn_id: null }).neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("points_transactions").update({ claim_id: null }).neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("redemptions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("reward_claims").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("points_transactions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("rewards").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("loyalty_cards").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("loyalty_programs").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("campaigns").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("promotions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("points_rules").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("receipt_line_items").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("receipts").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("products").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("business_verifications").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    await from("business_staff").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    const { error: deleteError } = await from("businesses").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-
-    if (deleteError) {
-      console.error("[admin/business-decisions] purge all fall-back delete failed", deleteError);
-      return fail("WRITE_FAILED", "Failed to purge all businesses.");
-    }
-    return { ok: true };
-  } catch (err) {
-    console.error("[admin/business-decisions] purge all catch error", err);
-    return fail("WRITE_FAILED", "An unexpected error occurred while clearing businesses.");
-  }
+  return rpcError === null ? { ok: true } : purgeFailure(rpcError, "purge_all_businesses");
 }
