@@ -15,7 +15,7 @@ const EMAIL_RE = /^\S+@\S+\.\S+$/;
 
 export default function AdminLoginPage() {
   const router = useRouter();
-  const [email, setEmail] = React.useState("teamocsph@gmail.com");
+  const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [emailError, setEmailError] = React.useState("");
   const [passwordError, setPasswordError] = React.useState("");
@@ -178,7 +178,7 @@ export default function AdminLoginPage() {
             id="admin-email"
             type="email"
             label="Admin Email"
-            placeholder="teamocsph@gmail.com"
+            placeholder="you@company.com"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             errorText={emailError}
