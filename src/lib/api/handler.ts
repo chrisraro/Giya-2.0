@@ -14,6 +14,7 @@ import { createClient } from "@/lib/supabase/server";
 import {
   ApiError,
   API_ERROR_CODES,
+  dependencyUnavailable,
   isApiError,
   zodIssuesToDetails,
   type ErrorDetail,
@@ -84,6 +85,11 @@ export interface RateLimitConfig {
   // route is public), "ip" always scopes by client IP, and a function lets a
   // route compose its own scope (e.g. user + claim id).
   keyBy?: "user" | "ip" | ((info: RateLimitKeyInfo) => string);
+  // What to do when the limiter itself is down. Default "open" (let the request
+  // through); "closed" answers 503 DEPENDENCY_UNAVAILABLE. Opt in for limits
+  // that ARE the control (money paths, bearer brute-force bounds); see
+  // src/lib/rate-limit.ts.
+  failMode?: "open" | "closed";
 }
 
 export interface AuthorizeArgs<TParams> {
@@ -407,7 +413,7 @@ export function defineHandler<
 
       // --- 5. rate limit ------------------------------------------------
       if (config.rateLimit) {
-        const { limit, windowSeconds, keyBy = "user" } = config.rateLimit;
+        const { limit, windowSeconds, keyBy = "user", failMode } = config.rateLimit;
         const ip = resolveClientIp(request);
         const info: RateLimitKeyInfo = { userId: user?.id ?? null, ip, params: rawParams, request };
 
@@ -424,7 +430,16 @@ export function defineHandler<
           key: redisKey("rl", config.route, suffix.slice(0, RATE_LIMIT_KEY_MAX_LENGTH)),
           limit,
           windowSeconds,
+          // Spread, not `failMode: undefined`: exactOptionalPropertyTypes.
+          ...(failMode ? { failMode } : {}),
         });
+
+        // An outage is not the caller's fault and not a limit they hit: 503,
+        // with no Retry-After (we do not know when Redis returns) and no
+        // X-RateLimit-* headers claiming a budget we could not count.
+        if (result.unavailable) {
+          throw dependencyUnavailable();
+        }
 
         responseHeaders["X-RateLimit-Limit"] = String(limit);
         responseHeaders["X-RateLimit-Remaining"] = String(result.remaining);

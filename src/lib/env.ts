@@ -44,6 +44,19 @@ export const env = loadEnv();
 // module scope (that would pull them into any bundle that imports this
 // file, including client bundles) so evaluation is deferred to first call
 // of getServerEnv() and memoized from then on.
+//
+// Validation is split by criticality, NOT parsed as one unit. The three keys in
+// REQUIRED_SERVER_KEYS validate together and throw, because nothing works
+// without them. Every other key is optional and is validated INDEPENDENTLY by
+// getServerEnv(): an invalid optional value degrades to `undefined` with one
+// console.warn naming the key (never the value). Parsing the lot as a unit made
+// a single truncated advisory credential (GROQ_API_KEY, QSTASH_URL ...) throw
+// for every caller, and callers catch that and degrade - src/lib/rate-limit.ts
+// failed open and meta.ts reported "not configured" - so an LLM-key typo
+// silently disabled rate limiting. The "a refinement here would throw for every
+// getServerEnv() caller" comments below describe that old behaviour; they now
+// hold only for the required trio, and the per-feature pairing rules still live
+// in the feature modules for the reasons given.
 const serverEnvSchema = z.object({
   UPSTASH_REDIS_REST_URL: z.string().url(),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(20),
@@ -305,6 +318,15 @@ const serverEnvSchema = z.object({
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;
 
+// The keys whose absence or malformation must stop the process. Everything else
+// in serverEnvSchema is optional and degrades alone (see the schema header).
+const REQUIRED_SERVER_KEYS = [
+  "UPSTASH_REDIS_REST_URL",
+  "UPSTASH_REDIS_REST_TOKEN",
+  "REDEMPTION_TOKEN_SECRET",
+] as const;
+type RequiredServerKey = (typeof REQUIRED_SERVER_KEYS)[number];
+
 function emptyToUndefined(value: string | undefined): string | undefined {
   return value === undefined || value.trim().length === 0 ? undefined : value;
 }
@@ -316,7 +338,7 @@ export function getServerEnv(): ServerEnv {
     return cachedServerEnv;
   }
 
-  const parsed = serverEnvSchema.safeParse({
+  const raw: Record<string, string | undefined> = {
     UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL,
     UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN,
     REDEMPTION_TOKEN_SECRET: process.env.REDEMPTION_TOKEN_SECRET,
@@ -346,10 +368,15 @@ export function getServerEnv(): ServerEnv {
     EMAIL_FROM: emptyToUndefined(process.env.EMAIL_FROM),
     METRICS_TOKEN: emptyToUndefined(process.env.METRICS_TOKEN),
     OPS_ALERT_EMAIL: emptyToUndefined(process.env.OPS_ALERT_EMAIL),
-  });
+  };
 
-  if (!parsed.success) {
-    const missing = parsed.error.issues
+  const requiredShape = Object.fromEntries(
+    REQUIRED_SERVER_KEYS.map((key) => [key, true as const]),
+  ) as Record<RequiredServerKey, true>;
+  const required = serverEnvSchema.pick(requiredShape).safeParse(raw);
+
+  if (!required.success) {
+    const missing = required.error.issues
       .map((issue) => issue.path.join("."))
       .join(", ");
     throw new Error(
@@ -357,6 +384,22 @@ export function getServerEnv(): ServerEnv {
     );
   }
 
-  cachedServerEnv = parsed.data;
+  const result: Record<string, unknown> = { ...required.data };
+  const requiredKeys = new Set<string>(REQUIRED_SERVER_KEYS);
+  for (const [key, schema] of Object.entries(serverEnvSchema.shape)) {
+    if (requiredKeys.has(key)) continue;
+    const parsed = schema.safeParse(raw[key]);
+    if (parsed.success) {
+      result[key] = parsed.data;
+    } else {
+      // Key name only: the value is a credential or a near-miss of one.
+      console.warn(
+        `[env] ${key} is set but invalid; treating it as unset so unrelated features keep working. Check .env.local.`,
+      );
+      result[key] = undefined;
+    }
+  }
+
+  cachedServerEnv = result as ServerEnv;
   return cachedServerEnv;
 }

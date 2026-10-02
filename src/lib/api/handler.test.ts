@@ -537,6 +537,41 @@ describe("defineHandler - rate limiting", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it("failMode closed: a limiter outage answers 503 DEPENDENCY_UNAVAILABLE (not 429) and never runs the handler", async () => {
+    hoisted.incr.mockRejectedValue(new Error("Upstash down"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const handler = vi.fn();
+    const route = defineHandler({
+      route: "receipts.submit",
+      requireSession: true,
+      rateLimit: { limit: 5, windowSeconds: 60, keyBy: "user", failMode: "closed" },
+      handler,
+    });
+
+    const response = await route(makeRequest());
+    const body = (await response.json()) as { error: { code: string } };
+
+    expect(response.status).toBe(503);
+    expect(body.error.code).toBe("DEPENDENCY_UNAVAILABLE");
+    expect(response.headers.get("Retry-After")).toBeNull();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("default failMode stays open: a limiter outage lets the request through", async () => {
+    hoisted.incr.mockRejectedValue(new Error("Upstash down"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const route = defineHandler({
+      route: "claims.token",
+      requireSession: true,
+      rateLimit: { limit: 5, windowSeconds: 60, keyBy: "user" },
+      handler: async () => ({ data: null }),
+    });
+
+    const response = await route(makeRequest());
+
+    expect(response.status).toBe(200);
+  });
+
   it("scopes the default key by user id", async () => {
     const route = defineHandler({
       route: "claims.token",

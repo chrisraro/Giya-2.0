@@ -5,7 +5,7 @@ import {
   submitReceipt,
   submitReceiptBodySchema,
 } from "@/features/receipts/server/submit";
-import { ApiError, API_ERROR_CODES } from "@/lib/api/errors";
+import { ApiError, API_ERROR_CODES, dependencyUnavailable } from "@/lib/api/errors";
 import { defineHandler } from "@/lib/api/handler";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { redisKey } from "@/lib/redis";
@@ -51,9 +51,14 @@ async function assertDailyQuota(userId: string): Promise<void> {
     key: redisKey("rl", "receipts.submit.day", `user:${userId}`),
     limit: SUBMIT_PER_DAY,
     windowSeconds: SUBMIT_PER_DAY_WINDOW_SECONDS,
+    // A receipt is money: with the limiter down the cap must hold, not vanish.
+    failMode: "closed",
   });
 
   if (result.ok) return;
+
+  // Outage, not exhaustion: 503, never the "try again tomorrow" 429 below.
+  if (result.unavailable) throw dependencyUnavailable();
 
   throw new ApiError(
     429,
@@ -81,7 +86,11 @@ export const POST = defineHandler({
   // `receipts_sha_unique` would catch a byte-identical repeat as a 422, which
   // is a confusing answer to a retry the consumer never intended.)
   idempotent: true,
-  rateLimit: { limit: SUBMIT_PER_MINUTE, windowSeconds: SUBMIT_PER_MINUTE_WINDOW_SECONDS },
+  rateLimit: {
+    limit: SUBMIT_PER_MINUTE,
+    windowSeconds: SUBMIT_PER_MINUTE_WINDOW_SECONDS,
+    failMode: "closed",
+  },
   handler: async ({ user, body }) => {
     await assertDailyQuota(user.id);
 

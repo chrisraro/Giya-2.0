@@ -142,6 +142,9 @@ export const GET = defineHandler<
     limit: METRICS_RATE_LIMIT,
     windowSeconds: METRICS_RATE_LIMIT_WINDOW_SECONDS,
     keyBy: "ip",
+    // This limit is the only bound on bearer guessing; it must not vanish
+    // when Redis does.
+    failMode: "closed",
   },
   authorize: () => {
     const configuredToken = readMetricsToken();

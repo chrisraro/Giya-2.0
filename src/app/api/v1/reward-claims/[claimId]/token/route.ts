@@ -97,7 +97,19 @@ export async function POST(
     key: redisKey("rl", "mint", user.id, claimId),
     limit: MINT_RATE_LIMIT,
     windowSeconds: MINT_RATE_LIMIT_WINDOW_SECONDS,
+    // Minting guards single-use redemption; an outage must not lift the cap.
+    failMode: "closed",
   });
+
+  // Outage, not a limit hit: 503 (retryable), never a 429 telling the user to wait.
+  if (rateLimit.unavailable) {
+    return errorResponse(
+      503,
+      "DEPENDENCY_UNAVAILABLE",
+      "This service is temporarily unavailable. Please try again shortly.",
+      requestId,
+    );
+  }
 
   if (!rateLimit.ok) {
     const response = errorResponse(

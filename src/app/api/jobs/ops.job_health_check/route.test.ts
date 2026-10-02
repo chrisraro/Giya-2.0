@@ -154,7 +154,7 @@ describe("rate limiting bad-bearer attempts", () => {
     await callRoute({ authorization: "Bearer wrong-token-wrong-token" });
 
     expect(mocks.checkRateLimit).toHaveBeenCalledWith(
-      expect.objectContaining({ limit: 20, windowSeconds: 60 }),
+      expect.objectContaining({ limit: 20, windowSeconds: 60, failMode: "closed" }),
     );
   });
 
@@ -164,6 +164,23 @@ describe("rate limiting bad-bearer attempts", () => {
     const response = await callRoute({ authorization: `Bearer ${TOKEN}` });
 
     expect(response.status).toBe(429);
+    expect(mocks.checkJobHealth).not.toHaveBeenCalled();
+  });
+});
+
+describe("when the rate limiter is down", () => {
+  it("fails closed with 503, so bearer guessing is not unbounded during an outage", async () => {
+    vi.stubEnv("METRICS_TOKEN", TOKEN);
+    mocks.checkRateLimit.mockResolvedValue({
+      ok: false,
+      remaining: 0,
+      resetSeconds: 60,
+      unavailable: true,
+    });
+
+    const response = await callRoute({ authorization: `Bearer ${TOKEN}` });
+
+    expect(response.status).toBe(503);
     expect(mocks.checkJobHealth).not.toHaveBeenCalled();
   });
 });
