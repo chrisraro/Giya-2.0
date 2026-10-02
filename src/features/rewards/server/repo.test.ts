@@ -21,7 +21,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ createClient: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
 
-import { getMyBalances, getMyBalanceForBusiness } from "./repo";
+import { getMyBalances, getMyBalanceForBusiness, listMyClaims, listMyLedger } from "./repo";
 
 interface StubResult {
   data: { points_balance: number } | null;
@@ -96,7 +96,8 @@ interface BusinessCustomerRow {
 
 function stubBalancesSupabase(result: { data: BusinessCustomerRow[] | null; error: { message: string } | null }) {
   const businessCustomersBuilder = {
-    select: vi.fn(() => Promise.resolve(result)),
+    select: vi.fn(() => businessCustomersBuilder),
+    eq: vi.fn(() => Promise.resolve(result)),
   };
   const businessesBuilder = {
     select: vi.fn(() => businessesBuilder),
@@ -107,7 +108,8 @@ function stubBalancesSupabase(result: { data: BusinessCustomerRow[] | null; erro
     if (table === "businesses") return businessesBuilder;
     throw new Error(`stubBalancesSupabase: unexpected table ${table}`);
   });
-  return { client: { from } };
+  const getUser = vi.fn(() => Promise.resolve({ data: { user: { id: "user-1" } } }));
+  return { client: { from, auth: { getUser } } };
 }
 
 describe("getMyBalances", () => {
@@ -137,5 +139,102 @@ describe("getMyBalances", () => {
     expect(balances).toEqual([
       { businessId: "biz-1", businessName: "", businessSlug: "", pointsBalance: 500, lifetimePoints: 1000 },
     ]);
+  });
+});
+
+// ===========================================================================
+// "My data" reads must be scoped to the signed-in consumer explicitly.
+// pt_staff_select, business_customers_staff_select and
+// reward_claims_staff_select are PERMISSIVE policies OR-ed with the consumer
+// ones, so a business owner who also uses the consumer app would otherwise
+// see every customer's ledger rows, balances and claims as their own.
+// Same defense-in-depth as getMyBalanceForBusiness above.
+// ===========================================================================
+
+type Result = { data: unknown; error: { message: string } | null };
+
+/** Chainable, awaitable query builder that records every filter it receives. */
+function stubScoped(userId: string | null, results: Record<string, Result>) {
+  const calls: Array<{ table: string; column: string; value: unknown }> = [];
+  const from = vi.fn((table: string) => {
+    const result = results[table] ?? { data: [], error: null };
+    const builder: Record<string, unknown> = {
+      select: vi.fn(() => builder),
+      order: vi.fn(() => builder),
+      in: vi.fn(() => builder),
+      eq: vi.fn((column: string, value: unknown) => {
+        calls.push({ table, column, value });
+        return builder;
+      }),
+      then: (resolve: (r: Result) => unknown) => Promise.resolve(result).then(resolve),
+    };
+    return builder;
+  });
+  const getUser = vi.fn(() => Promise.resolve({ data: { user: userId ? { id: userId } : null } }));
+  return { client: { from, auth: { getUser } }, calls, from, getUser };
+}
+
+describe("signed-in consumer scoping", () => {
+  it("listMyClaims filters reward_claims by consumer_id", async () => {
+    const stub = stubScoped("user-1", { reward_claims: { data: [], error: null } });
+    mocks.createClient.mockResolvedValue(stub.client);
+
+    await listMyClaims();
+
+    expect(stub.calls).toContainEqual({ table: "reward_claims", column: "consumer_id", value: "user-1" });
+  });
+
+  it("listMyClaims returns [] without querying when signed out", async () => {
+    const stub = stubScoped(null, {});
+    mocks.createClient.mockResolvedValue(stub.client);
+
+    expect(await listMyClaims()).toEqual([]);
+    expect(stub.from).not.toHaveBeenCalled();
+  });
+
+  it("getMyBalances filters business_customers by consumer_id", async () => {
+    const stub = stubScoped("user-1", { business_customers: { data: [], error: null } });
+    mocks.createClient.mockResolvedValue(stub.client);
+
+    await getMyBalances();
+
+    expect(stub.calls).toContainEqual({ table: "business_customers", column: "consumer_id", value: "user-1" });
+  });
+
+  it("getMyBalances returns [] without querying when signed out", async () => {
+    const stub = stubScoped(null, {});
+    mocks.createClient.mockResolvedValue(stub.client);
+
+    expect(await getMyBalances()).toEqual([]);
+    expect(stub.from).not.toHaveBeenCalled();
+  });
+
+  it("listMyLedger filters points_transactions by consumer_id", async () => {
+    const stub = stubScoped("user-1", { points_transactions: { data: [], error: null } });
+    mocks.createClient.mockResolvedValue(stub.client);
+
+    await listMyLedger();
+
+    expect(stub.calls).toEqual([{ table: "points_transactions", column: "consumer_id", value: "user-1" }]);
+  });
+
+  it("listMyLedger keeps the consumer_id filter alongside the business filter", async () => {
+    const stub = stubScoped("user-1", { points_transactions: { data: [], error: null } });
+    mocks.createClient.mockResolvedValue(stub.client);
+
+    await listMyLedger("biz-1");
+
+    expect(stub.calls).toEqual([
+      { table: "points_transactions", column: "consumer_id", value: "user-1" },
+      { table: "points_transactions", column: "business_id", value: "biz-1" },
+    ]);
+  });
+
+  it("listMyLedger returns [] without querying when signed out", async () => {
+    const stub = stubScoped(null, {});
+    mocks.createClient.mockResolvedValue(stub.client);
+
+    expect(await listMyLedger()).toEqual([]);
+    expect(stub.from).not.toHaveBeenCalled();
   });
 });
