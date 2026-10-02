@@ -154,4 +154,23 @@ describe("rate limiting", () => {
     expect(response.headers.get("Retry-After")).toBe("45");
     expect(mocks.updateUser).not.toHaveBeenCalled();
   });
+
+  it("fails closed: opts in and answers 503 DEPENDENCY_UNAVAILABLE on a limiter outage", async () => {
+    rateLimitMocks.checkRateLimit.mockResolvedValueOnce({
+      ok: false,
+      remaining: 0,
+      resetSeconds: 600,
+      unavailable: true,
+    });
+
+    const response = await callRoute({ password: "newSecret123" }, "1");
+    const json = (await response.json()) as { error: { code: string } };
+
+    expect(rateLimitMocks.checkRateLimit).toHaveBeenCalledWith(
+      expect.objectContaining({ failMode: "closed" }),
+    );
+    expect(response.status).toBe(503);
+    expect(json.error.code).toBe("DEPENDENCY_UNAVAILABLE");
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+  });
 });

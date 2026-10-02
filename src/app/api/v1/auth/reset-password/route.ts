@@ -53,6 +53,8 @@ export const POST = defineHandler<
   rateLimit: {
     limit: RATE_LIMIT,
     windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+    // Throttle on a credential-changing route: fail closed on a Redis outage.
+    failMode: "closed",
   },
   schema: bodySchema,
   authorize: ({ request }) => {
