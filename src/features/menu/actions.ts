@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
+import { BUSINESS_SUSPENDED_MESSAGE } from "@/features/businesses/server/resolve-owner-business";
 import { createClient } from "@/lib/supabase/server";
 
 import {
@@ -55,6 +56,13 @@ async function requireOwnerBusiness(): Promise<
   const business = await repo.resolveOwnerBusiness();
   if (!business) {
     return { ok: false, result: NO_BUSINESS };
+  }
+
+  // Doc 30 section 2.8: a suspended business cannot edit its menu. Checked on
+  // the role-agnostic resolver's own status read (no second query); that
+  // resolver itself stays non-refusing so the layout can still see "suspended".
+  if (business.status === "suspended") {
+    return { ok: false, result: { ok: false, message: BUSINESS_SUSPENDED_MESSAGE } };
   }
 
   return { ok: true, businessId: business.id };

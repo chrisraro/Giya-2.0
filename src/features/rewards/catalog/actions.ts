@@ -3,7 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
-import { resolveStaffContext } from "@/features/businesses/server/resolve-owner-business";
+import {
+  BUSINESS_SUSPENDED_MESSAGE,
+  resolveStaffAccess,
+} from "@/features/businesses/server/resolve-owner-business";
 
 import { REWARD_CATALOG_ROLES } from "./roles";
 import { createRewardSchema, setRewardActiveSchema, updateRewardSchema } from "./schemas";
@@ -29,9 +32,18 @@ function firstIssueMessage(error: z.ZodError): string {
 async function requireCatalogBusiness(): Promise<
   { ok: true; businessId: string } | { ok: false; result: ActionResult<never> }
 > {
-  const context = await resolveStaffContext(REWARD_CATALOG_ROLES);
-  if (!context) return { ok: false, result: NOT_ALLOWED };
-  return { ok: true, businessId: context.businessId };
+  // Doc 30 section 2.8: a suspended business cannot publish or edit rewards.
+  const access = await resolveStaffAccess(REWARD_CATALOG_ROLES);
+  if (!access.ok) {
+    return {
+      ok: false,
+      result:
+        access.reason === "suspended"
+          ? { ok: false, code: "BUSINESS_SUSPENDED", message: BUSINESS_SUSPENDED_MESSAGE }
+          : NOT_ALLOWED,
+    };
+  }
+  return { ok: true, businessId: access.context.businessId };
 }
 
 export async function createReward(input: unknown): Promise<ActionResult<RewardRow>> {

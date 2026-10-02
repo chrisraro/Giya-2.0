@@ -3,7 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
-import { resolveStaffContext } from "@/features/businesses/server/resolve-owner-business";
+import {
+  BUSINESS_SUSPENDED_MESSAGE,
+  resolveStaffAccess,
+} from "@/features/businesses/server/resolve-owner-business";
 import { createClient } from "@/lib/supabase/server";
 
 import { STAFF_ROSTER_ROLES } from "./roles";
@@ -34,8 +37,18 @@ async function requireRosterAccess(): Promise<
   | { ok: true; business: service.Business; actor: service.StaffActor }
   | { ok: false; result: ActionResult<never> }
 > {
-  const context = await resolveStaffContext(STAFF_ROSTER_ROLES);
-  if (!context) return { ok: false, result: NOT_ALLOWED };
+  // Doc 30 section 2.8: a suspended business cannot invite or change staff.
+  const access = await resolveStaffAccess(STAFF_ROSTER_ROLES);
+  if (!access.ok) {
+    return {
+      ok: false,
+      result:
+        access.reason === "suspended"
+          ? { ok: false, message: BUSINESS_SUSPENDED_MESSAGE }
+          : NOT_ALLOWED,
+    };
+  }
+  const context = access.context;
 
   return {
     ok: true,

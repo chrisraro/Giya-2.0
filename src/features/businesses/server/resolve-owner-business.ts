@@ -123,10 +123,58 @@ export async function resolveOwnerBusiness(): Promise<OwnerBusiness | null> {
   return readBusiness(membership.businessId);
 }
 
+/** The one user-facing refusal for a suspended tenant, shared by every write gate. */
+export const BUSINESS_SUSPENDED_MESSAGE =
+  "This business is suspended. Contact Giya support to restore access.";
+
+export type StaffAccess =
+  | { ok: true; context: StaffContext }
+  | { ok: false; reason: "no_access" | "suspended" };
+
+/**
+ * `resolveStaffContext` with the refusal reason kept, for write actions that
+ * want to tell a suspended merchant WHY (doc 30 section 2.8: a suspended
+ * business is blocked, BUSINESS_SUSPENDED).
+ *
+ * The portal layout already redirects a suspended business to /suspended, but
+ * that is a courtesy: a server action can be POSTed directly (docs/README.md
+ * golden rule 4), so the refusal lives here, in the tenancy resolver every
+ * write goes through, not in the UI. The layout reads status through
+ * `resolveOwnerBusiness`, which deliberately does NOT refuse, so the suspended
+ * screen keeps working. `closed` is NOT refused: it is the merchant's own end
+ * state, not a sanction (see the portal layout).
+ */
+export const resolveStaffAccess = cache(async function resolveStaffAccess(
+  allowedRoles: readonly BusinessRole[],
+): Promise<StaffAccess> {
+  const membership = await readMembership(allowedRoles);
+  if (!membership) return { ok: false, reason: "no_access" };
+
+  const business = await readBusiness(membership.businessId);
+  if (!business) return { ok: false, reason: "no_access" };
+
+  if (business.status === "suspended") return { ok: false, reason: "suspended" };
+
+  return {
+    ok: true,
+    context: {
+      userId: membership.userId,
+      businessId: business.id,
+      businessName: business.name,
+      businessSlug: business.slug,
+      businessStatus: business.status,
+      role: membership.role as BusinessRole,
+    },
+  };
+});
+
 /**
  * The signed-in caller's business AND the role they hold in it, or null when
  * there is no session, no active membership, or a membership whose role is not
  * in `allowedRoles`.
+ *
+ * A SUSPENDED business also resolves to null, so every caller fails closed
+ * (see `resolveStaffAccess` for why, and for the variant that says so).
  *
  * Null is the only failure shape on purpose (same reasoning as
  * `resolveReviewerContext`): a page turns it into a redirect and a server
@@ -141,18 +189,6 @@ export async function resolveOwnerBusiness(): Promise<OwnerBusiness | null> {
 export const resolveStaffContext = cache(async function resolveStaffContext(
   allowedRoles: readonly BusinessRole[],
 ): Promise<StaffContext | null> {
-  const membership = await readMembership(allowedRoles);
-  if (!membership) return null;
-
-  const business = await readBusiness(membership.businessId);
-  if (!business) return null;
-
-  return {
-    userId: membership.userId,
-    businessId: business.id,
-    businessName: business.name,
-    businessSlug: business.slug,
-    businessStatus: business.status,
-    role: membership.role as BusinessRole,
-  };
+  const access = await resolveStaffAccess(allowedRoles);
+  return access.ok ? access.context : null;
 });

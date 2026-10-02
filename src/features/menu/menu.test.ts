@@ -783,3 +783,27 @@ describe("service.emitCatalogUpdated", () => {
     spy.mockRestore();
   });
 });
+
+// Doc 30 section 2.8: a suspended business cannot edit its menu, even through a
+// directly-POSTed server action (the portal layout redirect is only a courtesy).
+describe("actions: suspended business cannot write", () => {
+  it("createCategory refuses with the suspended message and inserts nothing", async () => {
+    table("businesses").__result = { data: { ...BUSINESS_ROW, status: "suspended" }, error: null };
+
+    const result = await actions.createCategory({ name: "Drinks" });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toMatch(/suspended/i);
+    expect(table("menu_categories").insert).not.toHaveBeenCalled();
+  });
+
+  it("createCategory still works for a draft (unapproved) business", async () => {
+    table("businesses").__result = { data: { ...BUSINESS_ROW, status: "draft" }, error: null };
+    table("menu_categories").__result = { data: { id: "cat-1", name: "Drinks" }, error: null };
+
+    const result = await actions.createCategory({ name: "Drinks" });
+
+    if (!result.ok) expect(result.message).not.toMatch(/suspended/i);
+    expect(table("menu_categories").insert).toHaveBeenCalled();
+  });
+});

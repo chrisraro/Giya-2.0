@@ -6,7 +6,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { createClient } from "@/lib/supabase/server";
-import { BUSINESS_ROLES, resolveStaffContext } from "@/features/businesses/server/resolve-owner-business";
+import { BUSINESS_ROLES, BUSINESS_SUSPENDED_MESSAGE, resolveStaffAccess } from "@/features/businesses/server/resolve-owner-business";
 
 import {
   baseRuleSchema,
@@ -76,10 +76,18 @@ async function requireOwnerBusiness(): Promise<
     return { ok: false, result: NOT_SIGNED_IN };
   }
 
-  const staff = await resolveStaffContext(BUSINESS_ROLES);
-  if (!staff) {
-    return { ok: false, result: NO_BUSINESS };
+  // Doc 30 section 2.8: a suspended business cannot activate campaigns or change earning rules.
+  const access = await resolveStaffAccess(BUSINESS_ROLES);
+  if (!access.ok) {
+    return {
+      ok: false,
+      result:
+        access.reason === "suspended"
+          ? { ok: false, message: BUSINESS_SUSPENDED_MESSAGE }
+          : NO_BUSINESS,
+    };
   }
+  const staff = access.context;
 
   return { ok: true, businessId: staff.businessId, actor: { userId: staff.userId, role: staff.role } };
 }

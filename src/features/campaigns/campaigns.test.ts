@@ -625,7 +625,9 @@ describe("actions: resumeCampaign", () => {
   it("refuses to resume with the activate-path's BUSINESS_NOT_VERIFIED error when the business lost active status while paused", async () => {
     table("campaigns").__result = { data: pausedPromotionRow(), error: null };
     table("promotions").__result = { data: { id: "promo-1" }, error: null };
-    table("businesses").__result = { data: { ...BUSINESS_ROW, status: "suspended" }, error: null };
+    // `suspended` no longer reaches the activation gates: the write gate in
+    // requireOwnerBusiness refuses it first (doc 30 section 2.8, covered below).
+    table("businesses").__result = { data: { ...BUSINESS_ROW, status: "pending_verification" }, error: null };
 
     const result = await actions.resumeCampaign({ campaignId: CAMPAIGN_ID });
 
@@ -1044,4 +1046,43 @@ describe("service.emitLifecycleEvent", () => {
 
     spy.mockRestore();
   });
+});
+
+// ------------------------------------------------- suspended-tenant write gate
+
+// Doc 30 section 2.8 / golden rule 4: the portal layout's redirect is a
+// courtesy, a server action can be POSTed directly, so the action itself must
+// refuse a suspended business.
+describe("actions: suspended business cannot write", () => {
+  it.each([
+    ["activateCampaign", () => actions.activateCampaign({ campaignId: CAMPAIGN_ID })],
+    [
+      "upsertBaseRule",
+      () => actions.upsertBaseRule({ ruleType: "amount_rate", rateCentavosPerPoint: 100 }),
+    ],
+  ])("%s refuses with the suspended message and writes nothing", async (_name, call) => {
+    table("businesses").__result = { data: { ...BUSINESS_ROW, status: "suspended" }, error: null };
+
+    const result = await call();
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toMatch(/suspended/i);
+    expect(table("campaigns").update).not.toHaveBeenCalled();
+    expect(table("points_rules").insert).not.toHaveBeenCalled();
+    expect(table("points_rules").update).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it.each(["draft", "pending_verification", "active"])(
+    "a %s business still passes the write gate (unapproved merchants keep the portal)",
+    async (status) => {
+      table("businesses").__result = { data: { ...BUSINESS_ROW, status }, error: null };
+
+      const result = await actions.activateCampaign({ campaignId: "nope" });
+
+      // An invalid id fails Zod AFTER the gate: reaching that message proves the gate passed.
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.message).not.toMatch(/suspended|membership/i);
+    },
+  );
 });
