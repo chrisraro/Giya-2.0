@@ -1,3 +1,4 @@
+import { isLiveAt } from "@/features/campaigns/lifecycle";
 import { toFacebookPageUrl } from "@/lib/integrations/facebook-url";
 import { isValidCoordinates, type Coordinates } from "@/lib/maps/coordinates";
 import { createClient } from "@/lib/supabase/server";
@@ -438,11 +439,14 @@ export async function getPublicRewards(businessId: string): Promise<PublicReward
   const now = new Date();
   const liveCampaignIds = new Set(
     (campaigns ?? [])
-      .filter((campaign) => {
-        const startsOk = !campaign.starts_at || new Date(campaign.starts_at) <= now;
-        const endsOk = !campaign.ends_at || new Date(campaign.ends_at) > now;
-        return startsOk && endsOk;
-      })
+      // Shared window rule (campaigns/lifecycle.ts): starts inclusive, ends
+      // exclusive. Status/deleted_at are already filtered in the query above.
+      .filter((campaign) =>
+        isLiveAt(
+          { status: "active", starts_at: campaign.starts_at, ends_at: campaign.ends_at },
+          now,
+        ),
+      )
       .map((campaign) => campaign.id),
   );
 
