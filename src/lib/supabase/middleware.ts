@@ -71,18 +71,11 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // The custom access token hook stamps `biz`/`biz_overflow` into the JWT's
-  // claims at issuance but never persists them to
-  // auth.users.raw_app_meta_data, so user.app_metadata will NOT contain
-  // them. getClaims() verifies the JWT (against the project's JWKS for
-  // asymmetric signing keys, or via a server round-trip for legacy HS256
-  // projects) and hands back the claims actually embedded in the token,
-  // which is the only place membership claims live. Fall back to
-  // user.app_metadata (which will be empty of biz claims, but keeps the
-  // return shape sane) if getClaims somehow returns nothing.
-  const { data: claimsData } = await supabase.auth.getClaims();
-
-  const claims = toBizClaims(claimsData?.claims?.app_metadata ?? user?.app_metadata);
-
-  return { response, user, claims };
+  // No getClaims() here. It used to run a second time to read the `biz`
+  // membership claims, but nothing consumes them: src/middleware.ts ignores
+  // them (doc 12: claims are hints, the portal layout queries business_staff),
+  // and getClaims() costs a JWKS verify or, on legacy HS256 projects, another
+  // Auth server round trip on every request. Layouts that want claims call it
+  // themselves. toBizClaims stays exported for those callers.
+  return { response, user };
 }

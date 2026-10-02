@@ -38,7 +38,12 @@ afterEach(() => {
 const ORIGIN = "https://giya.test";
 
 function request(pathname: string): NextRequest {
-  return new NextRequest(new URL(pathname, ORIGIN));
+  // Carries a session cookie so middleware() takes the updateSession path
+  // these tests mock; the cookie-less fast path has its own file
+  // (middleware.anonymous.test.ts).
+  return new NextRequest(new URL(pathname, ORIGIN), {
+    headers: { cookie: "sb-test-auth-token=stub" },
+  });
 }
 
 /** Pretend the session refresh ran and found (or did not find) a user. */
