@@ -516,3 +516,16 @@ describe("loadCatalog", () => {
     expect(result.ok && result.data?.rewards).toHaveLength(1);
   });
 });
+
+// Doc 30 section 2.8: a suspended business cannot publish or edit rewards.
+describe("actions: suspended business cannot write", () => {
+  it("createReward refuses with BUSINESS_SUSPENDED and writes nothing", async () => {
+    table("businesses").__result = { data: { ...BUSINESS_ROW, status: "suspended" }, error: null };
+
+    const result = await actions.createReward(VALID_INPUT);
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "BUSINESS_SUSPENDED" }));
+    expect(table("rewards").insert).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+});

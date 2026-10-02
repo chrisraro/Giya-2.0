@@ -238,3 +238,29 @@ describe("acceptInviteAction: threads the CURRENT session, never a client-suppli
     expect(serviceTable("business_staff").select).not.toHaveBeenCalled();
   });
 });
+
+describe("staff actions: suspended business (doc 30 section 2.8)", () => {
+  it("inviteStaffAction refuses a suspended business and never reaches the service write", async () => {
+    sessionTable("businesses").__result = { data: { ...businessRow(), status: "suspended" }, error: null };
+
+    const result = await actions.inviteStaffAction({ email: "new@example.com", role: "staff" });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toMatch(/suspended/i);
+    expect(serviceTable("business_staff").insert).not.toHaveBeenCalled();
+    expect(mocks.generateLink).not.toHaveBeenCalled();
+  });
+
+  it.each(["draft", "pending_verification", "active"])(
+    "a %s business is not refused by the suspension gate",
+    async (status) => {
+      sessionTable("businesses").__result = { data: { ...businessRow(), status }, error: null };
+
+      const result = await actions.inviteStaffAction({ email: "not-an-email", role: "staff" });
+
+      // Fails Zod after the gate, not on suspension.
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.message).not.toMatch(/suspended/i);
+    },
+  );
+});
