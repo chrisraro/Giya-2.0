@@ -2784,6 +2784,15 @@ export type Database = {
         Args: { p_claim_id: string; p_method?: string; p_token_jti: string }
         Returns: Json
       }
+      validate_redemption_as: {
+        Args: {
+          p_actor_id: string
+          p_claim_id: string
+          p_method: string
+          p_token_jti: string
+        }
+        Returns: Json
+      }
     }
     Enums: {
       [_ in never]: never

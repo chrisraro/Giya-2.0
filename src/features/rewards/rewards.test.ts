@@ -9,6 +9,9 @@ vi.mock("server-only", () => ({}));
 const mocks = vi.hoisted(() => ({
   getUser: vi.fn(),
   rpc: vi.fn(),
+  // The SERVICE-role client's rpc: validate_redemption_as is service-role
+  // only (0082), so the redemption must never go through the session client.
+  serviceRpc: vi.fn(),
   consumeRedemptionToken: vi.fn(),
   profileMaybeSingle: vi.fn(),
   businessMaybeSingle: vi.fn(),
@@ -101,7 +104,8 @@ beforeEach(() => {
     data: { business_id: "biz-1", consumer_id: "consumer-1" },
     error: null,
   });
-  mocks.createServiceRoleClient.mockReturnValue({ from: tableDispatch });
+  mocks.serviceRpc.mockReset();
+  mocks.createServiceRoleClient.mockReturnValue({ from: tableDispatch, rpc: mocks.serviceRpc });
 });
 
 // ------------------------------------------------------------ mapClaimError
@@ -286,15 +290,16 @@ describe("service.validateRedemption", () => {
       businessId: "biz-1",
       jti: "jti-1",
     });
-    mocks.rpc.mockResolvedValue({ data: RPC_PAYLOAD, error: null });
+    mocks.serviceRpc.mockResolvedValue({ data: RPC_PAYLOAD, error: null });
 
     const result = await service.validateRedemption(TOKEN, "qr");
 
     expect(mocks.consumeRedemptionToken).toHaveBeenCalledWith(TOKEN);
-    expect(mocks.rpc).toHaveBeenCalledWith("validate_redemption", {
+    expect(mocks.serviceRpc).toHaveBeenCalledWith("validate_redemption_as", {
       p_claim_id: CLAIM_ID,
       p_token_jti: "jti-1",
       p_method: "qr",
+      p_actor_id: AUTH_USER.id,
     });
     expect(result).toEqual({
       ok: true,
@@ -317,7 +322,7 @@ describe("service.validateRedemption", () => {
       code: "REDEMPTION_TOKEN_INVALID",
       message: "This code is no longer valid. Ask the customer to refresh it.",
     });
-    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.serviceRpc).not.toHaveBeenCalled();
   });
 
   it("maps a CLAIM_ALREADY_REDEEMED RPC error, with the token already consumed by that point", async () => {
@@ -326,7 +331,7 @@ describe("service.validateRedemption", () => {
       businessId: "biz-1",
       jti: "jti-1",
     });
-    mocks.rpc.mockResolvedValue({ data: null, error: { message: "CLAIM_ALREADY_REDEEMED" } });
+    mocks.serviceRpc.mockResolvedValue({ data: null, error: { message: "CLAIM_ALREADY_REDEEMED" } });
 
     const result = await service.validateRedemption(TOKEN);
 
@@ -387,7 +392,7 @@ describe("service.validateRedemption: suspension gate (doc 30 section 2.8)", () 
     // validateRedemption) - that is intended, not a bug this test is guarding
     // against.
     expect(mocks.consumeRedemptionToken).toHaveBeenCalledTimes(1);
-    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.serviceRpc).not.toHaveBeenCalled();
   });
 
   // C1 fix: the claiming consumer's OWN suspension must also refuse the
@@ -410,20 +415,21 @@ describe("service.validateRedemption: suspension gate (doc 30 section 2.8)", () 
       code: "ACCOUNT_SUSPENDED",
       message: "This customer's account is suspended and cannot redeem rewards.",
     });
-    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.serviceRpc).not.toHaveBeenCalled();
   });
 
   it("does not affect an active business's redemption by an unsuspended consumer (the negative case)", async () => {
     mockToken();
-    mocks.rpc.mockResolvedValue(SUCCESSFUL_RPC_PAYLOAD);
+    mocks.serviceRpc.mockResolvedValue(SUCCESSFUL_RPC_PAYLOAD);
 
     const result = await service.validateRedemption("signed.jwt.token");
 
     expect(result.ok).toBe(true);
-    expect(mocks.rpc).toHaveBeenCalledWith("validate_redemption", {
+    expect(mocks.serviceRpc).toHaveBeenCalledWith("validate_redemption_as", {
       p_claim_id: CLAIM_ID,
       p_token_jti: "jti-1",
       p_method: "qr",
+      p_actor_id: AUTH_USER.id,
     });
   });
 
@@ -434,7 +440,7 @@ describe("service.validateRedemption: suspension gate (doc 30 section 2.8)", () 
     const result = await service.validateRedemption("signed.jwt.token");
 
     expect(result.ok).toBe(false);
-    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.serviceRpc).not.toHaveBeenCalled();
   });
 
   it("fails CLOSED (refuses, does not call the RPC) when the consumer's suspension state cannot be read", async () => {
@@ -444,7 +450,7 @@ describe("service.validateRedemption: suspension gate (doc 30 section 2.8)", () 
     const result = await service.validateRedemption("signed.jwt.token");
 
     expect(result.ok).toBe(false);
-    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.serviceRpc).not.toHaveBeenCalled();
   });
 
   it("fails CLOSED (refuses, does not call the RPC) when the claim itself cannot be read", async () => {
@@ -454,13 +460,13 @@ describe("service.validateRedemption: suspension gate (doc 30 section 2.8)", () 
     const result = await service.validateRedemption("signed.jwt.token");
 
     expect(result.ok).toBe(false);
-    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.serviceRpc).not.toHaveBeenCalled();
   });
 
   it("skips straight to the RPC (which answers FORBIDDEN) when the claim genuinely does not exist", async () => {
     mockToken();
     mocks.claimRowMaybeSingle.mockResolvedValue({ data: null, error: null });
-    mocks.rpc.mockResolvedValue({ data: null, error: { message: "FORBIDDEN" } });
+    mocks.serviceRpc.mockResolvedValue({ data: null, error: { message: "FORBIDDEN" } });
 
     const result = await service.validateRedemption("signed.jwt.token");
 
@@ -469,7 +475,7 @@ describe("service.validateRedemption: suspension gate (doc 30 section 2.8)", () 
       code: "FORBIDDEN",
       message: "You do not have permission to validate for this business.",
     });
-    expect(mocks.rpc).toHaveBeenCalledTimes(1);
+    expect(mocks.serviceRpc).toHaveBeenCalledTimes(1);
   });
 
   it("fails CLOSED when the service-role client is unavailable", async () => {
@@ -479,7 +485,46 @@ describe("service.validateRedemption: suspension gate (doc 30 section 2.8)", () 
     const result = await service.validateRedemption("signed.jwt.token");
 
     expect(result.ok).toBe(false);
+    expect(mocks.serviceRpc).not.toHaveBeenCalled();
+  });
+});
+
+
+// --------------------------------------------- service.validateRedemption: actor (0082)
+//
+// validate_redemption used to be callable by any signed-in staff member with
+// an invented token id. 0082 makes the RPC service-role only and takes the
+// actor explicitly, so THIS function is now the only path: it consumes the
+// signed token first, then names the verified session user as the actor.
+describe("service.validateRedemption: explicit actor, service role only (0082)", () => {
+  it("never calls an RPC through the caller's own session", async () => {
+    mockToken();
+    mocks.serviceRpc.mockResolvedValue(SUCCESSFUL_RPC_PAYLOAD);
+
+    await service.validateRedemption("signed.jwt.token");
+
     expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.serviceRpc).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses with UNAUTHENTICATED, without calling the RPC, when there is no session", async () => {
+    mockToken();
+    mockUnauthenticated();
+
+    const result = await service.validateRedemption("signed.jwt.token");
+
+    expect(result).toMatchObject({ ok: false, code: "UNAUTHENTICATED" });
+    expect(mocks.serviceRpc).not.toHaveBeenCalled();
+  });
+
+  it("maps SELF_REDEMPTION_FORBIDDEN to its own message", async () => {
+    mockToken();
+    mocks.serviceRpc.mockResolvedValue({ data: null, error: { message: "SELF_REDEMPTION_FORBIDDEN" } });
+
+    const result = await service.validateRedemption("signed.jwt.token");
+
+    expect(result).toMatchObject({ ok: false, code: "SELF_REDEMPTION_FORBIDDEN" });
+    expect(result.ok === false && result.message).toMatch(/own/i);
   });
 });
 

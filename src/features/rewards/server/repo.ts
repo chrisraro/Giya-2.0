@@ -153,15 +153,35 @@ export async function listClaimableRewards(): Promise<ClaimableRewardDTO[]> {
 }
 
 /**
+ * The signed-in user's id, or null when signed out. Shared by the "my data"
+ * reads below, which must filter on it explicitly: RLS on reward_claims,
+ * business_customers and points_transactions is a UNION of a consumer policy
+ * and a staff policy (reward_claims_staff_select, business_customers_staff_select,
+ * pt_staff_select), so a business owner who also uses the consumer app would
+ * otherwise get their whole tenant's rows back as "their own". Signed-out
+ * callers short-circuit to an empty answer: RLS would return nothing anyway.
+ */
+async function currentUserId(supabase: Awaited<ReturnType<typeof createClient>>): Promise<string | null> {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  return user?.id ?? null;
+}
+
+/**
  * The caller's own reward claims (RLS: reward_claims_consumer_select),
- * newest first, with reward/business names resolved for display.
+ * newest first, with reward/business names resolved for display. Filtered on
+ * consumer_id explicitly - see `currentUserId` for why RLS alone is not enough.
  */
 export async function listMyClaims(): Promise<MyClaimDTO[]> {
   const supabase = await createClient();
+  const userId = await currentUserId(supabase);
+  if (!userId) return [];
 
   const { data: claims, error } = await supabase
     .from("reward_claims")
     .select("id, reward_id, business_id, status, points_spent, claimed_at, expires_at, redeemed_at")
+    .eq("consumer_id", userId)
     .order("claimed_at", { ascending: false });
 
   if (error || !claims || claims.length === 0) return [];
@@ -257,10 +277,16 @@ export async function getClaim(claimId: string): Promise<ClaimDetailDTO | null> 
  */
 export async function getMyBalances(): Promise<BalanceDTO[]> {
   const supabase = await createClient();
+  // Signed out: no wallet. Not an error, so `[]` rather than a throw (the
+  // "fail loud" rule above is for genuine query failures).
+  const userId = await currentUserId(supabase);
+  if (!userId) return [];
 
   const { data: balances, error } = await supabase
     .from("business_customers")
-    .select("business_id, points_balance, lifetime_points");
+    .select("business_id, points_balance, lifetime_points")
+    // Without this an owner/manager sees every customer's balance row here.
+    .eq("consumer_id", userId);
 
   if (error) {
     throw new Error(`getMyBalances: failed to load balances: ${error.message}`);
@@ -342,10 +368,15 @@ export async function getMyBalanceForBusiness(
  */
 export async function listMyLedger(businessId?: string): Promise<LedgerEntryDTO[]> {
   const supabase = await createClient();
+  const userId = await currentUserId(supabase);
+  if (!userId) return [];
 
   let query = supabase
     .from("points_transactions")
     .select("id, business_id, type, points, balance_after, created_at, claim_id, campaign_id")
+    // pt_staff_select would otherwise fold the whole tenant's ledger into an
+    // owner's personal wallet history.
+    .eq("consumer_id", userId)
     .order("created_at", { ascending: false });
 
   if (businessId) {

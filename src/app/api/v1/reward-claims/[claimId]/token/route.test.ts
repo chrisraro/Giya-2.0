@@ -295,7 +295,27 @@ describe("POST /api/v1/reward-claims/{claimId}/token", () => {
       key: `test:rl:mint:${CONSUMER_ID}:${CLAIM_ID}`,
       limit: 5,
       windowSeconds: 60,
+      failMode: "closed",
     });
+  });
+
+  it("returns 503 DEPENDENCY_UNAVAILABLE (not 429) when the limiter is down, without touching the claim", async () => {
+    mockAuthed(CONSUMER_ID);
+    mocks.checkRateLimit.mockResolvedValue({
+      ok: false,
+      remaining: 0,
+      resetSeconds: 60,
+      unavailable: true,
+    });
+
+    const response = await callRoute();
+    const body = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(body.error.code).toBe("DEPENDENCY_UNAVAILABLE");
+    expect(response.headers.get("Retry-After")).toBeNull();
+    expect(mocks.getClaim).not.toHaveBeenCalled();
+    expect(mocks.mintRedemptionToken).not.toHaveBeenCalled();
   });
 
   it("returns 429 RATE_LIMITED with a Retry-After header when the limiter blocks, without touching the claim", async () => {

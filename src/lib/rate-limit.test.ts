@@ -80,6 +80,61 @@ describe("checkRateLimit", () => {
     expect(console.error).toHaveBeenCalled();
   });
 
+  describe("failMode", () => {
+    it("closed: a Redis error returns a not-ok result flagged unavailable, and does not throw", async () => {
+      redisMocks.incr.mockRejectedValue(new Error("Upstash Redis request failed (500)"));
+      const { checkRateLimit } = await import("./rate-limit");
+
+      const result = await checkRateLimit({
+        key: "rl:test",
+        limit: 5,
+        windowSeconds: 60,
+        failMode: "closed",
+      });
+
+      expect(result).toEqual({ ok: false, remaining: 0, resetSeconds: 60, unavailable: true });
+      expect(console.error).toHaveBeenCalled();
+    });
+
+    it("closed: a failure on a later Redis call (EXPIRE) also fails closed", async () => {
+      redisMocks.incr.mockResolvedValue(1);
+      redisMocks.expireNx.mockRejectedValue(new Error("boom"));
+      const { checkRateLimit } = await import("./rate-limit");
+
+      const result = await checkRateLimit({
+        key: "rl:test",
+        limit: 5,
+        windowSeconds: 60,
+        failMode: "closed",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.unavailable).toBe(true);
+    });
+
+    it("closed: does not change the healthy path (under limit allowed, over limit blocked, neither unavailable)", async () => {
+      redisMocks.incr.mockResolvedValueOnce(1).mockResolvedValueOnce(9);
+      const { checkRateLimit } = await import("./rate-limit");
+
+      const allowed = await checkRateLimit({ key: "rl:t", limit: 5, windowSeconds: 60, failMode: "closed" });
+      const blocked = await checkRateLimit({ key: "rl:t", limit: 5, windowSeconds: 60, failMode: "closed" });
+
+      expect(allowed.ok).toBe(true);
+      expect(allowed.unavailable).toBeUndefined();
+      expect(blocked.ok).toBe(false);
+      expect(blocked.unavailable).toBeUndefined();
+    });
+
+    it("open (explicit) behaves exactly like the default", async () => {
+      redisMocks.incr.mockRejectedValue(new Error("down"));
+      const { checkRateLimit } = await import("./rate-limit");
+
+      const result = await checkRateLimit({ key: "rl:t", limit: 5, windowSeconds: 60, failMode: "open" });
+
+      expect(result).toEqual({ ok: true, remaining: 5, resetSeconds: 60 });
+    });
+  });
+
   // --- Fix 1: self-healing TTL (a key that lost its TTL must not stay
   // blocked forever) ---
 

@@ -103,6 +103,9 @@ export const POST = defineHandler<
     limit: RATE_LIMIT,
     windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
     keyBy: "ip",
+    // This limit is the only bound on bearer guessing; it must not vanish
+    // when Redis does.
+    failMode: "closed",
   },
   authorize: () => {
     const configuredToken = readOpsToken();

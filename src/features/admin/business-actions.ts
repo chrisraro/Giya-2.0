@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
-import { resolveAdminContext } from "./access";
+import { canActOnLadder, resolveAdminContext, type AdminContext } from "./access";
 import { activateBusiness, purgeAllBusinesses, purgeBusiness, rejectBusinessVerification } from "./business-decisions";
 import type { BusinessDecisionErrorCode } from "./business-decisions";
 import { MAX_REASON_LENGTH } from "./presenter";
@@ -51,6 +51,25 @@ function fail(code: BusinessActionErrorCode, message: string): BusinessActionRes
  * Both queues and the overview count change on every decision, so both are
  * revalidated whichever way the decision went.
  */
+/**
+ * Doc 01's matrix: `support` is read-only everywhere, so the go-live decisions
+ * use the consequence ladder's predicate (admin or super_admin).
+ */
+async function resolveDecider(): Promise<AdminContext | null> {
+  const admin = await resolveAdminContext();
+  return admin !== null && canActOnLadder(admin.role) ? admin : null;
+}
+
+/**
+ * Purging is the most destructive action on the platform - it deletes ledger
+ * and audit history - so it is super_admin only. 0081 re-checks the same rule
+ * in SQL against platform_admins, so this guard is not the last word.
+ */
+async function resolvePurger(): Promise<AdminContext | null> {
+  const admin = await resolveAdminContext();
+  return admin !== null && admin.role === "super_admin" ? admin : null;
+}
+
 function revalidateQueue(): void {
   revalidatePath(OVERVIEW_PATH);
   revalidatePath(QUEUE_PATH);
@@ -62,7 +81,7 @@ function revalidateQueue(): void {
  * 'active', which is the predicate every consumer-facing read filters on.
  */
 export async function approveBusinessAction(input: unknown): Promise<BusinessActionResult> {
-  const admin = await resolveAdminContext();
+  const admin = await resolveDecider();
   if (admin === null) return fail("NOT_ALLOWED", "You do not have permission to take this action.");
 
   const parsed = decisionSchema.safeParse(input);
@@ -85,7 +104,7 @@ export async function approveBusinessAction(input: unknown): Promise<BusinessAct
 }
 
 export async function sendBusinessBackAction(input: unknown): Promise<BusinessActionResult> {
-  const admin = await resolveAdminContext();
+  const admin = await resolveDecider();
   if (admin === null) return fail("NOT_ALLOWED", "You do not have permission to take this action.");
 
   const parsed = decisionSchema.safeParse(input);
@@ -108,7 +127,7 @@ export async function sendBusinessBackAction(input: unknown): Promise<BusinessAc
 }
 
 export async function deleteBusinessAction(input: unknown): Promise<BusinessActionResult> {
-  const admin = await resolveAdminContext();
+  const admin = await resolvePurger();
   if (admin === null) return fail("NOT_ALLOWED", "You do not have permission to take this action.");
 
   const parsed = decisionSchema.safeParse(input);
@@ -131,7 +150,7 @@ export async function deleteBusinessAction(input: unknown): Promise<BusinessActi
 }
 
 export async function purgeAllBusinessesAction(input: unknown): Promise<BusinessActionResult> {
-  const admin = await resolveAdminContext();
+  const admin = await resolvePurger();
   if (admin === null) return fail("NOT_ALLOWED", "You do not have permission to take this action.");
 
   const schema = z.object({ reason: z.string().min(1).max(MAX_REASON_LENGTH) });

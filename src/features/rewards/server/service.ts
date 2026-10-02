@@ -132,6 +132,8 @@ const VALIDATE_ERROR_COPY: Record<string, string> = {
   REDEMPTION_TOKEN_INVALID: "This code is no longer valid. Ask the customer to refresh it.",
   REDEMPTION_METHOD_INVALID: "Unsupported redemption method.",
   UNAUTHENTICATED: "Please sign in to validate redemptions.",
+  SELF_REDEMPTION_FORBIDDEN:
+    "You can't redeem your own reward. Ask another team member to scan it.",
 };
 
 export function mapValidateError(message: string): { code: string; message: string } {
@@ -279,10 +281,26 @@ export async function validateRedemption(
     }
   }
 
-  const { data, error } = await supabase.rpc("validate_redemption", {
+  // 0082: the RPC is SERVICE-ROLE ONLY and takes the actor explicitly. While
+  // it was callable by any signed-in staff member, the token checks above were
+  // optional - a direct POST to /rest/v1/rpc/validate_redemption with an
+  // invented jti redeemed a customer's claim with no customer present. Now the
+  // only way in is through here: token consumed and verified first, then the
+  // verified session user named as the actor (the SQL re-checks their staff
+  // membership by table truth and refuses a self-redemption).
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) {
+    const mapped = mapValidateError("UNAUTHENTICATED");
+    return { ok: false, message: mapped.message, code: mapped.code };
+  }
+
+  const { data, error } = await serviceClient.rpc("validate_redemption_as", {
     p_claim_id: payload.claimId,
     p_token_jti: payload.jti,
     p_method: method,
+    p_actor_id: user.id,
   });
 
   if (error || !isValidateRedemptionRpcResult(data)) {
