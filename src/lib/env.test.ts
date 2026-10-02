@@ -184,15 +184,19 @@ describe("getServerEnv", () => {
     expect(result.OCR_SERVICE_TOKEN).toBe("ocr-token-value");
   });
 
-  it("rejects an OCR_SERVICE_URL that is not a URL (a typo must not silently disable OCR)", async () => {
+  it("degrades an OCR_SERVICE_URL that is not a URL to undefined with a warning, without throwing", async () => {
     vi.resetModules();
     stubClientEnv();
     stubRequiredServerEnv();
     vi.stubEnv("OCR_SERVICE_URL", "ocr.example.dev");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     const { getServerEnv } = await import("./env");
 
-    expect(() => getServerEnv()).toThrow(/OCR_SERVICE_URL/);
+    expect(getServerEnv().OCR_SERVICE_URL).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("OCR_SERVICE_URL");
+    warn.mockRestore();
   });
 
   it("parses with SUPABASE_SERVICE_ROLE_KEY unset (optional until credentials land)", async () => {
@@ -274,5 +278,75 @@ describe("getServerEnv", () => {
 
     expect(second).toBe(first);
     expect(second.UPSTASH_REDIS_REST_URL).toBe("https://example.upstash.io");
+  });
+
+  describe("optional keys validate independently", () => {
+    it("an invalid optional key goes undefined, warns once naming the key and never its value, and other keys stay intact", async () => {
+      vi.resetModules();
+      stubClientEnv();
+      stubRequiredServerEnv();
+      vi.stubEnv("GROQ_API_KEY", "truncated-secret"); // < 20 chars
+      vi.stubEnv("QSTASH_URL", "https://qstash-us-east-1.upstash.io");
+      vi.stubEnv("HF_TOKEN", "hf_valid");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+      const { getServerEnv } = await import("./env");
+      const result = getServerEnv();
+
+      expect(result.GROQ_API_KEY).toBeUndefined();
+      expect(result.QSTASH_URL).toBe("https://qstash-us-east-1.upstash.io");
+      expect(result.HF_TOKEN).toBe("hf_valid");
+      expect(result.UPSTASH_REDIS_REST_URL).toBe("https://example.upstash.io");
+      expect(warn).toHaveBeenCalledTimes(1);
+      const logged = warn.mock.calls.map((c) => c.map(String).join(" ")).join("; ");
+      expect(logged).toContain("GROQ_API_KEY");
+      expect(logged).not.toContain("truncated-secret");
+      warn.mockRestore();
+    });
+
+    it("warns once per bad key, and only once across memoized calls", async () => {
+      vi.resetModules();
+      stubClientEnv();
+      stubRequiredServerEnv();
+      vi.stubEnv("GROQ_API_KEY", "short");
+      vi.stubEnv("QSTASH_URL", "not a url");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+      const { getServerEnv } = await import("./env");
+      getServerEnv();
+      getServerEnv();
+
+      expect(warn).toHaveBeenCalledTimes(2);
+      warn.mockRestore();
+    });
+
+    it("does not warn when every optional key is valid or absent", async () => {
+      vi.resetModules();
+      stubClientEnv();
+      stubRequiredServerEnv();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+      const { getServerEnv } = await import("./env");
+      getServerEnv();
+
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it("still throws for a required key even when an optional key is also invalid", async () => {
+      vi.resetModules();
+      stubClientEnv();
+      vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://example.upstash.io");
+      vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "short");
+      vi.stubEnv("REDEMPTION_TOKEN_SECRET", "a".repeat(32));
+      vi.stubEnv("GROQ_API_KEY", "short");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+      const { getServerEnv } = await import("./env");
+
+      expect(() => getServerEnv()).toThrow(/UPSTASH_REDIS_REST_TOKEN/);
+      expect(() => getServerEnv()).not.toThrow(/GROQ_API_KEY/);
+      warn.mockRestore();
+    });
   });
 });
