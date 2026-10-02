@@ -181,8 +181,36 @@ body {
   }
 }
 
-/* Material Symbols base */
+/* Material Symbols base.
+ * Self-hosted subset (npm run gen:icons) instead of the 5.3 MB package font:
+ * only the glyphs in scripts/material-symbols-used.txt, GRAD/opsz/wght pinned
+ * to the values forced below, FILL still variable for `.is-filled`. The
+ * 100 700 weight range is kept so `font-bold` on an icon never triggers
+ * synthetic bolding. Rules below the @font-face are copied from
+ * material-symbols/rounded.css. */
+@font-face {
+  font-family: "Material Symbols Rounded";
+  font-style: normal;
+  font-weight: 100 700;
+  font-display: swap;
+  src: url("/fonts/material-symbols-rounded-subset.woff2") format("woff2");
+}
 .material-symbols-rounded {
+  font-family: "Material Symbols Rounded";
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "liga";
   font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
   user-select: none;
 }

@@ -1,3 +1,4 @@
+import { isLiveAt } from "@/features/campaigns/lifecycle";
 import { createClient } from "@/lib/supabase/server";
 
 export type PublicPromotion = {
@@ -17,6 +18,22 @@ export type PublicPromotion = {
   businessName?: string;
   businessSlug?: string;
 };
+
+// Row-level liveness via the single shared rule in campaigns/lifecycle.ts.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isLive(row: any, now: Date): boolean {
+  const campaign = row.campaigns;
+  if (!campaign || row.deleted_at) return false;
+  return isLiveAt(
+    {
+      status: campaign.status,
+      starts_at: campaign.starts_at ?? null,
+      ends_at: campaign.ends_at ?? null,
+      deleted_at: campaign.deleted_at ?? null,
+    },
+    now,
+  );
+}
 
 export async function getActivePromotionsForBusiness(businessId: string): Promise<PublicPromotion[]> {
   const supabase = await createClient();
@@ -44,13 +61,18 @@ export async function getActivePromotionsForBusiness(businessId: string): Promis
     `)
     .eq("business_id", businessId)
     .eq("campaigns.status", "active")
-    .is("campaigns.deleted_at", null);
+    .is("campaigns.deleted_at", null)
+    // A soft-deleted promotion must not surface even when its campaign is live.
+    .is("deleted_at", null);
 
   if (error || !data) {
     return [];
   }
 
-  return data.map((row: any) => ({
+  // The schedule window (doc 34 section 3) is applied by the shared predicate:
+  // status alone made scheduled and expired promotions render as "Active".
+  const now = new Date();
+  return data.filter((row: any) => isLive(row, now)).map((row: any) => ({
     id: row.id,
     campaignId: row.campaign_id,
     businessId: row.business_id,
@@ -69,6 +91,8 @@ export async function getActivePromotionsForBusiness(businessId: string): Promis
 
 export async function listPublicPromotions(limit = 10): Promise<PublicPromotion[]> {
   const supabase = await createClient();
+  const now = new Date();
+  const nowIso = now.toISOString();
 
   const { data, error } = await supabase
     .from("promotions")
@@ -97,13 +121,18 @@ export async function listPublicPromotions(limit = 10): Promise<PublicPromotion[
     `)
     .eq("campaigns.status", "active")
     .is("campaigns.deleted_at", null)
+    .is("deleted_at", null)
+    // Window pushed into SQL as well (starts inclusive, ends exclusive) so
+    // `limit` counts live rows only; the JS predicate below stays the fence.
+    .or(`starts_at.is.null,starts_at.lte.${nowIso}`, { referencedTable: "campaigns" })
+    .or(`ends_at.is.null,ends_at.gt.${nowIso}`, { referencedTable: "campaigns" })
     .limit(limit);
 
   if (error || !data) {
     return [];
   }
 
-  return data.map((row: any) => ({
+  return data.filter((row: any) => isLive(row, now)).map((row: any) => ({
     id: row.id,
     campaignId: row.campaign_id,
     businessId: row.business_id,

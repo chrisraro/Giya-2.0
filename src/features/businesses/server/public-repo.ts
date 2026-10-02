@@ -1,3 +1,4 @@
+import { isLiveAt } from "@/features/campaigns/lifecycle";
 import { toFacebookPageUrl } from "@/lib/integrations/facebook-url";
 import { isValidCoordinates, type Coordinates } from "@/lib/maps/coordinates";
 import { createClient } from "@/lib/supabase/server";
@@ -299,7 +300,13 @@ async function refNames(
   ids: readonly string[],
 ): Promise<Map<string, string>> {
   if (ids.length === 0) return new Map();
-  const { data } = await supabase.from(table).select("id, name").in("id", [...ids]);
+  const { data, error } = await supabase.from(table).select("id, name").in("id", [...ids]);
+  // Names are cosmetic labels on an otherwise good listing: log and fall back
+  // to no label rather than failing the whole page.
+  if (error) {
+    console.error(`[businesses] ${table} name lookup failed; rendering without labels`, error);
+    return new Map();
+  }
   return new Map((data ?? []).map((row) => [row.id, row.name]));
 }
 
@@ -438,11 +445,14 @@ export async function getPublicRewards(businessId: string): Promise<PublicReward
   const now = new Date();
   const liveCampaignIds = new Set(
     (campaigns ?? [])
-      .filter((campaign) => {
-        const startsOk = !campaign.starts_at || new Date(campaign.starts_at) <= now;
-        const endsOk = !campaign.ends_at || new Date(campaign.ends_at) > now;
-        return startsOk && endsOk;
-      })
+      // Shared window rule (campaigns/lifecycle.ts): starts inclusive, ends
+      // exclusive. Status/deleted_at are already filtered in the query above.
+      .filter((campaign) =>
+        isLiveAt(
+          { status: "active", starts_at: campaign.starts_at, ends_at: campaign.ends_at },
+          now,
+        ),
+      )
       .map((campaign) => campaign.id),
   );
 
@@ -473,12 +483,15 @@ function groupBy<Row, Item>(
 
 export async function listRefCities(): Promise<{ id: string; name: string }[]> {
   const supabase = await createClient();
-  const { data } = await supabase.from("ref_cities").select("id, name").order("name");
+  const { data, error } = await supabase.from("ref_cities").select("id, name").order("name");
+  // A filter picker that silently empties looks like "no cities exist".
+  if (error) throw new Error(`listRefCities: read failed: ${error.message}`);
   return data ?? [];
 }
 
 export async function listRefBusinessTypes(): Promise<{ id: string; name: string }[]> {
   const supabase = await createClient();
-  const { data } = await supabase.from("ref_business_types").select("id, name").order("name");
+  const { data, error } = await supabase.from("ref_business_types").select("id, name").order("name");
+  if (error) throw new Error(`listRefBusinessTypes: read failed: ${error.message}`);
   return data ?? [];
 }

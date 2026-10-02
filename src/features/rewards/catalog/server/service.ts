@@ -1,3 +1,4 @@
+import { isLiveAt } from "@/features/campaigns/lifecycle";
 import { getBaseRule } from "@/features/campaigns/server/repo";
 
 import { toEarningRuleShape, type EarningRuleShape } from "../economics";
@@ -65,7 +66,6 @@ function toResult<T>(data: T | null, error: { message: string } | null): ActionR
 export function describeCampaign(campaign: CampaignRow, asOf: Date = new Date()): CampaignOption {
   const startsAt = campaign.starts_at;
   const endsAt = campaign.ends_at;
-  const started = !startsAt || new Date(startsAt).getTime() <= asOf.getTime();
   const notFinished = !endsAt || new Date(endsAt).getTime() > asOf.getTime();
 
   return {
@@ -75,7 +75,8 @@ export function describeCampaign(campaign: CampaignRow, asOf: Date = new Date())
     status: campaign.status,
     startsAt,
     endsAt,
-    claimable: campaign.status === "active" && started && notFinished,
+    // One window rule shared with every other read path (campaigns/lifecycle.ts).
+    claimable: isLiveAt({ status: campaign.status, starts_at: startsAt, ends_at: endsAt }, asOf),
     terminal: TERMINAL_CAMPAIGN_STATUSES.has(campaign.status) || !notFinished,
   };
 }

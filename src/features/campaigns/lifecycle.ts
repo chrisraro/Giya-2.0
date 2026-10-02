@@ -220,12 +220,37 @@ export function activationGates(
 // [V1] and deferred (a recurrence, when it ships, further gates liveness
 // inside the envelope without ever flipping status).
 export function isCampaignLive(campaign: Campaign, at: Date): boolean {
-  if (campaign.status !== "active") return false;
-  if (campaign.startsAt !== null && at.getTime() < campaign.startsAt.getTime()) {
-    return false;
+  return isLiveAt(
+    { status: campaign.status, starts_at: campaign.startsAt, ends_at: campaign.endsAt },
+    at,
+  );
+}
+
+// The same rule for rows as they come out of PostgREST (snake_case, ISO
+// strings), so read paths that cannot build a full Campaign - promotions,
+// rewards, the public business page - share ONE window rule instead of
+// hand-copying it (they had drifted: promotions ignored the window entirely,
+// so a scheduled or expired promotion rendered as "Active"). Also gates on
+// soft delete (CLAUDE.md data rules). An unparseable bound fails closed:
+// never show something as live on a date we cannot read.
+export interface LiveWindowRow {
+  status: string;
+  starts_at: string | Date | null;
+  ends_at: string | Date | null;
+  deleted_at?: string | Date | null;
+}
+
+export function isLiveAt(row: LiveWindowRow, at: Date): boolean {
+  if (row.status !== "active") return false;
+  if (row.deleted_at) return false;
+  const now = at.getTime();
+  if (row.starts_at !== null) {
+    const startsAt = new Date(row.starts_at).getTime();
+    if (Number.isNaN(startsAt) || now < startsAt) return false;
   }
-  if (campaign.endsAt !== null && at.getTime() >= campaign.endsAt.getTime()) {
-    return false;
+  if (row.ends_at !== null) {
+    const endsAt = new Date(row.ends_at).getTime();
+    if (Number.isNaN(endsAt) || now >= endsAt) return false;
   }
   return true;
 }

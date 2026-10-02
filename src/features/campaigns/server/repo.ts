@@ -234,13 +234,16 @@ export async function getCampaignRow(
   campaignId: string,
 ): Promise<CampaignRow | null> {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("campaigns")
     .select("*")
     .eq("id", campaignId)
     .eq("business_id", businessId)
     .is("deleted_at", null)
     .maybeSingle();
+
+  // A failed read is not "no such row": callers turn null into 404 / "not found".
+  if (error) throw new Error(`getCampaignRow: read failed: ${error.message}`);
 
   return data ?? null;
 }
@@ -399,11 +402,14 @@ export async function getCampaignPayloadPresence(
 
 export async function getBusinessStatus(businessId: string): Promise<{ status: string } | null> {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("businesses")
     .select("status")
     .eq("id", businessId)
     .maybeSingle();
+
+  // A failed read is not "no such row": callers turn null into 404 / "not found".
+  if (error) throw new Error(`getBusinessStatus: read failed: ${error.message}`);
 
   return data ?? null;
 }
@@ -490,7 +496,7 @@ export async function upsertBaseRule(
 
 export async function getBaseRule(businessId: string): Promise<PointsRuleRow | null> {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("points_rules")
     .select("*")
     .eq("business_id", businessId)
@@ -498,6 +504,9 @@ export async function getBaseRule(businessId: string): Promise<PointsRuleRow | n
     .eq("is_active", true)
     .is("deleted_at", null)
     .maybeSingle();
+
+  // A failed read is not "no such row": callers turn null into 404 / "not found".
+  if (error) throw new Error(`getBaseRule: read failed: ${error.message}`);
 
   return data ?? null;
 }

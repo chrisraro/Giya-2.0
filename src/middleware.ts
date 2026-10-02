@@ -119,10 +119,28 @@ export function isAuthenticatedConsumerRoute(pathname: string): boolean {
   );
 }
 
+// @supabase/ssr names the session cookie `sb-<project-ref>-auth-token`, split
+// into `.0`, `.1`... chunks when large; the PKCE `-auth-token-code-verifier`
+// cookie also matches, which is correct (the callback may need a refresh pass).
+// Matching on prefix + infix keeps this independent of the project ref.
+export function hasSupabaseAuthCookie(request: NextRequest): boolean {
+  return request.cookies
+    .getAll()
+    .some(({ name }) => name.startsWith("sb-") && name.includes("auth-token"));
+}
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  const { response, user } = await updateSession(request);
+  // A request with no Supabase auth cookie has no session to refresh and no
+  // user to look up, so updateSession()'s auth.getUser() network round trip
+  // (the bulk of the ~1.7 s homepage TTFB) can only ever answer "nobody". Skip
+  // it and treat the visitor as anonymous; the redirect rules below still run,
+  // so gated routes keep bouncing to login.
+  const hasSessionCookie = hasSupabaseAuthCookie(request);
+  const { response, user } = hasSessionCookie
+    ? await updateSession(request)
+    : { response: NextResponse.next({ request }), user: null };
 
   const onOnboardingRoute = isOnboardingRoute(pathname) || isBusinessOnboardingRoute(pathname);
 
@@ -152,5 +170,9 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon|brand/).*)"],
+  // Static assets and metadata files never carry or need a session; running
+  // middleware on them only added latency. `.webmanifest` is the PWA manifest.
+  matcher: [
+    "/((?!_next/static|_next/image|favicon|brand/|fonts/|manifest\\.webmanifest|robots\\.txt|sitemap\\.xml|.*\\.(?:svg|png|jpg|jpeg|webp|ico|woff2)$).*)",
+  ],
 };

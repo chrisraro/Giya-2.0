@@ -100,11 +100,15 @@ async function readMembership(
 
 async function readBusiness(businessId: string): Promise<OwnerBusiness | null> {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("businesses")
     .select("id, slug, name, status")
     .eq("id", businessId)
     .maybeSingle<OwnerBusiness>();
+
+  // Null reads as "no membership" to callers, which redirect owners to
+  // onboarding. A failed read must not look like that.
+  if (error) throw new Error(`readBusiness: read failed: ${error.message}`);
 
   return data ?? null;
 }

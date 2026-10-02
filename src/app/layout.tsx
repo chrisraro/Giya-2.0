@@ -1,8 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
-import "material-symbols/rounded.css";
 import "./globals.css";
+import { preload } from "react-dom";
 import { ThemeProvider } from "@/components/theme-provider";
 import { tokenHex } from "@/lib/md3-token-hex";
 
@@ -20,6 +20,13 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  // Icons are ligature text, blank/raw until the font lands, and the font is
+  // only discovered after the CSS parses. Preloading starts it with the HTML.
+  preload("/fonts/material-symbols-rounded-subset.woff2", {
+    as: "font",
+    type: "font/woff2",
+    crossOrigin: "anonymous",
+  });
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={`${GeistSans.variable} ${GeistMono.variable} font-sans antialiased`}>

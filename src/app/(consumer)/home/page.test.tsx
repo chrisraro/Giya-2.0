@@ -464,3 +464,18 @@ describe("/home greeting clock", () => {
     vi.useRealTimers();
   });
 });
+
+describe("/home promotions read failure", () => {
+  it("logs and renders without promotions instead of failing silently", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.listPublicPromotions.mockRejectedValue(new Error("connection reset"));
+
+    await renderHome();
+
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("[home] promotions read failed"),
+      expect.any(Error),
+    );
+    logged.mockRestore();
+  });
+});

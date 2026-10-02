@@ -2,10 +2,12 @@ import { z } from "zod";
 
 import { ApiError, API_ERROR_CODES } from "@/lib/api/errors";
 import { defineHandler } from "@/lib/api/handler";
+import { passwordSchema } from "@/lib/auth/password-policy";
 import { RECOVERY_COOKIE_NAME, clearRecoveryCookieHeader } from "@/lib/auth/recovery-cookie";
 
 const bodySchema = z.object({
-  password: z.string().min(1, "Password is required"),
+  // Doc 15: min 8 enforced here, not only in the browser form.
+  password: passwordSchema,
 });
 
 type ResetPasswordBody = z.infer<typeof bodySchema>;
@@ -51,6 +53,8 @@ export const POST = defineHandler<
   rateLimit: {
     limit: RATE_LIMIT,
     windowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+    // Throttle on a credential-changing route: fail closed on a Redis outage.
+    failMode: "closed",
   },
   schema: bodySchema,
   authorize: ({ request }) => {

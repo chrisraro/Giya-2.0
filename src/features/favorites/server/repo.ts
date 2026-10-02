@@ -8,12 +8,16 @@ export async function isFavorite(businessId: string): Promise<boolean> {
 
   if (!user) return false;
 
-  const { data } = await (supabase as any)
+  const { data, error } = await (supabase as any)
     .from("favorites")
     .select("id")
     .eq("user_id", user.id)
     .eq("business_id", businessId)
     .maybeSingle();
+
+  // "Not favourited" and "could not check" are different; the caller decides
+  // whether to degrade.
+  if (error) throw new Error(`isFavorite: read failed: ${error.message}`);
 
   return Boolean(data);
 }

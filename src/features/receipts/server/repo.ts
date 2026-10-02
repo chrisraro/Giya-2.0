@@ -191,7 +191,13 @@ async function loadBusinessNames(businessIds: readonly string[]): Promise<Map<st
   if (unique.length === 0) return new Map();
 
   const supabase = await createClient();
-  const { data } = await supabase.from("businesses").select("id, name").in("id", unique);
+  const { data, error } = await supabase.from("businesses").select("id, name").in("id", unique);
+  // Cosmetic label on a receipt row: log and show it unnamed rather than
+  // failing the receipts list.
+  if (error) {
+    console.error("[receipts] business name lookup failed; rendering without names", error);
+    return new Map();
+  }
   return new Map((data ?? []).map((business) => [business.id, business.name]));
 }
 

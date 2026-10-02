@@ -124,6 +124,20 @@ describe("ResetPasswordPage - form", () => {
     );
   });
 
+  it("rejects a 7-character password client-side without POSTing", async () => {
+    render(<ResetPasswordPage />);
+    await screen.findByLabelText("New password");
+
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "abcdefg" } });
+    fireEvent.click(screen.getByRole("button", { name: "Update password" }));
+
+    expect(screen.getByText("Password must be at least 8 characters")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/v1/auth/reset-password",
+      expect.anything(),
+    );
+  });
+
   it("POSTs the new password, signs out the recovery session, and shows a confirmation with a sign-in link", async () => {
     render(<ResetPasswordPage />);
     await screen.findByLabelText("New password");
@@ -154,7 +168,7 @@ describe("ResetPasswordPage - form", () => {
     render(<ResetPasswordPage />);
     await screen.findByLabelText("New password");
 
-    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "abc" } });
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "abcdefgh" } });
     fireEvent.click(screen.getByRole("button", { name: "Update password" }));
 
     expect(
@@ -195,7 +209,7 @@ describe("ResetPasswordPage - form", () => {
     render(<ResetPasswordPage />);
     await screen.findByLabelText("New password");
 
-    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "abc" } });
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "abcdefgh" } });
     fireEvent.click(screen.getByRole("button", { name: "Update password" }));
 
     expect(await screen.findByText("Something went wrong. Please try again.")).toBeInTheDocument();

@@ -1,3 +1,4 @@
+import { isLiveAt } from "@/features/campaigns/lifecycle";
 import { createClient } from "@/lib/supabase/server";
 
 import type {
@@ -98,24 +99,33 @@ export async function listClaimableRewards(): Promise<ClaimableRewardDTO[]> {
 
   const rewards = data as unknown as ClaimableRewardRow[] | null;
 
-  if (error || !rewards || rewards.length === 0) return [];
+  // A failed read is not an empty catalogue: returning [] here rendered an
+  // outage as "no rewards". Let the route's error boundary show a retry.
+  if (error) throw new Error(`listClaimableRewards: rewards read failed: ${error.message}`);
+  if (!rewards || rewards.length === 0) return [];
 
   const campaignIds = Array.from(new Set(rewards.map((r) => r.campaign_id)));
-  const { data: campaigns } = await supabase
+  const { data: campaigns, error: campaignsError } = await supabase
     .from("campaigns")
     .select("id, starts_at, ends_at")
     .in("id", campaignIds)
     .eq("status", "active")
     .is("deleted_at", null);
 
+  // Ignoring this filtered every reward out (no live campaigns) - same
+  // outage-as-empty failure as above.
+  if (campaignsError) {
+    throw new Error(`listClaimableRewards: campaigns read failed: ${campaignsError.message}`);
+  }
+
   const now = new Date();
   const liveCampaignIds = new Set(
     (campaigns ?? [])
-      .filter((c) => {
-        const startsOk = !c.starts_at || new Date(c.starts_at) <= now;
-        const endsOk = !c.ends_at || new Date(c.ends_at) > now;
-        return startsOk && endsOk;
-      })
+      // Shared window rule (campaigns/lifecycle.ts): starts inclusive, ends
+      // exclusive. Status/deleted_at are already filtered in the query above.
+      .filter((c) =>
+        isLiveAt({ status: "active", starts_at: c.starts_at, ends_at: c.ends_at }, now),
+      )
       .map((c) => c.id),
   );
 

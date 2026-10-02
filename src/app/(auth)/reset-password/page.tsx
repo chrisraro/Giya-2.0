@@ -24,6 +24,10 @@ export default function ResetPasswordPage() {
       setPasswordError("Password is required");
       return;
     }
+    if (password.length < 8) {
+      setPasswordError("Password must be at least 8 characters");
+      return;
+    }
     setPasswordError("");
     setFormError("");
     setSubmitting(true);

@@ -86,6 +86,15 @@ describe("POST /api/v1/auth/reset-password", () => {
     expect(mocks.updateUser).not.toHaveBeenCalled();
   });
 
+  it("422s a 7-character password, accepts 8, and 422s 73 (doc 15 policy)", async () => {
+    expect((await callRoute({ password: "a".repeat(7) }, "1")).status).toBe(422);
+    expect((await callRoute({ password: "a".repeat(73) }, "1")).status).toBe(422);
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+
+    expect((await callRoute({ password: "a".repeat(8) }, "1")).status).toBe(200);
+    expect(mocks.updateUser).toHaveBeenCalledTimes(1);
+  });
+
   it("updates the password and clears the recovery cookie on success", async () => {
     const response = await callRoute({ password: "newSecret123" }, "1");
 
@@ -110,7 +119,7 @@ describe("POST /api/v1/auth/reset-password", () => {
       error: { message: "Password should be at least 6 characters" },
     });
 
-    const response = await callRoute({ password: "abc" }, "1");
+    const response = await callRoute({ password: "abcdefgh" }, "1");
     const json = (await response.json()) as { error: { message: string } };
 
     expect(response.status).toBe(422);
@@ -143,6 +152,25 @@ describe("rate limiting", () => {
 
     expect(response.status).toBe(429);
     expect(response.headers.get("Retry-After")).toBe("45");
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+  });
+
+  it("fails closed: opts in and answers 503 DEPENDENCY_UNAVAILABLE on a limiter outage", async () => {
+    rateLimitMocks.checkRateLimit.mockResolvedValueOnce({
+      ok: false,
+      remaining: 0,
+      resetSeconds: 600,
+      unavailable: true,
+    });
+
+    const response = await callRoute({ password: "newSecret123" }, "1");
+    const json = (await response.json()) as { error: { code: string } };
+
+    expect(rateLimitMocks.checkRateLimit).toHaveBeenCalledWith(
+      expect.objectContaining({ failMode: "closed" }),
+    );
+    expect(response.status).toBe(503);
+    expect(json.error.code).toBe("DEPENDENCY_UNAVAILABLE");
     expect(mocks.updateUser).not.toHaveBeenCalled();
   });
 });
