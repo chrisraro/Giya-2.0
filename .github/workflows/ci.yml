@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # Placeholders so `next build` can collect page data. Obviously fake:
+      # no real secret ever belongs in this file. Mirrors BUILD_ENV in
+      # scripts/ci/run.mjs (the `npm run ci` runner).
+      NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key-not-a-real-secret-0000
+      UPSTASH_REDIS_REST_URL: https://example.upstash.io
+      UPSTASH_REDIS_REST_TOKEN: ci-placeholder-upstash-token-not-real-0000
+      REDEMPTION_TOKEN_SECRET: ci-placeholder-redemption-secret-not-real-000000000000
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # check-grants.sh diffs BASE..HEAD, so it needs history.
+          fetch-depth: 0
+
+      # No engines field or .nvmrc in the repo; Next 16 needs >= 20.9, so 22 LTS.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint (errors block; warnings do not)
+        run: npx eslint src scripts
+
+      - name: Unit tests
+        run: npx vitest run
+
+      - name: Migration safety
+        run: node scripts/ci/check-migrations.mjs
+
+      # Static repo check: it diffs migrations against a base SHA and greps
+      # supabase/tests, so it needs no database. check-grants.sh uses ripgrep.
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Grants gate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # A new branch push has an all-zero `before`; fall back to the parent.
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+          fi
+          bash scripts/sdd/check-grants.sh "$BASE_SHA"
+
+      - name: Build
+        run: npm run build
