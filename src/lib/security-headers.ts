@@ -1,6 +1,9 @@
 // Baseline response headers (doc 15 "Transport & headers"). Pure so the policy can be
 // unit-tested without booting Next; next.config.ts only wires it to `headers()`.
 
+const CSP_REPORT_PATH = "/api/csp-report";
+const CSP_REPORT_GROUP = "csp";
+
 export interface SecurityHeader {
   readonly key: string;
   readonly value: string;
@@ -22,7 +25,7 @@ function hostOf(raw: string | undefined): string | null {
 }
 
 /**
- * Content-Security-Policy value, built from what the app actually loads:
+ * Report-only CSP value (the allow-list half), built from what the app actually loads:
  *  - Supabase: REST/auth/storage over https, Realtime over wss, storage images.
  *  - Facebook: connect.facebook.net SDK + www/web.facebook.com page-plugin frames
  *    (features/integrations/meta/components/facebook-page-embed.tsx), fbcdn images.
@@ -84,15 +87,31 @@ export function buildCsp(env: SecurityHeaderEnv, opts: { dev?: boolean } = {}): 
       "https://*.hcaptcha.com",
     ],
     "worker-src": ["'self'", "blob:"],
-    "object-src": ["'none'"],
-    "base-uri": ["'self'"],
-    // OAuth sign-in navigates via redirects, not form posts, so self is enough.
-    "form-action": ["'self'"],
-    "frame-ancestors": ["'none'"],
   };
 
   return [
     ...Object.entries(directives).map(([name, sources]) => `${name} ${sources.join(" ")}`),
+    // `report-uri` for browsers without the Reporting API, `report-to` (group named in the
+    // Reporting-Endpoints header) for the rest. Both land on src/app/api/csp-report/route.ts.
+    `report-uri ${CSP_REPORT_PATH}`,
+    `report-to ${CSP_REPORT_GROUP}`,
+  ].join("; ");
+}
+
+/**
+ * The enforced half of the policy: only directives that cannot break a legitimate load.
+ * Audited against the app: every <form action> is same-origin (/discover, /scan), server
+ * actions POST to self, and Supabase OAuth + hCaptcha navigate via redirects or run inside
+ * their own frames, so form-action 'self' needs no extra origin. Nothing embeds the app
+ * (X-Frame-Options already DENY), uses <object>/<embed>, or sets <base>.
+ * Static pages stay static: no nonce, nothing per-request (explicit decision).
+ */
+export function buildEnforcedCsp(): string {
+  return [
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
     "upgrade-insecure-requests",
   ].join("; ");
 }
@@ -114,8 +133,11 @@ export function buildSecurityHeaders(
       value: "camera=(self), geolocation=(self), microphone=(), payment=()",
     },
     { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
-    // Report-only first (doc 15: two weeks before enforcing); an unvetted enforcing CSP could
-    // break production. Swap the key to Content-Security-Policy to enforce.
+    // Split policy: the safe directives are enforced now; the resource allow-list stays
+    // report-only (doc 15: observe violations before enforcing) because an unvetted
+    // enforcing script/img/connect list could break production.
+    { key: "Content-Security-Policy", value: buildEnforcedCsp() },
     { key: "Content-Security-Policy-Report-Only", value: buildCsp(env, opts) },
+    { key: "Reporting-Endpoints", value: `${CSP_REPORT_GROUP}="${CSP_REPORT_PATH}"` },
   ];
 }

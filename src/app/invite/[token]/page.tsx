@@ -10,7 +10,7 @@ import { createClient } from "@/lib/supabase/server";
 // `(auth)` - the invitee is by definition not yet staff of any tenant (so the
 // `(business)` layout's membership check would refuse them), and `(auth)` is
 // off limits to this task (another task owns it, building password reset
-// there). `src/middleware.ts`'s session gate only fires for
+// there). `src/proxy.ts`'s session gate only fires for
 // `/business/*`, the seven listed consumer routes, and `/onboarding*` - this
 // path matches none of those, so it renders for a signed-out visitor exactly
 // as it must for the "no account yet" case doc 30 describes.

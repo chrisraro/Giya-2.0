@@ -12,7 +12,7 @@ import { createClient } from "@/lib/supabase/server";
 // that owns the shared mobile drawer state.
 //
 // Membership enforcement lives here, not in middleware (doc 12: claims are
-// hints, tables are truth). middleware.ts only checks for a session; this
+// hints, tables are truth). proxy.ts only checks for a session; this
 // layout is the authoritative gate, resolving the caller's business from
 // `business_staff` directly so it is correct even before the custom access
 // token hook stamps biz claims into a user's JWT (or if the hook isn't

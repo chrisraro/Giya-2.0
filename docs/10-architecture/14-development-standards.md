@@ -43,7 +43,7 @@ giya/
 │   │   ├── queue/                 # enqueue helpers, signatures
 │   │   ├── redis.ts  cache-tags.ts  query-keys.ts  utils.ts
 │   ├── styles/                    # tailwind theme tokens
-│   └── middleware.ts
+│   └── proxy.ts            # Next 16.3 name for the former middleware.ts
 ├── e2e/                           # Playwright
 └── .github/workflows/
 ```

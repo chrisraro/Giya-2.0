@@ -31,7 +31,7 @@ const nextConfig: NextConfig = {
     },
   },
   // Doc 15 "Transport & headers": baseline headers on every route. Built from env at
-  // config load; the CSP is report-only (see src/lib/security-headers.ts).
+  // config load; the CSP is split: safe directives enforced, allow-list report-only (see src/lib/security-headers.ts).
   async headers() {
     return [
       {
