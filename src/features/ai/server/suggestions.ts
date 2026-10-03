@@ -20,7 +20,7 @@ export async function generateCampaignSuggestions(
 ): Promise<SuggestionsResult> {
   const supabase = await createClient();
 
-  const { data: analytics, error } = await (supabase as any)
+  const { data: analytics, error } = await supabase
     .from("analytics_daily_business")
     .select("*")
     .eq("business_id", businessId)
@@ -45,7 +45,7 @@ export async function generateCampaignSuggestions(
     };
   }
 
-  const totalReceipts = analytics.reduce((acc: number, r: any) => acc + r.total_receipts_count, 0);
+  const totalReceipts = analytics.reduce((acc: number, r) => acc + r.total_receipts_count, 0);
 
   const suggestion: CampaignSuggestion = {
     title: totalReceipts > 100 ? "VIP High Roller Loyalty Bonus" : "Midweek Power Hours",

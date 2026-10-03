@@ -19,21 +19,25 @@ export default function AdminLoginPage() {
   const [password, setPassword] = React.useState("");
   const [emailError, setEmailError] = React.useState("");
   const [passwordError, setPasswordError] = React.useState("");
-  const [formError, setFormError] = React.useState("");
-  const [socialError, setSocialError] = React.useState("");
+  // `null` = "never set by a form action", so the redirect-supplied ?error=
+  // below shows until the user acts; an explicit "" clears it.
+  const [formErrorState, setFormError] = React.useState<string | null>(null);
+  const [socialErrorState, setSocialError] = React.useState<string | null>(null);
+  // Read through useSyncExternalStore rather than setState-in-effect: the server
+  // snapshot is "" so hydration matches, then the client reads the real URL.
+  const errorParam = React.useSyncExternalStore(
+    () => () => {},
+    () => new URLSearchParams(window.location.search).get("error") ?? "",
+    () => "",
+  );
+  const formError =
+    formErrorState ??
+    (errorParam === "not_admin" ? "Access Denied: Your account is not a registered Platform Admin." : "");
+  const socialError =
+    socialErrorState ?? (errorParam === "oauth" ? "OAuth authentication was cancelled or failed." : "");
   const [submitting, setSubmitting] = React.useState(false);
 
   React.useEffect(() => {
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      const errorParam = params.get("error");
-      if (errorParam === "not_admin") {
-        setFormError("Access Denied: Your account is not a registered Platform Admin.");
-      } else if (errorParam === "oauth") {
-        setSocialError("OAuth authentication was cancelled or failed.");
-      }
-    }
-
     const supabase = createClient();
     supabase.auth.getUser().then(async ({ data: { user } }) => {
       if (user) {
@@ -120,8 +124,8 @@ export default function AdminLoginPage() {
       }
 
       router.push("/admin");
-    } catch (err: any) {
-      setFormError(err?.message || "Failed to sign in as admin.");
+    } catch (err: unknown) {
+      setFormError((err instanceof Error && err.message) || "Failed to sign in as admin.");
     } finally {
       setSubmitting(false);
     }

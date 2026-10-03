@@ -24,7 +24,7 @@ function mockQuery(rows: unknown[]) {
     resolve({ data: rows, error: null });
   // Wrapped: the builder is thenable, and resolving it directly from the async
   // createClient() would make `await` unwrap it into the canned result.
-  (createClient as any).mockResolvedValue({ from: builder.from });
+  (createClient as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ from: builder.from });
   return calls;
 }
 
@@ -131,7 +131,7 @@ describe("getActivePromotionsForBusiness", () => {
   });
 
   it("returns [] on a query error", async () => {
-    (createClient as any).mockResolvedValue({
+    (createClient as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       from: () => ({
         select: () => ({
           eq: () => ({

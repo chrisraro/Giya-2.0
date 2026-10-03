@@ -69,6 +69,50 @@ export type Database = {
           },
         ]
       }
+      analytics_daily_business: {
+        Row: {
+          approved_receipts_count: number
+          business_id: string
+          created_at: string
+          date: string
+          id: string
+          points_awarded: number
+          points_redeemed: number
+          total_gmv_centavos: number
+          total_receipts_count: number
+        }
+        Insert: {
+          approved_receipts_count?: number
+          business_id: string
+          created_at?: string
+          date: string
+          id?: string
+          points_awarded?: number
+          points_redeemed?: number
+          total_gmv_centavos?: number
+          total_receipts_count?: number
+        }
+        Update: {
+          approved_receipts_count?: number
+          business_id?: string
+          created_at?: string
+          date?: string
+          id?: string
+          points_awarded?: number
+          points_redeemed?: number
+          total_gmv_centavos?: number
+          total_receipts_count?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "analytics_daily_business_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       audit_logs: {
         Row: {
           action: string
@@ -784,6 +828,85 @@ export type Database = {
             columns: ["referred_by"]
             isOneToOne: false
             referencedRelation: "consumers"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      enterprise_sso_configs: {
+        Row: {
+          business_id: string
+          certificate_fingerprint: string | null
+          created_at: string
+          domain: string
+          entity_id: string
+          id: string
+          is_active: boolean
+          metadata_url: string | null
+          provider: string
+          sso_url: string
+          updated_at: string
+        }
+        Insert: {
+          business_id: string
+          certificate_fingerprint?: string | null
+          created_at?: string
+          domain: string
+          entity_id: string
+          id?: string
+          is_active?: boolean
+          metadata_url?: string | null
+          provider: string
+          sso_url: string
+          updated_at?: string
+        }
+        Update: {
+          business_id?: string
+          certificate_fingerprint?: string | null
+          created_at?: string
+          domain?: string
+          entity_id?: string
+          id?: string
+          is_active?: boolean
+          metadata_url?: string | null
+          provider?: string
+          sso_url?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "enterprise_sso_configs_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      favorites: {
+        Row: {
+          business_id: string
+          created_at: string
+          id: string
+          user_id: string
+        }
+        Insert: {
+          business_id: string
+          created_at?: string
+          id?: string
+          user_id: string
+        }
+        Update: {
+          business_id?: string
+          created_at?: string
+          id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "favorites_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
             referencedColumns: ["id"]
           },
         ]
@@ -1885,6 +2008,44 @@ export type Database = {
           },
         ]
       }
+      qr_codes: {
+        Row: {
+          business_id: string
+          code: string
+          created_at: string
+          id: string
+          scan_count: number
+          target_id: string | null
+          target_type: string
+        }
+        Insert: {
+          business_id: string
+          code: string
+          created_at?: string
+          id?: string
+          scan_count?: number
+          target_id?: string | null
+          target_type: string
+        }
+        Update: {
+          business_id?: string
+          code?: string
+          created_at?: string
+          id?: string
+          scan_count?: number
+          target_id?: string | null
+          target_type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "qr_codes_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       receipt_line_items: {
         Row: {
           business_id: string | null
@@ -2737,6 +2898,14 @@ export type Database = {
           p_type: string
         }
         Returns: string
+      }
+      purge_all_businesses: {
+        Args: { p_actor_id: string; p_reason: string }
+        Returns: undefined
+      }
+      purge_business: {
+        Args: { p_actor_id: string; p_business_id: string; p_reason: string }
+        Returns: undefined
       }
       reject_business_verification: {
         Args: {

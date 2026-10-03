@@ -13,7 +13,7 @@ export async function generateTrendNarrative(
 ): Promise<TrendNarrativeDTO> {
   const supabase = await createClient();
 
-  const { data: records } = await (supabase as any)
+  const { data: records } = await supabase
     .from("analytics_daily_business")
     .select("*")
     .eq("business_id", businessId)
@@ -32,8 +32,9 @@ export async function generateTrendNarrative(
     };
   }
 
-  const todayGmv = Number(records[0].total_gmv_centavos);
-  const yesterdayGmv = Number(records[1].total_gmv_centavos);
+  const [today, yesterday] = records;
+  const todayGmv = Number(today?.total_gmv_centavos ?? 0);
+  const yesterdayGmv = Number(yesterday?.total_gmv_centavos ?? 0);
   const diff = todayGmv - yesterdayGmv;
   const pct = yesterdayGmv > 0 ? Math.round((diff / yesterdayGmv) * 100) : 0;
 

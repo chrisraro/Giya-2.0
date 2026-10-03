@@ -8,7 +8,7 @@ export async function isFavorite(businessId: string): Promise<boolean> {
 
   if (!user) return false;
 
-  const { data, error } = await (supabase as any)
+  const { data, error } = await supabase
     .from("favorites")
     .select("id")
     .eq("user_id", user.id)
@@ -30,7 +30,7 @@ export async function addFavorite(businessId: string): Promise<{ ok: boolean; me
 
   if (!user) return { ok: false, message: "Unauthenticated" };
 
-  const { error } = await (supabase as any).from("favorites").insert({
+  const { error } = await supabase.from("favorites").insert({
     user_id: user.id,
     business_id: businessId,
   });
@@ -47,7 +47,7 @@ export async function removeFavorite(businessId: string): Promise<{ ok: boolean;
 
   if (!user) return { ok: false, message: "Unauthenticated" };
 
-  const { error } = await (supabase as any)
+  const { error } = await supabase
     .from("favorites")
     .delete()
     .eq("user_id", user.id)
@@ -67,7 +67,7 @@ export async function listMyFavorites(): Promise<
 
   if (!user) return [];
 
-  const { data, error } = await (supabase as any)
+  const { data, error } = await supabase
     .from("favorites")
     .select(`
       id,
@@ -101,8 +101,8 @@ export async function listMyFavorites(): Promise<
   }
 
   return (data ?? [])
-    .filter((row: any) => Boolean(row.businesses))
-    .map((row: any) => ({
+    .filter((row) => Boolean(row.businesses))
+    .map((row) => ({
       id: row.id,
       businessId: row.business_id,
       slug: row.businesses.slug,

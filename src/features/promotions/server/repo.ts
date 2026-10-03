@@ -72,7 +72,7 @@ export async function getActivePromotionsForBusiness(businessId: string): Promis
   // The schedule window (doc 34 section 3) is applied by the shared predicate:
   // status alone made scheduled and expired promotions render as "Active".
   const now = new Date();
-  return data.filter((row: any) => isLive(row, now)).map((row: any) => ({
+  return data.filter((row) => isLive(row, now)).map((row) => ({
     id: row.id,
     campaignId: row.campaign_id,
     businessId: row.business_id,
@@ -132,7 +132,7 @@ export async function listPublicPromotions(limit = 10): Promise<PublicPromotion[
     return [];
   }
 
-  return data.filter((row: any) => isLive(row, now)).map((row: any) => ({
+  return data.filter((row) => isLive(row, now)).map((row) => ({
     id: row.id,
     campaignId: row.campaign_id,
     businessId: row.business_id,

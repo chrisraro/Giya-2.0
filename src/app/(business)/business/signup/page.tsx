@@ -89,8 +89,8 @@ export default function BusinessSignupPage() {
       } else {
         router.push("/business/pending-approval");
       }
-    } catch (err: any) {
-      setFormError(err?.message || "Failed to create business account.");
+    } catch (err: unknown) {
+      setFormError((err instanceof Error && err.message) || "Failed to create business account.");
     } finally {
       setSubmitting(false);
     }
