@@ -98,8 +98,8 @@ export default function BusinessLoginPage() {
       // a claim-free read this page then acted on incorrectly, was strictly
       // worse than deciding it once on the server.
       router.push("/business/dashboard");
-    } catch (err: any) {
-      setFormError(err?.message || "Failed to sign in to merchant portal.");
+    } catch (err: unknown) {
+      setFormError((err instanceof Error && err.message) || "Failed to sign in to merchant portal.");
     } finally {
       setSubmitting(false);
     }
@@ -179,7 +179,7 @@ export default function BusinessLoginPage() {
 
         <div className="mt-4 flex flex-col items-center gap-2 text-center">
           <Link href="/business/signup" className="text-label-m text-primary hover:underline font-medium">
-            Don't have a merchant account? Register business →
+            Don&apos;t have a merchant account? Register business →
           </Link>
           <Link href="/login" className="text-label-s text-on-surface-variant hover:underline">
             Consumer Sign In →

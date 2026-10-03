@@ -346,7 +346,7 @@ export async function getCampaignPayloadPresence(
 ): Promise<PayloadPresence> {
   const supabase = await createClient();
 
-  const [{ data: promotion }, { data: rewards }, { data: loyaltyProgram }, { data: pointsRules }] =
+  const [promotionRes, rewardsRes, loyaltyRes, pointsRulesRes] =
     await Promise.all([
       supabase
         .from("promotions")
@@ -378,9 +378,19 @@ export async function getCampaignPayloadPresence(
         .is("deleted_at", null),
     ]);
 
+  // A failed read would report "nothing attached" and block activation with a
+  // misleading "add a reward" message.
+  for (const res of [promotionRes, rewardsRes, loyaltyRes, pointsRulesRes]) {
+    if (res.error) throw new Error(`getCampaignPayloadPresence: read failed: ${res.error.message}`);
+  }
+  const { data: promotion } = promotionRes;
+  const { data: rewards } = rewardsRes;
+  const { data: loyaltyProgram } = loyaltyRes;
+  const { data: pointsRules } = pointsRulesRes;
+
   let hasLoyaltyPrize = false;
   if (loyaltyProgram) {
-    const { data: prize } = await supabase
+    const { data: prize, error: prizeError } = await supabase
       .from("rewards")
       .select("id")
       .eq("id", loyaltyProgram.reward_id)
@@ -388,6 +398,7 @@ export async function getCampaignPayloadPresence(
       .eq("is_active", true)
       .is("deleted_at", null)
       .maybeSingle();
+    if (prizeError) throw new Error(`getCampaignPayloadPresence: prize read failed: ${prizeError.message}`);
     hasLoyaltyPrize = prize !== null;
   }
 
@@ -462,7 +473,7 @@ export async function upsertBaseRule(
 ): Promise<Result<PointsRuleRow>> {
   const supabase = await createClient();
 
-  const { data: existing } = await supabase
+  const { data: existing, error: existingError } = await supabase
     .from("points_rules")
     .select("id")
     .eq("business_id", businessId)
@@ -470,6 +481,10 @@ export async function upsertBaseRule(
     .eq("is_active", true)
     .is("deleted_at", null)
     .maybeSingle();
+
+  // A failed read is not "no rule yet": falling through to the insert would
+  // create a second active base rule next to the one that exists.
+  if (existingError) throw new Error(`upsertBaseRule: existing-rule read failed: ${existingError.message}`);
 
   const patch = baseRulePatch(input);
 

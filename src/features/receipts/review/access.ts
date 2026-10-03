@@ -81,18 +81,22 @@ export const resolveReviewerContext = cache(async function resolveReviewerContex
     .maybeSingle<{ business_id: string; role: string }>();
 
   if (error !== null) {
-    // Fail closed: a membership read that errored proves nothing.
-    console.error("[receipts/review] could not resolve the reviewer's membership", error);
-    return null;
+    // Still fails closed (nothing is granted) but is NOT "no membership": a
+    // null here is read as "not a reviewer" by the portal and as a refusal by
+    // the actions, so an outage must surface as an error instead.
+    throw new Error(`resolveReviewerContext: membership read failed: ${error.message}`);
   }
   if (membership === null) return null;
 
-  const { data: business } = await supabase
+  const { data: business, error: businessError } = await supabase
     .from("businesses")
     .select("id, name, status")
     .eq("id", membership.business_id)
     .maybeSingle<{ id: string; name: string; status: string }>();
 
+  if (businessError !== null) {
+    throw new Error(`resolveReviewerContext: business read failed: ${businessError.message}`);
+  }
   if (business === null) return null;
 
   // Doc 30 section 2.8: a suspended business is refused here too, not only by

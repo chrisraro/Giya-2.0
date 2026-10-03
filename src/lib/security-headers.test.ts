@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildCsp, buildSecurityHeaders } from "./security-headers";
+import { buildCsp, buildEnforcedCsp, buildSecurityHeaders } from "./security-headers";
 
 const ENV = {
   NEXT_PUBLIC_SUPABASE_URL: "https://abcd1234.supabase.co",
@@ -14,7 +14,7 @@ function header(name: string, env = ENV): string | undefined {
 describe("buildSecurityHeaders", () => {
   it("blocks framing both ways (doc 15: clickjacking on admin/scanner/portal)", () => {
     expect(header("X-Frame-Options")).toBe("DENY");
-    expect(header("Content-Security-Policy-Report-Only")).toContain("frame-ancestors 'none'");
+    expect(header("Content-Security-Policy")).toContain("frame-ancestors 'none'");
   });
 
   it("sets the static hardening headers", () => {
@@ -23,9 +23,25 @@ describe("buildSecurityHeaders", () => {
     expect(header("Strict-Transport-Security")).toBe("max-age=63072000; includeSubDomains; preload");
   });
 
-  it("ships the CSP as report-only, never enforcing, until the audit window closes", () => {
-    expect(header("Content-Security-Policy")).toBeUndefined();
-    expect(header("Content-Security-Policy-Report-Only")).toBeTruthy();
+  it("enforces only the directives that cannot break a legitimate load", () => {
+    expect(header("Content-Security-Policy")).toBe(
+      "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests",
+    );
+    expect(buildEnforcedCsp()).toBe(header("Content-Security-Policy"));
+  });
+
+  it("keeps the full allow-list report-only, with reporting wired to /api/csp-report", () => {
+    const ro = header("Content-Security-Policy-Report-Only") ?? "";
+    for (const d of ["default-src", "script-src", "style-src", "img-src", "connect-src", "frame-src", "font-src", "media-src", "worker-src"]) {
+      expect(ro).toContain(`${d} `);
+    }
+    expect(ro).toContain("report-uri /api/csp-report");
+    expect(ro).toContain("report-to csp");
+    expect(header("Content-Security-Policy")).not.toContain("script-src");
+  });
+
+  it("declares the csp reporting endpoint", () => {
+    expect(header("Reporting-Endpoints")).toBe('csp="/api/csp-report"');
   });
 
   it("allows camera and geolocation for self only, and denies microphone and payment", () => {
@@ -50,11 +66,11 @@ describe("buildCsp", () => {
       .map((d) => d.trim())
       .find((d) => d.startsWith(`${name} `)) ?? "";
 
-  it("defaults to self and forbids plugins and foreign bases/forms", () => {
+  it("defaults to self and leaves the enforced directives to the enforced header", () => {
     expect(directive("default-src")).toBe("default-src 'self'");
-    expect(directive("object-src")).toBe("object-src 'none'");
-    expect(directive("base-uri")).toBe("base-uri 'self'");
-    expect(directive("form-action")).toContain("'self'");
+    for (const d of ["object-src", "base-uri", "form-action", "frame-ancestors"]) {
+      expect(directive(d)).toBe("");
+    }
   });
 
   it("allows Supabase over https and wss (Realtime)", () => {

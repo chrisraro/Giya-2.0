@@ -28,7 +28,7 @@ describe("Enterprise SAML SSO Provider", () => {
       }),
     };
 
-    (createClient as any).mockResolvedValue(mockSupabase);
+    (createClient as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(mockSupabase);
 
     const config = await resolveSamlSsoConfig("alex@acme.com");
     expect(config).not.toBeNull();

@@ -1,5 +1,6 @@
 import { isLiveAt } from "@/features/campaigns/lifecycle";
 import { getBaseRule } from "@/features/campaigns/server/repo";
+import { READ_FAILED_MESSAGE } from "@/lib/actions/read-failure";
 
 import { toEarningRuleShape, type EarningRuleShape } from "../economics";
 import type { CreateRewardInput, UpdateRewardInput } from "../schemas";
@@ -164,11 +165,22 @@ export async function loadCatalog(
   // The base rule is read alongside the catalog, not instead of it: a missing
   // rule is a legitimate state (it is what the "nobody can earn points yet"
   // sentence is for), so it never turns the whole page into a read failure.
-  const [rewardsResult, campaignsResult, baseRule] = await Promise.all([
-    repo.listRewards(businessId),
-    repo.listCampaigns(businessId),
-    getBaseRule(businessId),
-  ]);
+  // `getBaseRule` throws on a failed read, which is a different thing from a
+  // missing rule; it becomes the same typed read failure as the two reads
+  // below, the way every sibling in this module answers.
+  let baseRule: Awaited<ReturnType<typeof getBaseRule>>;
+  let rewardsResult: Awaited<ReturnType<typeof repo.listRewards>>;
+  let campaignsResult: Awaited<ReturnType<typeof repo.listCampaigns>>;
+  try {
+    [rewardsResult, campaignsResult, baseRule] = await Promise.all([
+      repo.listRewards(businessId),
+      repo.listCampaigns(businessId),
+      getBaseRule(businessId),
+    ]);
+  } catch (error: unknown) {
+    console.error("[rewards/catalog] the base-rule read failed", error);
+    return { ok: false, message: READ_FAILED_MESSAGE };
+  }
 
   if (rewardsResult.error || campaignsResult.error) {
     return {

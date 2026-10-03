@@ -17,7 +17,7 @@ describe("Favorites Repo", () => {
       maybeSingle: vi.fn().mockResolvedValue({ data: { id: "fav-1" }, error: null }),
     };
 
-    (createClient as any).mockResolvedValue(mockSupabase);
+    (createClient as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(mockSupabase);
 
     const res = await isFavorite("biz-1");
     expect(res).toBe(true);
@@ -30,7 +30,7 @@ describe("Favorites Repo", () => {
       insert: vi.fn().mockResolvedValue({ error: null }),
     };
 
-    (createClient as any).mockResolvedValue(mockSupabase);
+    (createClient as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(mockSupabase);
 
     const res = await addFavorite("biz-1");
     expect(res.ok).toBe(true);
@@ -41,7 +41,7 @@ describe("Favorites Repo", () => {
       eq: vi.fn(),
     };
     queryBuilder.eq.mockReturnValue(queryBuilder);
-    (queryBuilder as any).then = (resolve: any) => resolve({ error: null });
+    (queryBuilder as unknown as { then: unknown }).then = (resolve: (v: unknown) => unknown) => resolve({ error: null });
 
     const mockSupabase = {
       auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u-1" } } }) },
@@ -50,7 +50,7 @@ describe("Favorites Repo", () => {
       }),
     };
 
-    (createClient as any).mockResolvedValue(mockSupabase);
+    (createClient as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(mockSupabase);
 
     const res = await removeFavorite("biz-1");
     expect(res.ok).toBe(true);

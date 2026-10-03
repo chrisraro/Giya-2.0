@@ -30,7 +30,7 @@ describe("AI Campaign Suggestions", () => {
       }),
     };
 
-    (createClient as any).mockResolvedValue(mockSupabase);
+    (createClient as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(mockSupabase);
 
     const result = await generateCampaignSuggestions("biz-1");
     expect(result.ok).toBe(true);

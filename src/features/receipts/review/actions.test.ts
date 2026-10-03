@@ -18,11 +18,12 @@ const mocks = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
 }));
 
+vi.mock("../server/alias", () => ({ learnMerchantAlias: vi.fn() }));
 vi.mock("../server/review", () => ({ reviewReceipt: mocks.reviewReceipt }));
 vi.mock("./access", () => ({ resolveReviewerContext: mocks.resolveReviewerContext }));
 vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidatePath }));
 
-import { approveReceiptAction, rejectReceiptAction } from "./actions";
+import { approveReceiptAction, learnMerchantAliasAction, rejectReceiptAction } from "./actions";
 
 const RECEIPT_ID = "01980000-0000-7000-8000-000000000001";
 const MANAGER_ID = "01980000-0000-7000-8000-0000000000a1";
@@ -226,6 +227,26 @@ describe("rejectReceiptAction", () => {
     const result = await rejectReceiptAction({ receiptId: RECEIPT_ID, reason: "unreadable" });
 
     expect(result).toMatchObject({ ok: false, code: "NOT_ALLOWED" });
+    expect(mocks.reviewReceipt).not.toHaveBeenCalled();
+  });
+});
+
+// A reviewer lookup that THROWS (the membership read failed) must stay a typed
+// result: an action never crashes, and it must not claim "not allowed" either.
+describe("reviewer lookup read failures", () => {
+  beforeEach(() => {
+    mocks.resolveReviewerContext.mockRejectedValue(new Error("connection reset"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  it.each([
+    ["approveReceiptAction", () => approveReceiptAction({ receiptId: RECEIPT_ID, fields: FIELDS })],
+    ["rejectReceiptAction", () => rejectReceiptAction({ receiptId: RECEIPT_ID, reason: "illegible" })],
+    ["learnMerchantAliasAction", () => learnMerchantAliasAction({ receiptId: RECEIPT_ID })],
+  ])("%s answers with a typed dependency failure", async (_name, call) => {
+    const result = await call();
+
+    expect(result).toMatchObject({ ok: false, code: "DEPENDENCY_UNAVAILABLE" });
     expect(mocks.reviewReceipt).not.toHaveBeenCalled();
   });
 });

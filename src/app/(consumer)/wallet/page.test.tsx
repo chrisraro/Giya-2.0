@@ -122,6 +122,18 @@ describe("wallet balances failure state", () => {
     consoleError.mockRestore();
   });
 
+  it("logs and degrades the processing-receipts strip instead of failing the whole wallet", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.listMyReceipts.mockRejectedValue(new Error("connection reset"));
+
+    render(await WalletPage());
+
+    expect(screen.getByText("Activity")).toBeInTheDocument();
+    expect(consoleError).toHaveBeenCalled();
+
+    consoleError.mockRestore();
+  });
+
   it("never shows the failure copy for a genuinely empty (successful) balances read", async () => {
     mocks.getMyBalances.mockResolvedValue([]);
 

@@ -135,7 +135,7 @@ export type PublicReward = {
 export async function getBusinessBySlug(slug: string): Promise<PublicBusiness | null> {
   const supabase = await createClient();
 
-  const { data: business } = await supabase
+  const { data: business, error: businessError } = await supabase
     .from("businesses")
     // One literal string, deliberately not a concatenation: supabase-js infers
     // the row type from the select as a string LITERAL, and splitting it over
@@ -148,23 +148,28 @@ export async function getBusinessBySlug(slug: string): Promise<PublicBusiness | 
     .is("deleted_at", null)
     .maybeSingle();
 
+  // A failed read must not become a 404 for a shop that exists.
+  if (businessError) throw new Error(`getBusinessBySlug: read failed: ${businessError.message}`);
   if (!business) return null;
 
   let cityName: string | null = null;
   if (business.city_id) {
-    const { data: city } = await supabase
+    const { data: city, error: cityError } = await supabase
       .from("ref_cities")
       .select("name")
       .eq("id", business.city_id)
       .maybeSingle();
+    // Cosmetic label: log and render unlabeled.
+    if (cityError) console.error("[public-repo] city name lookup failed", cityError);
     cityName = city?.name ?? null;
   }
 
-  const { data: businessType } = await supabase
+  const { data: businessType, error: typeError } = await supabase
     .from("ref_business_types")
     .select("name")
     .eq("id", business.business_type_id)
     .maybeSingle();
+  if (typeError) console.error("[public-repo] business type lookup failed", typeError);
 
   return {
     id: business.id,
@@ -329,7 +334,7 @@ async function refNames(
 export async function getPublicMenu(businessId: string): Promise<PublicMenuGroup[]> {
   const supabase = await createClient();
 
-  const { data: categories } = await supabase
+  const { data: categories, error: categoriesError } = await supabase
     .from("menu_categories")
     .select("id, name, description")
     .eq("business_id", businessId)
@@ -337,7 +342,7 @@ export async function getPublicMenu(businessId: string): Promise<PublicMenuGroup
     .is("deleted_at", null)
     .order("sort", { ascending: true });
 
-  const { data: products } = await supabase
+  const { data: products, error: productsError } = await supabase
     .from("products")
     .select("id, name, description, base_price_centavos, status, category_id")
     .eq("business_id", businessId)
@@ -345,13 +350,17 @@ export async function getPublicMenu(businessId: string): Promise<PublicMenuGroup
     .is("deleted_at", null)
     .order("sort", { ascending: true });
 
+  // The menu is the page; an outage must not read as "no menu".
+  if (categoriesError) throw new Error(`getPublicMenu: categories read failed: ${categoriesError.message}`);
+  if (productsError) throw new Error(`getPublicMenu: products read failed: ${productsError.message}`);
+
   const visibleProductIds = (products ?? []).map((product) => product.id);
 
   let variantsByProduct = new Map<string, PublicVariant[]>();
   let addonsByProduct = new Map<string, PublicAddon[]>();
 
   if (visibleProductIds.length > 0) {
-    const [{ data: variants }, { data: addons }] = await Promise.all([
+    const [{ data: variants, error: variantsError }, { data: addons, error: addonsError }] = await Promise.all([
       supabase
         .from("product_variants")
         .select("id, name, price_centavos, product_id")
@@ -367,6 +376,12 @@ export async function getPublicMenu(businessId: string): Promise<PublicMenuGroup
         .is("deleted_at", null)
         .order("sort", { ascending: true }),
     ]);
+
+    if (variantsError || addonsError) {
+      throw new Error(
+        `getPublicMenu: variants/addons read failed: ${(variantsError ?? addonsError)?.message}`,
+      );
+    }
 
     variantsByProduct = groupBy(variants ?? [], (variant) => variant.product_id, (variant) => ({
       id: variant.id,
@@ -432,15 +447,18 @@ export async function getPublicRewards(businessId: string): Promise<PublicReward
     .eq("is_active", true)
     .is("deleted_at", null);
 
-  if (error || !rewards || rewards.length === 0) return [];
+  if (error) throw new Error(`getPublicRewards: rewards read failed: ${error.message}`);
+  if (!rewards || rewards.length === 0) return [];
 
   const campaignIds = Array.from(new Set(rewards.map((reward) => reward.campaign_id)));
-  const { data: campaigns } = await supabase
+  const { data: campaigns, error: campaignsError } = await supabase
     .from("campaigns")
     .select("id, starts_at, ends_at")
     .in("id", campaignIds)
     .eq("status", "active")
     .is("deleted_at", null);
+
+  if (campaignsError) throw new Error(`getPublicRewards: campaigns read failed: ${campaignsError.message}`);
 
   const now = new Date();
   const liveCampaignIds = new Set(

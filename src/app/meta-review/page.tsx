@@ -12,7 +12,7 @@ import { getFacebookPageEmbed, getMetaAppIdForSdk } from "@/lib/integrations/met
 // code path, not a mock.
 //
 // Public by construction: it lives outside every route group with an auth
-// layout, and src/middleware.ts gates only the onboarding, /business/*,
+// layout, and src/proxy.ts gates only the onboarding, /business/*,
 // /admin and listed consumer routes. Not linked from any nav, and noindex.
 
 const META_PAGE_URL = "https://www.facebook.com/Meta";

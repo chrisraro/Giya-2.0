@@ -442,6 +442,14 @@ describe("writes", () => {
 // -------------------------------------------------------------------- reads
 
 describe("loadCatalog", () => {
+  it("returns a typed failure when the base-rule read errors", async () => {
+    table("rewards").__result = { data: [], error: null };
+    table("campaigns").__result = { data: [], error: null };
+    table("points_rules").__result = { data: null, error: { message: "boom" } };
+
+    await expect(service.loadCatalog(OWN_BUSINESS)).resolves.toMatchObject({ ok: false });
+  });
+
   it("reports a read failure rather than an empty catalog", async () => {
     table("rewards").__result = { data: null, error: { message: "boom" } };
 

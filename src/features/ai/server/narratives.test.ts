@@ -35,7 +35,7 @@ describe("AI Trend Narrative Generator", () => {
       }),
     };
 
-    (createClient as any).mockResolvedValue(mockSupabase);
+    (createClient as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(mockSupabase);
 
     const narrative = await generateTrendNarrative("biz-1", "taglish");
     expect(narrative.headline).toBeDefined();

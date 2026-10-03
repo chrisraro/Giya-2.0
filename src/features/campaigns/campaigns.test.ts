@@ -918,6 +918,22 @@ describe("setCampaignStatus optimistic concurrency guard", () => {
 // ------------------------------------------------------------- upsertBaseRule
 
 describe("actions: upsertBaseRule", () => {
+  it("returns a typed failure, and writes nothing, when the existing-rule read errors", async () => {
+    // A swallowed read error looks like "no rule yet" and would insert a
+    // duplicate base rule next to the one that exists.
+    table("points_rules").maybeSingle = vi.fn(async () => ({ data: null, error: { message: "boom" } }));
+
+    const result = await actions.upsertBaseRule({
+      ruleType: "fixed_per_visit",
+      fixedPoints: 5,
+      rounding: "floor",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(table("points_rules").insert).not.toHaveBeenCalled();
+    expect(table("points_rules").update).not.toHaveBeenCalled();
+  });
+
   it("inserts a new base rule when none exists yet", async () => {
     table("points_rules").maybeSingle = vi.fn(async () => ({ data: null, error: null }));
     table("points_rules").__result = {

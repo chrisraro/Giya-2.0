@@ -96,7 +96,15 @@ export async function GET(
   // resolveStaffContext reads the caller's membership under their OWN session
   // and returns null for no session, no active membership, or a role outside
   // the owner/manager pair.
-  const staff = await resolveStaffContext(BUSINESS_SETTINGS_ROLES);
+  let staff: Awaited<ReturnType<typeof resolveStaffContext>>;
+  try {
+    staff = await resolveStaffContext(BUSINESS_SETTINGS_ROLES);
+  } catch (error: unknown) {
+    // A failed membership read is not "denied": the merchant did nothing wrong
+    // and should be told to retry. Nothing is exchanged either way.
+    console.error("[integrations/meta/callback] membership read failed", error);
+    return back(request, { meta: "unavailable" });
+  }
   if (staff === null || staff.businessId !== businessId) {
     // The two cases are collapsed on purpose: "you are not signed in" and
     // "that is not your business" are the same answer to someone probing.

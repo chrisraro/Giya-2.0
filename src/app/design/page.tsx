@@ -35,7 +35,7 @@ const TYPE_RAMP = [
  * gallery of every component, on one screen in both themes. It is how colour
  * and type regressions get caught, and it is DEVELOPMENT ONLY.
  *
- * IT USED TO BE PUBLICLY LIVE. `src/middleware.ts`'s matcher excludes
+ * IT USED TO BE PUBLICLY LIVE. `src/proxy.ts`'s matcher excludes
  * `_next`, `favicon` and `brand/` and nothing else, so this internal tool was
  * served to anyone who guessed the URL on the production deployment.
  *

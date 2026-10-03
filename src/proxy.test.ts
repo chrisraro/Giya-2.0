@@ -1,22 +1,22 @@
 import { NextResponse } from "next/server";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
-// `./middleware` imports `@/lib/supabase/middleware`, which in turn imports
+// `./proxy` imports `@/lib/supabase/middleware`, which in turn imports
 // `@/lib/env` and throws at module-evaluation time if the required
 // NEXT_PUBLIC_* vars aren't set (see env.test.ts). Stub them before the
 // dynamic import so evaluation succeeds regardless of the host shell's
 // environment.
-let hasBusinessMembership: (typeof import("./middleware"))["hasBusinessMembership"];
-let copySessionCookies: (typeof import("./middleware"))["copySessionCookies"];
+let hasBusinessMembership: (typeof import("./proxy"))["hasBusinessMembership"];
+let copySessionCookies: (typeof import("./proxy"))["copySessionCookies"];
 
 beforeAll(async () => {
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co");
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "sb_publishable_abcdefghijklmnopqrstuvwxyz");
-  ({ hasBusinessMembership, copySessionCookies } = await import("./middleware"));
+  ({ hasBusinessMembership, copySessionCookies } = await import("./proxy"));
 });
 
 // hasBusinessMembership is no longer used to gate /business/* portal
-// routes in middleware() itself (see src/middleware.ts comment above the
+// routes in proxy() itself (see src/proxy.ts comment above the
 // export); the portal layout does the authoritative business_staff check
 // server-side instead. There were no middleware-level membership-redirect
 // tests here to convert or remove; this file only ever unit tested the

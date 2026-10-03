@@ -20,7 +20,7 @@ export async function resolveSamlSsoConfig(
   const domain = parts[1].toLowerCase();
   const supabase = await createClient();
 
-  const { data, error } = await (supabase as any)
+  const { data, error } = await supabase
     .from("enterprise_sso_configs")
     .select("id, business_id, domain, provider, entity_id, sso_url")
     .eq("domain", domain)
@@ -33,7 +33,8 @@ export async function resolveSamlSsoConfig(
     id: data.id,
     businessId: data.business_id,
     domain: data.domain,
-    provider: data.provider,
+    // text in the generated types; the column CHECK (0073) pins it to this union.
+    provider: data.provider as SamlSsoConfigDTO["provider"],
     entityId: data.entity_id,
     ssoUrl: data.sso_url,
   };

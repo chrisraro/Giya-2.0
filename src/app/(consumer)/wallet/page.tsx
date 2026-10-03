@@ -172,7 +172,14 @@ export default async function WalletPage() {
     // the note at the top of WalletReceiptActivity for why that is the better
     // source of truth than an optimistic local entry.
     user
-      ? listMyReceipts({ userId: user.id, limit: WALLET_RECEIPT_LIMIT, cursor: null })
+      ? listMyReceipts({ userId: user.id, limit: WALLET_RECEIPT_LIMIT, cursor: null }).catch(
+          (error: unknown) => {
+            // Cosmetic strip (balances and ledger are the page): degrade to
+            // "nothing processing" and say so, rather than fail the wallet.
+            console.error("[wallet] failed to load processing receipts, hiding the strip", error);
+            return { rows: [] };
+          },
+        )
       : Promise.resolve({ rows: [] }),
   ]);
   const balances = balancesResult.balances;

@@ -23,9 +23,12 @@ const BUSINESS = "11111111-1111-4111-8111-111111111111";
 const OTHER_BUSINESS = "22222222-2222-4222-8222-222222222222";
 const USER = "aaaaaaaa-1111-4111-8111-111111111111";
 
-const staff = vi.hoisted(() => ({ context: null as unknown }));
+const staff = vi.hoisted(() => ({ context: null as unknown, throws: false }));
 vi.mock("@/features/businesses/server/resolve-owner-business", () => ({
-  resolveStaffContext: async () => staff.context,
+  resolveStaffContext: async () => {
+    if (staff.throws) throw new Error("readMembership: read failed");
+    return staff.context;
+  },
 }));
 
 const stateMock = vi.hoisted(() => ({ verifyState: vi.fn() }));
@@ -81,6 +84,16 @@ beforeEach(() => {
 });
 
 describe("session and tenancy", () => {
+  it("answers 'unavailable' - not 'denied', not a crash - when the membership read fails", async () => {
+    staff.throws = true;
+
+    const response = await GET(request({ code: "c", state: "s" }), params());
+
+    expect(redirectTarget(response).searchParams.get("meta")).toBe("unavailable");
+    expect(serviceMock.completeCallback).not.toHaveBeenCalled();
+    staff.throws = false;
+  });
+
   it("refuses a caller with no session, without checking any state", async () => {
     staff.context = null;
 

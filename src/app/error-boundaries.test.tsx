@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import AdminError from "@/app/(admin)/admin/error";
 import AuthError from "@/app/(auth)/error";
 import PortalError from "@/app/(business)/business/(portal)/error";
+import BusinessError from "@/app/(business)/business/error";
 import ConsumerError from "@/app/(consumer)/error";
 import MarketingError from "@/app/(marketing)/error";
 import GlobalError from "@/app/global-error";
@@ -20,6 +21,9 @@ beforeEach(() => {
 const cases = [
   ["consumer", ConsumerError, "/home"],
   ["business portal", PortalError, "/business/dashboard"],
+  // Outer boundary catches a throwing (portal)/layout.tsx; it must NOT link to
+  // the dashboard, which sits behind that same layout.
+  ["business (outer)", BusinessError, "/business/login"],
   ["admin", AdminError, "/admin"],
   ["auth", AuthError, "/login"],
   ["marketing", MarketingError, "/"],
