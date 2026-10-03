@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- qr_codes is not in the generated Database types (0069 never regenerated them) */
 import { NextResponse } from "next/server";
 import { createServiceRoleClient } from "@/lib/supabase/service";
 
@@ -21,14 +20,17 @@ export async function GET(
   const supabase = createServiceRoleClient();
   if (supabase === null) return discover();
 
-  const { data, error } = await (supabase as any)
+  const { data, error } = await supabase
     .from("qr_codes")
     .select("code, business_id, target_type, target_id, businesses!inner ( slug, status )")
     .eq("code", code)
     .eq("businesses.status", "active")
     .maybeSingle();
 
-  const business = (data as any)?.businesses;
+  // An !inner many-to-one embed is a single object; normalise defensively in
+  // case the generated relationship metadata ever types it as an array.
+  const embedded = data?.businesses;
+  const business = Array.isArray(embedded) ? embedded[0] : embedded;
   if (error || !data || business?.status !== "active" || !business?.slug) {
     return discover();
   }

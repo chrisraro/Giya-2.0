@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- qr_codes is not in the generated Database types (0069 never regenerated them) */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GET } from "./route";
 
@@ -27,7 +26,8 @@ function client(result: { data: unknown; error: unknown }) {
     eq: vi.fn().mockReturnThis(),
     maybeSingle: vi.fn().mockResolvedValue(result),
   };
-  (createServiceRoleClient as any).mockReturnValue(chain);
+  // The fake only implements the query-builder calls the route makes.
+  vi.mocked(createServiceRoleClient).mockReturnValue(chain as unknown as ReturnType<typeof createServiceRoleClient>);
   return chain;
 }
 
@@ -72,7 +72,7 @@ describe("QR Resolver Route", () => {
   });
 
   it("redirects to discover when no service credential is configured", async () => {
-    (createServiceRoleClient as any).mockReturnValue(null);
+    vi.mocked(createServiceRoleClient).mockReturnValue(null);
     const res = await call("CODE4");
     expect(loc(res)?.endsWith(DISCOVER)).toBe(true);
   });
