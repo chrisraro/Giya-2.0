@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import AdminError from "@/app/(admin)/admin/error";
 import AuthError from "@/app/(auth)/error";
 import PortalError from "@/app/(business)/business/(portal)/error";
+import BusinessError from "@/app/(business)/business/error";
 import ConsumerError from "@/app/(consumer)/error";
 import MarketingError from "@/app/(marketing)/error";
 import GlobalError from "@/app/global-error";
