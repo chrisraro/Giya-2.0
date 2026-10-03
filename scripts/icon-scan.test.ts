@@ -24,6 +24,18 @@ describe("material symbols subset", () => {
     expect(list).toEqual([...new Set(list)].sort());
   });
 
+  // Regression: the landing-page FAQ rendered the literal text "expand_more".
+  // `expand_more` is a ligature ALIAS the font draws but that
+  // material-symbols/index.d.ts does not list, so a catalogue read from the
+  // .d.ts made the scanner drop it and the subset shipped without its glyph.
+  it("knows alias ligatures the TypeScript list omits", () => {
+    expect(loadCatalogue(root).has("expand_more")).toBe(true);
+  });
+
+  it("keeps the FAQ chevron in the subset", () => {
+    expect(readCommittedList(root)).toContain("expand_more");
+  });
+
   it("ships the subset font file", () => {
     expect(existsSync(join(root, "public/fonts/material-symbols-rounded-subset.woff2"))).toBe(true);
   });

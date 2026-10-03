@@ -15,6 +15,12 @@ import { join } from "node:path";
 
 export const ICON_LIST_PATH = "scripts/material-symbols-used.txt";
 
+// Every ligature the FONT can draw, dumped from its GSUB table by
+// `subset-icons.py --catalogue` and committed. NOT material-symbols/index.d.ts:
+// that list omits alias ligatures (`expand_more` among them), so the scanner
+// dropped the landing-page FAQ chevron and it rendered as the word itself.
+export const CATALOGUE_PATH = "scripts/material-symbols-catalogue.txt";
+
 const SKIP_DIRS = new Set(["node_modules", ".next", ".claude", ".git"]);
 
 function walk(dir: string, out: string[]): void {
@@ -28,10 +34,12 @@ function walk(dir: string, out: string[]): void {
 }
 
 export function loadCatalogue(root: string): Set<string> {
-  const dts = readFileSync(join(root, "node_modules/material-symbols/index.d.ts"), "utf8");
-  const names = new Set<string>();
-  for (const m of dts.matchAll(/^\s*"([a-z0-9_]+)",?$/gm)) names.add(m[1]!);
-  return names;
+  return new Set(
+    readFileSync(join(root, CATALOGUE_PATH), "utf8")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#")),
+  );
 }
 
 export function scanUsedIcons(root: string): string[] {
