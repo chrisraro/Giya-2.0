@@ -172,7 +172,8 @@ export async function middleware(request: NextRequest) {
 export const config = {
   // Static assets and metadata files never carry or need a session; running
   // middleware on them only added latency. `.webmanifest` is the PWA manifest.
+  // /api/csp-report is anonymous telemetry that must never pay for an auth round trip.
   matcher: [
-    "/((?!_next/static|_next/image|favicon|brand/|fonts/|manifest\\.webmanifest|robots\\.txt|sitemap\\.xml|.*\\.(?:svg|png|jpg|jpeg|webp|ico|woff2)$).*)",
+    "/((?!_next/static|_next/image|api/csp-report|favicon|brand/|fonts/|manifest\\.webmanifest|robots\\.txt|sitemap\\.xml|.*\\.(?:svg|png|jpg|jpeg|webp|ico|woff2)$).*)",
   ],
 };
