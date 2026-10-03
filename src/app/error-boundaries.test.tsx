@@ -20,6 +20,9 @@ beforeEach(() => {
 const cases = [
   ["consumer", ConsumerError, "/home"],
   ["business portal", PortalError, "/business/dashboard"],
+  // Outer boundary catches a throwing (portal)/layout.tsx; it must NOT link to
+  // the dashboard, which sits behind that same layout.
+  ["business (outer)", BusinessError, "/business/login"],
   ["admin", AdminError, "/admin"],
   ["auth", AuthError, "/login"],
   ["marketing", MarketingError, "/"],
