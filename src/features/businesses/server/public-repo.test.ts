@@ -48,6 +48,8 @@ beforeEach(() => {
     products: mocks.makeBuilder(),
     product_variants: mocks.makeBuilder(),
     product_addons: mocks.makeBuilder(),
+    rewards: mocks.makeBuilder(),
+    campaigns: mocks.makeBuilder(),
   };
   mocks.from.mockImplementation((name: string) => table(name));
 });
@@ -545,5 +547,66 @@ describe("read failures are errors, not empty results", () => {
     expect(rows[0]?.businessTypeName).toBeNull();
     expect(logged).toHaveBeenCalled();
     logged.mockRestore();
+  });
+
+  it("getBusinessBySlug throws when the business read errors (not a 404)", async () => {
+    table("businesses").__result = { data: null, error: { message: "connection reset" } };
+    await expect(repo.getBusinessBySlug("kape-diaria")).rejects.toThrow("getBusinessBySlug");
+  });
+
+  it("getBusinessBySlug logs and renders unlabeled when the city/type name lookups fail", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    table("businesses").__result = {
+      data: {
+        id: "b1", slug: "s", name: "Kape", description: null, logo_url: null, cover_url: null,
+        opening_hours: [], city_id: "c1", business_type_id: "t1", address_line: null, barangay: null,
+        postal_code: null, lat: null, lng: null, socials: {},
+      },
+      error: null,
+    };
+    table("ref_cities").__result = { data: null, error: { message: "connection reset" } };
+    table("ref_business_types").__result = { data: null, error: { message: "connection reset" } };
+
+    const result = await repo.getBusinessBySlug("s");
+
+    expect(result?.cityName).toBeNull();
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it("getPublicRewards throws when the rewards or campaigns read errors (not 'no rewards')", async () => {
+    table("rewards").__result = { data: null, error: { message: "connection reset" } };
+    await expect(repo.getPublicRewards("biz-1")).rejects.toThrow("getPublicRewards");
+
+    table("rewards").__result = {
+      data: [{ id: "r1", campaign_id: "c1", name: "Coffee", description: null, points_cost: 10 }],
+      error: null,
+    };
+    table("campaigns").__result = { data: null, error: { message: "connection reset" } };
+    await expect(repo.getPublicRewards("biz-1")).rejects.toThrow("getPublicRewards");
+  });
+
+  it("getPublicRewards still returns [] for a genuinely empty catalog", async () => {
+    table("rewards").__result = { data: [], error: null };
+    await expect(repo.getPublicRewards("biz-1")).resolves.toEqual([]);
+  });
+
+  it("getPublicMenu throws when the categories or products read errors (not an empty menu)", async () => {
+    table("menu_categories").__result = { data: null, error: { message: "connection reset" } };
+    await expect(repo.getPublicMenu("biz-1")).rejects.toThrow("getPublicMenu");
+
+    table("menu_categories").__result = { data: [], error: null };
+    table("products").__result = { data: null, error: { message: "connection reset" } };
+    await expect(repo.getPublicMenu("biz-1")).rejects.toThrow("getPublicMenu");
+  });
+
+  it("getPublicMenu throws when the variants read errors rather than dropping prices", async () => {
+    table("menu_categories").__result = { data: [], error: null };
+    table("products").__result = {
+      data: [{ id: "p1", name: "Latte", description: null, base_price_centavos: 100, status: "active", category_id: null }],
+      error: null,
+    };
+    table("product_variants").__result = { data: null, error: { message: "connection reset" } };
+    await expect(repo.getPublicMenu("biz-1")).rejects.toThrow("getPublicMenu");
   });
 });

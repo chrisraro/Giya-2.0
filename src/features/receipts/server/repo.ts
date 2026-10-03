@@ -257,7 +257,9 @@ export async function listMyReceipts(args: ListMyReceiptsArgs): Promise<ListMyRe
   }
 
   const { data, error } = await query;
-  if (error || !data) return { rows: [] };
+  // A failed read is an error, not an empty history; only no rows is empty.
+  if (error) throw new Error(`listMyReceipts: read failed: ${error.message}`);
+  if (!data) return { rows: [] };
 
   const rows = data as ReceiptReadRow[];
   const [businessNames, awarded] = await Promise.all([

@@ -1,6 +1,7 @@
 "use server";
 
 import { toErrorMessage } from "@/lib/auth/error-message";
+import { guardReadFailure } from "@/lib/actions/read-failure";
 import { createClient } from "@/lib/supabase/server";
 
 import { resolveStaffContext } from "../server/resolve-owner-business";
@@ -99,7 +100,8 @@ function safeFileName(name: string): string {
 export async function uploadVerificationDocument(
   formData: FormData,
 ): Promise<DocumentUploadResult> {
-  const context = await resolveStaffContext([...UPLOAD_ROLES]);
+  const context = await guardReadFailure("onboarding", () => resolveStaffContext([...UPLOAD_ROLES]));
+  if (context !== null && "ok" in context) return context;
   if (context === null) return { ok: false, message: NOT_ALLOWED };
 
   const docType = formData.get("docType");

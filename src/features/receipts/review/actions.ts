@@ -10,7 +10,20 @@ import { learnMerchantAlias } from "../server/alias";
 import type { LearnAliasErrorCode } from "../server/alias";
 import { reviewReceipt } from "../server/review";
 import type { ReviewErrorCode } from "../server/review";
-import { resolveReviewerContext } from "./access";
+import { guardReadFailure, type ReadFailedResult } from "@/lib/actions/read-failure";
+
+import { resolveReviewerContext, type ReviewerContext } from "./access";
+
+// A reviewer lookup that threw (the membership/business read failed) must stay
+// a typed result, and must not read as "not allowed" - that would tell a
+// working manager they lost access during an outage.
+async function lookupReviewer(): Promise<ReviewerContext | null | ReadFailedResult> {
+  return guardReadFailure("receipts/review", resolveReviewerContext);
+}
+
+function isReadFailure(value: ReviewerContext | null | ReadFailedResult): value is ReadFailedResult {
+  return value !== null && "ok" in value;
+}
 
 // ===========================================================================
 // The two decision actions behind `/business/receipts/[receiptId]`.
@@ -87,7 +100,8 @@ function revalidateDecision(receiptId: string): void {
  * computed from.
  */
 export async function approveReceiptAction(input: unknown): Promise<ReviewActionResult> {
-  const reviewer = await resolveReviewerContext();
+  const reviewer = await lookupReviewer();
+  if (isReadFailure(reviewer)) return fail("DEPENDENCY_UNAVAILABLE", reviewer.message);
   if (reviewer === null) return fail("NOT_ALLOWED", NOT_ALLOWED);
 
   const parsed = approveInputSchema.safeParse(input);
@@ -128,7 +142,8 @@ export async function approveReceiptAction(input: unknown): Promise<ReviewAction
 
 /** Reject, with a reason from the enum and an optional note. */
 export async function rejectReceiptAction(input: unknown): Promise<ReviewActionResult> {
-  const reviewer = await resolveReviewerContext();
+  const reviewer = await lookupReviewer();
+  if (isReadFailure(reviewer)) return fail("DEPENDENCY_UNAVAILABLE", reviewer.message);
   if (reviewer === null) return fail("NOT_ALLOWED", NOT_ALLOWED);
 
   const parsed = rejectInputSchema.safeParse(input);
@@ -180,7 +195,10 @@ export type LearnAliasActionResult =
 export async function learnMerchantAliasAction(
   input: unknown,
 ): Promise<LearnAliasActionResult> {
-  const reviewer = await resolveReviewerContext();
+  const reviewer = await lookupReviewer();
+  if (isReadFailure(reviewer)) {
+    return { ok: false, code: "DEPENDENCY_UNAVAILABLE", message: reviewer.message };
+  }
   if (reviewer === null) return { ok: false, code: "NOT_ALLOWED", message: NOT_ALLOWED };
 
   const parsed = z.object({ receiptId: receiptIdSchema }).safeParse(input);

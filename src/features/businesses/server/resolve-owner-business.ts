@@ -62,10 +62,12 @@ interface Membership {
  * membership" and adds no role predicate at all, which keeps the role-agnostic
  * path exactly the query it has always been.
  *
- * Returns null for no session, no matching membership, or a read that errored -
- * the last one deliberately fails closed, because a membership read that
- * errored proves nothing about the caller's tenancy and must not fall through
- * to handling a caller might treat as merely empty.
+ * Returns null ONLY for no session or no matching membership. A read that
+ * errored THROWS: it proves nothing about the caller's tenancy, so it must not
+ * grant anything (still fails closed) and must not look like "no membership"
+ * either - the portal layout turns null into an onboarding redirect, which
+ * would bounce a working owner out of their shop during an outage. Pages reach
+ * error.tsx; server actions wrap the resolvers in `guardReadFailure`.
  */
 async function readMembership(
   allowedRoles: readonly BusinessRole[] | null,
@@ -90,8 +92,7 @@ async function readMembership(
     .maybeSingle<{ business_id: string; role: string }>();
 
   if (error !== null) {
-    console.error("[businesses] could not resolve the caller's membership", error);
-    return null;
+    throw new Error(`readMembership: read failed: ${error.message}`);
   }
   if (data === null) return null;
 

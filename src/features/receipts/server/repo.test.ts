@@ -226,12 +226,12 @@ describe("listMyReceipts", () => {
     expect(recordedFor("receipts")[0]?.eq).toContainEqual(["status", "review"]);
   });
 
-  it("returns an empty page rather than throwing when the query fails", async () => {
+  it("throws when the query fails (an outage is not an empty history)", async () => {
     state.results.set("receipts", { data: null, error: { message: "boom" } });
 
-    await expect(listMyReceipts({ userId: USER_ID, limit: 25, cursor: null })).resolves.toEqual({
-      rows: [],
-    });
+    await expect(listMyReceipts({ userId: USER_ID, limit: 25, cursor: null })).rejects.toThrow(
+      "listMyReceipts",
+    );
   });
 
   it("reads awarded points from the ledger, filtered to earn rows", async () => {

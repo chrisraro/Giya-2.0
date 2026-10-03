@@ -5,6 +5,8 @@ import { z } from "zod";
 
 import { resolveStaffContext } from "@/features/businesses/server/resolve-owner-business";
 
+import { guardReadFailure } from "@/lib/actions/read-failure";
+
 import { CUSTOMER_WRITE_ROLES } from "./roles";
 import { changeSegmentSchema, updateNotesSchema } from "./schemas";
 import * as service from "./server/service";
@@ -29,7 +31,8 @@ async function requireWriter(): Promise<
   | { ok: true; businessId: string; actor: service.SegmentActor }
   | { ok: false; result: ActionResult<never> }
 > {
-  const context = await resolveStaffContext(CUSTOMER_WRITE_ROLES);
+  const context = await guardReadFailure("customers", () => resolveStaffContext(CUSTOMER_WRITE_ROLES));
+  if (context !== null && "ok" in context) return { ok: false, result: context };
   if (!context) return { ok: false, result: NOT_ALLOWED };
 
   return {
@@ -48,7 +51,7 @@ export async function changeCustomerSegment(
   const parsed = changeSegmentSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.changeSegment(auth.businessId, auth.actor, parsed.data);
+  const result = await guardReadFailure("customers", () => service.changeSegment(auth.businessId, auth.actor, parsed.data));
   if (result.ok) revalidatePath(CUSTOMERS_PATH);
   return result;
 }
