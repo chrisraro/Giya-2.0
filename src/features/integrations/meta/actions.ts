@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { resolveStaffContext } from "@/features/businesses/server/resolve-owner-business";
+import { guardReadFailure } from "@/lib/actions/read-failure";
 import { BUSINESS_SETTINGS_ROLES } from "@/features/businesses/settings/roles";
 
 import { BUSINESS_MARKETING_ROLES } from "./roles";
@@ -53,7 +54,8 @@ async function requestOrigin(): Promise<string> {
 
 /** Start the connect flow. Returns the consent dialog URL for the client to visit. */
 export async function startMetaConnect(): Promise<ActionResult<{ authorizeUrl: string }>> {
-  const context = await resolveStaffContext(BUSINESS_SETTINGS_ROLES);
+  const context = await guardReadFailure("integrations/meta", () => resolveStaffContext(BUSINESS_SETTINGS_ROLES));
+  if (context !== null && "ok" in context) return context;
   if (context === null) return NOT_ALLOWED;
 
   const result = await service.startConnect({
@@ -78,7 +80,8 @@ const connectPagesSchema = z.object({
 export async function connectMetaPages(
   input: unknown,
 ): Promise<ActionResult<{ connected: number }>> {
-  const context = await resolveStaffContext(BUSINESS_SETTINGS_ROLES);
+  const context = await guardReadFailure("integrations/meta", () => resolveStaffContext(BUSINESS_SETTINGS_ROLES));
+  if (context !== null && "ok" in context) return context;
   if (context === null) return NOT_ALLOWED;
 
   const parsed = connectPagesSchema.safeParse(input);
@@ -114,7 +117,8 @@ const disconnectSchema = z.object({
  * the rows where it is a security control.
  */
 export async function disconnectMeta(input: unknown): Promise<ActionResult<null>> {
-  const context = await resolveStaffContext(BUSINESS_SETTINGS_ROLES);
+  const context = await guardReadFailure("integrations/meta", () => resolveStaffContext(BUSINESS_SETTINGS_ROLES));
+  if (context !== null && "ok" in context) return context;
   if (context === null) return NOT_ALLOWED;
 
   const parsed = disconnectSchema.safeParse(input);
@@ -178,7 +182,8 @@ const publishSchema = z.object({
 export async function publishMetaCampaign(
   input: unknown,
 ): Promise<ActionResult<{ postId: string }>> {
-  const context = await resolveStaffContext(BUSINESS_MARKETING_ROLES);
+  const context = await guardReadFailure("integrations/meta", () => resolveStaffContext(BUSINESS_MARKETING_ROLES));
+  if (context !== null && "ok" in context) return context;
   if (context === null) return NOT_ALLOWED_TO_PUBLISH;
 
   const parsed = publishSchema.safeParse(input);

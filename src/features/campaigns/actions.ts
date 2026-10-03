@@ -234,7 +234,7 @@ export async function upsertBaseRule(input: unknown): Promise<ActionResult<Point
   const parsed = baseRuleSchema.safeParse(input);
   if (!parsed.success) return { ok: false, message: firstIssueMessage(parsed.error) };
 
-  const result = await service.upsertBaseRule(auth.businessId, parsed.data);
+  const result = await guardReadFailure("campaigns", () => service.upsertBaseRule(auth.businessId, parsed.data));
   if (result.ok) {
     revalidatePath(CAMPAIGNS_PATH);
     revalidatePath(DASHBOARD_PATH);

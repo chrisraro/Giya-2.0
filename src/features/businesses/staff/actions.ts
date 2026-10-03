@@ -7,6 +7,7 @@ import {
   BUSINESS_SUSPENDED_MESSAGE,
   resolveStaffAccess,
 } from "@/features/businesses/server/resolve-owner-business";
+import { guardReadFailure } from "@/lib/actions/read-failure";
 import { createClient } from "@/lib/supabase/server";
 
 import { STAFF_ROSTER_ROLES } from "./roles";
@@ -38,7 +39,8 @@ async function requireRosterAccess(): Promise<
   | { ok: false; result: ActionResult<never> }
 > {
   // Doc 30 section 2.8: a suspended business cannot invite or change staff.
-  const access = await resolveStaffAccess(STAFF_ROSTER_ROLES);
+  const access = await guardReadFailure("staff", () => resolveStaffAccess(STAFF_ROSTER_ROLES));
+  if (!access.ok && "message" in access) return { ok: false, result: access };
   if (!access.ok) {
     return {
       ok: false,

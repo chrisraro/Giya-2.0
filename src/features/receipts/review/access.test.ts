@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => {
       | { business_id: string; role: string }
       | null,
     membershipError: null as unknown,
+    businessError: null as unknown,
     business: { id: "biz-1", name: "Kape Diaria", status: "active" } as
       | { id: string; name: string; status: string }
       | null,
@@ -51,7 +52,7 @@ vi.mock("@/lib/supabase/server", () => ({
         return {
           select: () => ({
             eq: () => ({
-              maybeSingle: async () => ({ data: mocks.state.business, error: null }),
+              maybeSingle: async () => ({ data: mocks.state.business, error: mocks.state.businessError }),
             }),
           }),
         };
@@ -68,6 +69,7 @@ beforeEach(() => {
   mocks.state.user = { id: "reviewer-1" };
   mocks.state.membership = { business_id: "biz-1", role: "owner" };
   mocks.state.membershipError = null;
+  mocks.state.businessError = null;
   mocks.state.business = { id: "biz-1", name: "Kape Diaria", status: "active" };
 });
 
@@ -88,5 +90,26 @@ describe("resolveReviewerContext: suspension gate (doc 30 section 2.8)", () => {
     mocks.state.business = { id: "biz-1", name: "Kape Diaria", status: "pending_verification" };
     const context = await resolveReviewerContext();
     expect(context).not.toBeNull();
+  });
+});
+
+// A failed read is an error, not "no access": null is read by the portal as
+// "not a reviewer" and by actions as a refusal, so an outage would lie.
+describe("resolveReviewerContext: read failures", () => {
+  it("throws when the membership read errors", async () => {
+    mocks.state.membership = null;
+    mocks.state.membershipError = { message: "connection reset" };
+    await expect(resolveReviewerContext()).rejects.toThrow("resolveReviewerContext");
+  });
+
+  it("throws when the business read errors", async () => {
+    mocks.state.business = null;
+    mocks.state.businessError = { message: "connection reset" };
+    await expect(resolveReviewerContext()).rejects.toThrow("resolveReviewerContext");
+  });
+
+  it("still returns null for a genuine no-membership", async () => {
+    mocks.state.membership = null;
+    await expect(resolveReviewerContext()).resolves.toBeNull();
   });
 });

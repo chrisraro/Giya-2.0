@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
+import { guardReadFailure } from "@/lib/actions/read-failure";
+
 import { resolveStaffContext } from "../server/resolve-owner-business";
 import { MAX_SUBMISSION_NOTE_LENGTH } from "./presenter";
 import { submitForReview } from "./server/submit";
@@ -54,7 +56,10 @@ const submitSchema = z.object({
  * even if this check were removed.
  */
 export async function submitForReviewAction(input: unknown): Promise<ActivationActionResult> {
-  const staff = await resolveStaffContext(["owner"]);
+  const staff = await guardReadFailure("activation", () => resolveStaffContext(["owner"]));
+  if (staff !== null && "ok" in staff) {
+    return { ok: false, code: "DEPENDENCY_UNAVAILABLE", message: staff.message };
+  }
   if (staff === null) {
     return {
       ok: false,

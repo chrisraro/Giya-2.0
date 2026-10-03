@@ -304,10 +304,12 @@ export async function getMyBalances(): Promise<BalanceDTO[]> {
   if (!balances || balances.length === 0) return [];
 
   const businessIds = Array.from(new Set(balances.map((b) => b.business_id)));
-  const { data: businesses } = await supabase
+  const { data: businesses, error: namesError } = await supabase
     .from("businesses")
     .select("id, name, slug")
     .in("id", businessIds);
+  // Cosmetic labels (the balances themselves were read fine): log and degrade.
+  if (namesError) console.error("[rewards] business name lookup failed, showing unlabeled balances", namesError);
   const businessById = new Map((businesses ?? []).map((b) => [b.id, b]));
 
   return balances.map((b) => {

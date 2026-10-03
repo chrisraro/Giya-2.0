@@ -118,13 +118,15 @@ export async function getCustomer(
   customerId: string,
 ): Promise<BusinessCustomerRow | null> {
   const supabase = await createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("business_customers")
     .select("*")
     .eq("id", customerId)
     .eq("business_id", businessId)
     .maybeSingle();
 
+  // Callers read null as "not one of yours"; a failed read is not that.
+  if (error) throw new Error(`getCustomer: read failed: ${error.message}`);
   return data ?? null;
 }
 

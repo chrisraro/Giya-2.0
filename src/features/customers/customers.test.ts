@@ -449,3 +449,30 @@ describe("customerReference", () => {
     expect(service.customerReference(CONSUMER_ID)).toBe(service.customerReference(CONSUMER_ID));
   });
 });
+
+// A failed customer read is an error, not "that customer is not one of yours":
+// the action maps the throw to the generic typed failure.
+describe("getCustomer read failures", () => {
+  it("changeCustomerSegment answers with the generic typed failure instead of crashing", async () => {
+    const call = () => actions.changeCustomerSegment({ customerId: CUSTOMER_ID, segment: "vip" });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    table("business_customers").__result = { data: null, error: { message: "connection reset" } };
+    table("business_customers").maybeSingle = vi.fn(async () => ({
+      data: null,
+      error: { message: "connection reset" },
+    }));
+
+    const result = await call();
+
+    expect(result).toMatchObject({ ok: false, message: "Something went wrong on our side. Please try again." });
+    expect(table("business_customers").update).not.toHaveBeenCalled();
+  });
+
+  it("repo.getCustomer throws when the read errors, and returns null for no row", async () => {
+    table("business_customers").__result = { data: null, error: { message: "connection reset" } };
+    await expect(repo.getCustomer(OWN_BUSINESS, "c1")).rejects.toThrow("getCustomer");
+
+    table("business_customers").__result = { data: null, error: null };
+    await expect(repo.getCustomer(OWN_BUSINESS, "c1")).resolves.toBeNull();
+  });
+});

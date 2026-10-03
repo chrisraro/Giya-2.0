@@ -3,6 +3,8 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
+import { guardReadFailure } from "@/lib/actions/read-failure";
+
 import { BUSINESS_SUSPENDED_MESSAGE, resolveStaffAccess } from "../server/resolve-owner-business";
 import { BUSINESS_SETTINGS_ROLES } from "./roles";
 import { businessProfileSchema } from "./schemas";
@@ -39,7 +41,10 @@ export async function saveBusinessProfile(
   input: unknown,
 ): Promise<ActionResult<BusinessProfileView>> {
   // Doc 30 section 2.8: a suspended business is blocked server-side, not just by the layout.
-  const access = await resolveStaffAccess(BUSINESS_SETTINGS_ROLES);
+  const access = await guardReadFailure("business-settings", () =>
+    resolveStaffAccess(BUSINESS_SETTINGS_ROLES),
+  );
+  if (!access.ok && "message" in access) return access;
   if (!access.ok) return access.reason === "suspended" ? SUSPENDED : NOT_ALLOWED;
   const context = access.context;
 
