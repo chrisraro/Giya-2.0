@@ -73,7 +73,7 @@ export default async function ConsumerLayout({ children }: { children: React.Rea
     // independently via src/lib/auth/suspension.ts's fail-CLOSED readers, so
     // a missed redirect here from a transient blip cannot let a suspended
     // consumer actually transact - it would just see one more screen before
-    // hitting a real refusal. See src/middleware.ts's header for why this
+    // hitting a real refusal. See src/proxy.ts's header for why this
     // lives in a layout at all rather than middleware.
     if (profile && profile.is_suspended) {
       redirect("/suspended?type=account");

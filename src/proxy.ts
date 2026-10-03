@@ -35,7 +35,7 @@ export function copySessionCookies(source: NextResponse, target: NextResponse): 
 // production because this file's matcher only ever excluded `_next`,
 // `favicon` and `brand/`. The obvious fix was a branch in this function that
 // rewrote it away outside development, and that was tried and rejected: a
-// middleware rewrite to an unmatched path renders the app's 404 page but
+// proxy rewrite to an unmatched path renders the app's 404 page but
 // answers HTTP 200 for `/design` itself (measured; child paths did answer
 // 404). A soft 404 is worse than the problem, because it is indexable.
 //
@@ -99,7 +99,7 @@ function isAdminRoute(pathname: string): boolean {
  *                   also where /home's shop cards point, so gating it would
  *                   break the one public route out of the consumer app.
  *
- * Middleware is the gate, but not the only one: /home and /profile also check
+ * The proxy is the gate, but not the only one: /home and /profile also check
  * for a session themselves and redirect, so the guarantee does not depend on
  * this matcher staying correct.
  */
@@ -129,7 +129,7 @@ export function hasSupabaseAuthCookie(request: NextRequest): boolean {
     .some(({ name }) => name.startsWith("sb-") && name.includes("auth-token"));
 }
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // A request with no Supabase auth cookie has no session to refresh and no
@@ -171,7 +171,7 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   // Static assets and metadata files never carry or need a session; running
-  // middleware on them only added latency. `.webmanifest` is the PWA manifest.
+  // proxy on them only added latency. `.webmanifest` is the PWA manifest.
   // /api/csp-report is anonymous telemetry that must never pay for an auth round trip.
   matcher: [
     "/((?!_next/static|_next/image|api/csp-report|favicon|brand/|fonts/|manifest\\.webmanifest|robots\\.txt|sitemap\\.xml|.*\\.(?:svg|png|jpg|jpeg|webp|ico|woff2)$).*)",

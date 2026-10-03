@@ -9,8 +9,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // the same with a name, initials and a city. Neither route has an honest
 // anonymous version, so both now require a session.
 //
-// This file drives the real middleware() with updateSession mocked, which is
-// what middleware.test.ts (helpers only, dynamic import, no module mocks)
+// This file drives the real proxy() with updateSession mocked, which is
+// what proxy.test.ts (helpers only, dynamic import, no module mocks)
 // deliberately does not do.
 
 const mocks = vi.hoisted(() => ({ updateSession: vi.fn() }));
@@ -22,14 +22,14 @@ vi.mock("@/lib/supabase/middleware", () => ({
 vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co");
 vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "sb_publishable_abcdefghijklmnopqrstuvwxyz");
 
-const { middleware, isAuthenticatedConsumerRoute } = await import("./middleware");
+const { proxy, isAuthenticatedConsumerRoute } = await import("./proxy");
 
 const ORIGIN = "https://giya.example";
 
 function requestFor(pathname: string): NextRequest {
-  // Carries a session cookie so middleware() takes the updateSession path
+  // Carries a session cookie so proxy() takes the updateSession path
   // these tests mock; the cookie-less fast path has its own file
-  // (middleware.anonymous.test.ts).
+  // (proxy.anonymous.test.ts).
   return new NextRequest(new URL(pathname, ORIGIN), {
     headers: { cookie: "sb-test-auth-token=stub" },
   });
@@ -80,11 +80,11 @@ describe("isAuthenticatedConsumerRoute - the consumer account routes", () => {
   );
 });
 
-describe("middleware() on /home and /profile", () => {
+describe("proxy() on /home and /profile", () => {
   it.each(["/home", "/profile"])(
     "CRITICAL: redirects an anonymous visitor away from %s",
     async (pathname) => {
-      const response = await middleware(requestFor(pathname));
+      const response = await proxy(requestFor(pathname));
 
       expect(response.status).toBe(307);
       const location = new URL(response.headers.get("location") ?? "");
@@ -93,7 +93,7 @@ describe("middleware() on /home and /profile", () => {
   );
 
   it.each(["/home", "/profile"])("carries %s back as ?next= so the trip resumes", async (pathname) => {
-    const response = await middleware(requestFor(pathname));
+    const response = await proxy(requestFor(pathname));
 
     const location = new URL(response.headers.get("location") ?? "");
     expect(location.searchParams.get("next")).toBe(pathname);
@@ -102,13 +102,13 @@ describe("middleware() on /home and /profile", () => {
   it.each(["/home", "/profile"])("lets a signed-in consumer through to %s", async (pathname) => {
     signedIn();
 
-    const response = await middleware(requestFor(pathname));
+    const response = await proxy(requestFor(pathname));
 
     expect(response.headers.get("location")).toBeNull();
   });
 
   it("still lets an anonymous visitor reach a public business page", async () => {
-    const response = await middleware(requestFor("/b/lugaw-republic"));
+    const response = await proxy(requestFor("/b/lugaw-republic"));
 
     expect(response.headers.get("location")).toBeNull();
   });
@@ -118,7 +118,7 @@ describe("middleware() on /home and /profile", () => {
     refreshed.cookies.set("sb-example-auth-token", "refreshed-value");
     mocks.updateSession.mockResolvedValue({ response: refreshed, user: null, claims: {} });
 
-    const response = await middleware(requestFor("/home"));
+    const response = await proxy(requestFor("/home"));
 
     expect(response.cookies.get("sb-example-auth-token")?.value).toBe("refreshed-value");
   });

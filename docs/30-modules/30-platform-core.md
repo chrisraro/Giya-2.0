@@ -44,7 +44,7 @@ Same identity creation as 2.1, then one atomic RPC (`private.register_business`,
 - On every successful login: upsert `user_devices` (fingerprint by FCM token when present, else UA hash), update `last_seen_at`; if the device row is new → notification kind `new_device` (§5.4) to the user's other channels.
 
 ### 2.5 Session management & middleware [MVP]
-`src/middleware.ts` (Edge, per `../10-architecture/10-system-architecture.md`):
+`src/proxy.ts` (Next 16.3 `proxy` convention, formerly middleware.ts; per `../10-architecture/10-system-architecture.md`):
 1. Refresh Supabase session cookie server-side (JWT ≤1h, rotating refresh tokens).
 2. Read custom claims (`app_metadata.biz`, `is_platform_admin`, `admin_role`) stamped by the Custom Access Token Hook (12).
 3. Route-group guard: `(business)` requires ≥1 active `biz` claim; `(admin)` requires `is_platform_admin`; failure → redirect `/login` (unauthenticated) or the user's home surface (authenticated, wrong surface — never a 403 page for navigation).
