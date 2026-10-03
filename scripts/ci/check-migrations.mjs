@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Migration-safety gate for CI. Scans only migrations NEWER than 0082: older
 // files are applied history (CLAUDE.md "never edit an applied migration") and
 // 0075/0077 are deliberately neutralised data wipes, so flagging them would
