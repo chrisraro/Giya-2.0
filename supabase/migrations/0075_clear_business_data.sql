@@ -1,57 +1,17 @@
 -- ============================================================================
--- 0075_clear_business_data.sql
--- Reset script to clear all business tenants, staff memberships, products,
--- campaigns, rewards, receipts, fraud signals, points ledgers, and verifications.
+-- 0075_clear_business_data.sql - NEUTRALISED 2026-10-03 (full audit)
 --
--- PRESERVED:
---   * System reference tables: public.ref_cities, public.ref_business_types, public.ref_food_types
---   * Platform admin accounts: public.platform_admins (including teamocsph@gmail.com)
---   * User authentication accounts & consumer profiles
+-- This file used to be a one-off DATA RESET: it disabled the ledger, receipt,
+-- fraud, notification and audit immutability triggers and ran
+-- `truncate table public.businesses cascade`, wiping every tenant, the points
+-- ledger and the audit trail. A data reset is an operator action, not schema
+-- history - and because migrations replay on every new environment, branch DB
+-- or `supabase db push`, leaving it here meant any replay would wipe that
+-- environment again.
+--
+-- It already ran on production (zlfxfzlnklqhajacngxf) before this change.
+-- The body is removed and the file kept as a no-op so the numbered sequence
+-- stays intact. NEVER restore the old body and NEVER paste it into the SQL
+-- Editor: the original text is in git history (before commit "chore(db):
+-- neutralise the 0075 and 0077 data-wipe migrations") for reference only.
 -- ============================================================================
-
--- 1. Disable evidence, ledger, and system immutability triggers for the reset
-alter table public.points_transactions disable trigger points_transactions_no_truncate;
-alter table public.points_transactions disable trigger points_transactions_append_only;
-
-alter table public.receipts disable trigger receipts_no_truncate;
-alter table public.receipts disable trigger receipts_no_delete;
-
-alter table public.ocr_results disable trigger ocr_results_no_truncate;
-alter table public.ocr_results disable trigger ocr_results_immutable;
-
-alter table public.fraud_signals disable trigger fraud_signals_no_truncate;
-alter table public.fraud_signals disable trigger fraud_signals_immutable;
-
-alter table public.notifications disable trigger notifications_no_truncate;
-alter table public.notifications disable trigger notifications_read_at_only;
-
-alter table public.audit_logs disable trigger audit_logs_no_truncate;
-alter table public.audit_logs disable trigger audit_logs_append_only;
-
-alter table public.jobs disable trigger jobs_no_truncate;
-alter table public.feature_flags disable trigger feature_flags_no_truncate;
-
--- 2. Atomic CASCADE truncate to clear all business tenants and dependent transaction records
-truncate table public.businesses cascade;
-
--- 3. Re-enable evidence, ledger, and system immutability triggers
-alter table public.points_transactions enable trigger points_transactions_no_truncate;
-alter table public.points_transactions enable trigger points_transactions_append_only;
-
-alter table public.receipts enable trigger receipts_no_truncate;
-alter table public.receipts enable trigger receipts_no_delete;
-
-alter table public.ocr_results enable trigger ocr_results_no_truncate;
-alter table public.ocr_results enable trigger ocr_results_immutable;
-
-alter table public.fraud_signals enable trigger fraud_signals_no_truncate;
-alter table public.fraud_signals enable trigger fraud_signals_immutable;
-
-alter table public.notifications enable trigger notifications_no_truncate;
-alter table public.notifications enable trigger notifications_read_at_only;
-
-alter table public.audit_logs enable trigger audit_logs_no_truncate;
-alter table public.audit_logs enable trigger audit_logs_append_only;
-
-alter table public.jobs enable trigger jobs_no_truncate;
-alter table public.feature_flags enable trigger feature_flags_no_truncate;
