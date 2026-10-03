@@ -31,7 +31,7 @@ export default function PendingApprovalPage() {
         .eq("user_id", user.id)
         .maybeSingle();
 
-      const status = (staff as any)?.businesses?.status;
+      const status = staff?.businesses?.status;
 
       if (status === "active") {
         router.push("/business/dashboard");

@@ -59,7 +59,7 @@ export async function previewReceiptPointsAction(input: PreviewInput): Promise<{
       basePoints: res.breakdown.basePoints,
       multiplierExtras: res.breakdown.multiplierExtras,
     };
-  } catch (err: any) {
-    return { ok: false, message: err.message ?? "Preview failed" };
+  } catch (err: unknown) {
+    return { ok: false, message: (err instanceof Error && err.message) || "Preview failed" };
   }
 }

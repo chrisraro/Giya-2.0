@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "gen:tokens": "tsx scripts/generate-md3-tokens.ts",
-    "gen:icons": "tsx scripts/gen-icons.ts"
+    "gen:icons": "tsx scripts/gen-icons.ts",
+    "ci": "node scripts/ci/run.mjs"
   },
   "dependencies": {
     "@hcaptcha/react-hcaptcha": "^2.0.2",

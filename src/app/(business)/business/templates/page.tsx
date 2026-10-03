@@ -39,9 +39,9 @@ export default async function TemplatesPage() {
           </p>
 
           <div className="mt-4 space-y-2 text-label-s text-on-surface-variant border-t border-outline-variant pt-3">
-            <p>• Header Anchor: "GRAND CAFE"</p>
+            <p>• Header Anchor: &quot;GRAND CAFE&quot;</p>
             <p>• Date Format: YYYY-MM-DD</p>
-            <p>• Total Field Anchor: "TOTAL PHP"</p>
+            <p>• Total Field Anchor: &quot;TOTAL PHP&quot;</p>
           </div>
         </Card>
 

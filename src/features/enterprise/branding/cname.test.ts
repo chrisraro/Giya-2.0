@@ -25,7 +25,7 @@ describe("White-Label CNAME Domain Resolver", () => {
       }),
     };
 
-    (createClient as any).mockResolvedValue(mockSupabase);
+    (createClient as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(mockSupabase);
 
     const business = await resolveBusinessFromCname("rewards.starcoffee.ph");
     expect(business).not.toBeNull();

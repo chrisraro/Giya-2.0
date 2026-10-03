@@ -28,7 +28,7 @@ describe("Vector Recommendation Engine v2", () => {
       }),
     };
 
-    (createClient as any).mockResolvedValue(mockSupabase);
+    (createClient as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(mockSupabase);
 
     const recs = await getVectorRecommendations("user-1", "Matcha Milk Tea");
     expect(recs).toHaveLength(1);
