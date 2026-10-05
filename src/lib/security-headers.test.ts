@@ -12,9 +12,11 @@ function header(name: string, env = ENV): string | undefined {
 }
 
 describe("buildSecurityHeaders", () => {
-  it("blocks framing both ways (doc 15: clickjacking on admin/scanner/portal)", () => {
-    expect(header("X-Frame-Options")).toBe("DENY");
-    expect(header("Content-Security-Policy")).toContain("frame-ancestors 'none'");
+  it("restricts framing to self and the owner's portfolio via frame-ancestors, with no X-Frame-Options", () => {
+    expect(header("X-Frame-Options")).toBeUndefined();
+    expect(header("Content-Security-Policy")).toContain(
+      "frame-ancestors 'self' https://christian-digital-portfolio.vercel.app",
+    );
   });
 
   it("sets the static hardening headers", () => {
@@ -25,7 +27,7 @@ describe("buildSecurityHeaders", () => {
 
   it("enforces only the directives that cannot break a legitimate load", () => {
     expect(header("Content-Security-Policy")).toBe(
-      "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests",
+      "frame-ancestors 'self' https://christian-digital-portfolio.vercel.app; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests",
     );
     expect(buildEnforcedCsp()).toBe(header("Content-Security-Policy"));
   });
