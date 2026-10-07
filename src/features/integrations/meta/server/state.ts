@@ -29,11 +29,11 @@ import { getDel, redisKey, setNx } from "@/lib/redis";
 //      can revoke at will. Stopped by: the code is only exchanged when it
 //      arrives with a state WE issued, in a session that requested it.
 //
-//   2. CROSS-TENANT ATTACHMENT. A user who legitimately administers tenant A
-//      starts a flow there, then replays the resulting callback against
-//      tenant B's callback path. Stopped by: the state is bound to the
-//      business id at issue time and compared against the path segment at
-//      verify time. A state minted for A verifies at A and nowhere else.
+//   2. CROSS-TENANT ATTACHMENT. A user who administers tenant A starts a flow
+//      there and tries to land the result on tenant B. Stopped by: the
+//      business id is fixed at issue time and read back FROM the state at the
+//      one static callback; the route requires it to equal the caller's real
+//      membership. Nothing in the callback URL names a tenant.
 //
 //   3. REPLAY. The same callback URL is fetched twice - by a refresh, a
 //      preloading browser, or an attacker who kept it. Stopped by: consumption
@@ -47,8 +47,8 @@ import { getDel, redisKey, setNx } from "@/lib/redis";
 //                    command, for the reason src/lib/redis.ts states on that
 //                    helper: a GET followed by a DEL lets two concurrent
 //                    consumers both read before either deletes.
-//   BOUND TO THE   - the business id is stored in the VALUE, not derived from
-//   BUSINESS         the request. Anything derived from the callback request
+//   BOUND TO THE   - the business id is stored in the VALUE and returned by
+//   BUSINESS         verifyState; it is never derived from the request. Anything derived from the callback request
 //                    is attacker-controlled by definition.
 //   BOUND TO THE   - likewise the user id. A state minted by one member of a
 //   USER             tenant cannot be completed by another member's session,
@@ -94,12 +94,16 @@ export type StateVerifyFailure =
   | "missing"
   | "malformed"
   | "unknown"
-  | "business_mismatch"
   | "user_mismatch"
   | "unavailable";
 
 export type StateVerifyResult =
-  | { readonly ok: true; readonly redirectUri: string }
+  | {
+      readonly ok: true;
+      /** From the STORED payload - the static callback has no business in its URL. */
+      readonly businessId: string;
+      readonly redirectUri: string;
+    }
   | {
       /**
        * FOR THE SERVER LOG ONLY, per the rule src/lib/queue/verify.ts states
@@ -146,17 +150,22 @@ export async function issueState(input: {
 }
 
 /**
- * Consume a state and check it against the callback's context.
+ * Consume a state, check it against the session user, and hand back the
+ * business it was minted for.
+ *
+ * The callback URL is ONE static path (Meta matches redirect_uris exactly, so a
+ * per-business path can never be registered), so the business is no longer an
+ * input here: it is an OUTPUT, read from the stored payload. The route then
+ * checks it against the caller's real membership.
  *
  * ORDER MATTERS. The value is consumed FIRST, before any comparison, so that a
- * state presented against the wrong business is burned rather than left in
- * Redis for the attacker to try again against the right one. A verification
+ * state presented by the wrong user is burned rather than left in Redis for
+ * the attacker to try again. A verification
  * that leaves the credential usable after a failed attempt is a verification
  * an attacker can iterate against.
  */
 export async function verifyState(input: {
   readonly state: string | null;
-  readonly businessId: string;
   readonly userId: string;
 }): Promise<StateVerifyResult> {
   if (input.state === null || input.state.length === 0) {
@@ -197,12 +206,9 @@ export async function verifyState(input: {
     return { ok: false, reason: "malformed" };
   }
 
-  if (payload.businessId !== input.businessId) {
-    return { ok: false, reason: "business_mismatch" };
-  }
   if (payload.userId !== input.userId) {
     return { ok: false, reason: "user_mismatch" };
   }
 
-  return { ok: true, redirectUri: payload.redirectUri };
+  return { ok: true, businessId: payload.businessId, redirectUri: payload.redirectUri };
 }

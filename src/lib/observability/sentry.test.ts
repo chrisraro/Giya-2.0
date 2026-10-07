@@ -122,18 +122,18 @@ describe("scrubEvent", () => {
   });
 
   it("does not send an OAuth authorization code, which this app really receives", () => {
-    // /api/v1/businesses/[businessId]/integrations/meta/callback. A `code` is
+    // /api/v1/integrations/meta/callback. A `code` is
     // exchangeable for a Meta page access token; it must not reach a
     // third-party issue tracker, whatever the retention policy says.
     const scrubbed = scrubEvent({
       request: {
-        url: "https://giya.test/api/v1/businesses/b-1/integrations/meta/callback?code=AQD_meta_oauth_code&state=xyz",
+        url: "https://giya.test/api/v1/integrations/meta/callback?code=AQD_meta_oauth_code&state=xyz",
         method: "GET",
       },
     });
 
     expect(scrubbed.request?.url).toBe(
-      "https://giya.test/api/v1/businesses/b-1/integrations/meta/callback",
+      "https://giya.test/api/v1/integrations/meta/callback",
     );
     expect(JSON.stringify(scrubbed)).not.toContain("AQD_meta_oauth_code");
   });
