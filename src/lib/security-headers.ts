@@ -103,12 +103,13 @@ export function buildCsp(env: SecurityHeaderEnv, opts: { dev?: boolean } = {}): 
  * Audited against the app: every <form action> is same-origin (/discover, /scan), server
  * actions POST to self, and Supabase OAuth + hCaptcha navigate via redirects or run inside
  * their own frames, so form-action 'self' needs no extra origin. Nothing embeds the app
- * (X-Frame-Options already DENY), uses <object>/<embed>, or sets <base>.
+ * except the owner's portfolio live preview (frame-ancestors below), uses <object>/<embed>,
+ * or sets <base>.
  * Static pages stay static: no nonce, nothing per-request (explicit decision).
  */
 export function buildEnforcedCsp(): string {
   return [
-    "frame-ancestors 'none'",
+    "frame-ancestors 'self' https://christian-digital-portfolio.vercel.app",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -121,9 +122,8 @@ export function buildSecurityHeaders(
   opts: { dev?: boolean } = {},
 ): SecurityHeader[] {
   return [
-    // Both the legacy header and frame-ancestors: the admin console, redemption scanner and
-    // business portal must never be framed (clickjacking on destructive actions).
-    { key: "X-Frame-Options", value: "DENY" },
+    // No X-Frame-Options: it cannot allowlist an origin, and frame-ancestors (enforced CSP
+    // below) restricts framing to self and the owner's portfolio only.
     { key: "X-Content-Type-Options", value: "nosniff" },
     { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
     // camera: receipt scanner + redemption QR scanner (getUserMedia). geolocation: the
