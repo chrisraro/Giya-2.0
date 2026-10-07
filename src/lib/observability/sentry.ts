@@ -147,7 +147,7 @@ export function scrubEvent(event: SentryEventLike): SentryEventLike {
     // `url` looks like it drops the query and does not: @sentry/core's
     // `utils/request.js` writes the query into BOTH fields, so the same
     // parameters survive in the URL. This app has
-    // /api/v1/businesses/[businessId]/integrations/meta/callback, whose query
+    // /api/v1/integrations/meta/callback, whose query
     // carries an OAuth `code`, and /api/v1/auth/reset-password. Dropping one
     // of two copies is not dropping it.
     const path = stripQuery(url);
