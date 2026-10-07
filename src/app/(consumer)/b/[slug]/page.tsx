@@ -19,7 +19,7 @@ import { PromotionCard } from "@/features/promotions/components/promotion-card";
 import { isFavorite } from "@/features/favorites/server/repo";
 import { FavoriteButton } from "@/features/favorites/components/favorite-button";
 import { FacebookPageEmbed } from "@/features/integrations/meta/components/facebook-page-embed";
-import { getFacebookPageEmbed, getMetaAppIdForSdk } from "@/lib/integrations/meta-oembed";
+import { getMetaAppIdForSdk } from "@/lib/integrations/meta-sdk";
 
 export const revalidate = 60;
 
@@ -59,7 +59,7 @@ export default async function PublicBusinessPage({
     data: { user },
   } = await supabase.auth.getUser();
 
-  const [menuGroups, rewards, balance, promotions, isFav, facebookEmbed] = await Promise.all([
+  const [menuGroups, rewards, balance, promotions, isFav] = await Promise.all([
     getPublicMenu(business.id),
     getPublicRewards(business.id),
     user
@@ -79,8 +79,6 @@ export default async function PublicBusinessPage({
       console.error("[storefront] favourite check failed; rendering as not favourited", error);
       return false;
     }),
-    // Never throws: a missing or failed embed degrades to the plain Page link.
-    business.facebookUrl ? getFacebookPageEmbed(business.facebookUrl) : Promise.resolve(null),
   ]);
 
   const rewardAffordability =
@@ -186,9 +184,9 @@ export default async function PublicBusinessPage({
         </div>
       ) : null}
 
-      {business.facebookUrl && facebookEmbed ? (
+      {business.facebookUrl ? (
         <div className="mt-6 px-4">
-          <FacebookPageEmbed embed={facebookEmbed} pageUrl={business.facebookUrl} appId={getMetaAppIdForSdk()} />
+          <FacebookPageEmbed pageUrl={business.facebookUrl} appId={getMetaAppIdForSdk()} />
         </div>
       ) : null}
 
