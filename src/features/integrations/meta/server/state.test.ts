@@ -35,10 +35,9 @@ vi.mock("@/lib/redis", () => ({
 import { STATE_TTL_SECONDS, issueState, verifyState } from "./state";
 
 const BUSINESS = "11111111-1111-4111-8111-111111111111";
-const OTHER_BUSINESS = "22222222-2222-4222-8222-222222222222";
 const USER = "aaaaaaaa-1111-4111-8111-111111111111";
 const OTHER_USER = "bbbbbbbb-2222-4222-8222-222222222222";
-const REDIRECT = `https://giya.ph/api/v1/businesses/${BUSINESS}/integrations/meta/callback`;
+const REDIRECT = "https://giya.ph/api/v1/integrations/meta/callback";
 
 async function mint(): Promise<string> {
   return issueState({ businessId: BUSINESS, userId: USER, redirectUri: REDIRECT });
@@ -73,8 +72,9 @@ describe("issueState", () => {
 describe("verifyState", () => {
   it("accepts a state it issued, for the same business and user", async () => {
     const state = await mint();
-    await expect(verifyState({ state, businessId: BUSINESS, userId: USER })).resolves.toEqual({
+    await expect(verifyState({ state, userId: USER })).resolves.toEqual({
       ok: true,
+      businessId: BUSINESS,
       redirectUri: REDIRECT,
     });
   });
@@ -84,29 +84,29 @@ describe("verifyState", () => {
     // by a refresh, a preloading browser, or an attacker who kept it.
     const state = await mint();
 
-    const first = await verifyState({ state, businessId: BUSINESS, userId: USER });
+    const first = await verifyState({ state, userId: USER });
     expect(first.ok).toBe(true);
 
-    const second = await verifyState({ state, businessId: BUSINESS, userId: USER });
+    const second = await verifyState({ state, userId: USER });
     expect(second).toEqual({ ok: false, reason: "unknown" });
   });
 
-  it("REFUSES A STATE MINTED FOR A DIFFERENT BUSINESS", async () => {
-    // Attack 2: a user who legitimately administers tenant A replays the
-    // callback against tenant B's callback path.
-    const state = await mint();
-    await expect(
-      verifyState({ state, businessId: OTHER_BUSINESS, userId: USER }),
-    ).resolves.toEqual({ ok: false, reason: "business_mismatch" });
+  it("CARRIES THE BUSINESS ID, so the static callback never reads it from the URL", async () => {
+    // The redirect_uri is one registrable URL for every merchant (Meta matches
+    // it exactly), so the tenant can only come from what WE stored at issue.
+    const other = "22222222-2222-4222-8222-222222222222";
+    const state = await issueState({ businessId: other, userId: USER, redirectUri: REDIRECT });
+    const result = await verifyState({ state, userId: USER });
+    expect(result.ok === true ? result.businessId : null).toBe(other);
   });
 
   it("REFUSES A MISSING STATE", async () => {
     // Attack 1 in its simplest form: a bare `?code=...` from an attacker who
     // captured a code from their own flow.
-    await expect(verifyState({ state: null, businessId: BUSINESS, userId: USER })).resolves.toEqual(
+    await expect(verifyState({ state: null, userId: USER })).resolves.toEqual(
       { ok: false, reason: "missing" },
     );
-    await expect(verifyState({ state: "", businessId: BUSINESS, userId: USER })).resolves.toEqual({
+    await expect(verifyState({ state: "", userId: USER })).resolves.toEqual({
       ok: false,
       reason: "missing",
     });
@@ -114,19 +114,19 @@ describe("verifyState", () => {
 
   it("refuses a state minted by a different user of the same tenant", async () => {
     const state = await mint();
-    await expect(verifyState({ state, businessId: BUSINESS, userId: OTHER_USER })).resolves.toEqual(
+    await expect(verifyState({ state, userId: OTHER_USER })).resolves.toEqual(
       { ok: false, reason: "user_mismatch" },
     );
   });
 
-  it("BURNS THE STATE even when the business does not match", async () => {
+  it("BURNS THE STATE even when the user does not match", async () => {
     // The consume happens BEFORE the comparison, deliberately: a verification
     // that leaves the value usable after a failed attempt is one an attacker
     // can iterate against until they hit the right tenant.
     const state = await mint();
-    await verifyState({ state, businessId: OTHER_BUSINESS, userId: USER });
+    await verifyState({ state, userId: OTHER_USER });
 
-    await expect(verifyState({ state, businessId: BUSINESS, userId: USER })).resolves.toEqual({
+    await expect(verifyState({ state, userId: USER })).resolves.toEqual({
       ok: false,
       reason: "unknown",
     });
@@ -134,7 +134,7 @@ describe("verifyState", () => {
 
   it("refuses a state that was never issued", async () => {
     await expect(
-      verifyState({ state: "A".repeat(43), businessId: BUSINESS, userId: USER }),
+      verifyState({ state: "A".repeat(43), userId: USER }),
     ).resolves.toEqual({ ok: false, reason: "unknown" });
   });
 
@@ -150,7 +150,6 @@ describe("verifyState", () => {
     ]) {
       const result = await verifyState({
         state: candidate,
-        businessId: BUSINESS,
         userId: USER,
       });
       expect(result).toEqual({ ok: false, reason: "malformed" });
@@ -161,7 +160,7 @@ describe("verifyState", () => {
   it("refuses a stored value that is not the expected shape", async () => {
     store.entries.set(`test:meta:oauth:${"z".repeat(43)}`, "not json");
     await expect(
-      verifyState({ state: "z".repeat(43), businessId: BUSINESS, userId: USER }),
+      verifyState({ state: "z".repeat(43), userId: USER }),
     ).resolves.toEqual({ ok: false, reason: "malformed" });
   });
 
@@ -171,7 +170,7 @@ describe("verifyState", () => {
     const state = await mint();
     store.failing.value = true;
 
-    await expect(verifyState({ state, businessId: BUSINESS, userId: USER })).resolves.toEqual({
+    await expect(verifyState({ state, userId: USER })).resolves.toEqual({
       ok: false,
       reason: "unavailable",
     });
@@ -187,7 +186,7 @@ describe("verifyState", () => {
       userId: USER,
       redirectUri: "https://giya.ph/exact/path",
     });
-    const result = await verifyState({ state, businessId: BUSINESS, userId: USER });
+    const result = await verifyState({ state, userId: USER });
     expect(result.ok === true ? result.redirectUri : null).toBe("https://giya.ph/exact/path");
   });
 });

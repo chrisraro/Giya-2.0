@@ -2,60 +2,61 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { resolveStaffContext } from "@/features/businesses/server/resolve-owner-business";
 import { BUSINESS_SETTINGS_ROLES } from "@/features/businesses/settings/roles";
-import { callbackUrl, completeCallback } from "@/features/integrations/meta/server/service";
+import { completeCallback } from "@/features/integrations/meta/server/service";
 import { verifyState } from "@/features/integrations/meta/server/state";
 
 // =============================================================================
-// GET /api/v1/businesses/{businessId}/integrations/meta/callback
+// GET /api/v1/integrations/meta/callback
 // =============================================================================
 //
-// docs/30-modules/42-integrations.md's connect flow, the second half: "callback
-// `/api/v1/businesses/{businessId}/integrations/meta/callback` verifies state,
-// exchanges code server-side, lists Pages, user picks Page(s)".
+// docs/30-modules/42-integrations.md's connect flow, the second half: callback
+// verifies state, exchanges code server-side, lists Pages, user picks Page(s).
 //
 // -----------------------------------------------------------------------------
-// THE ORDER OF THE FIRST FOUR STEPS IS THE SECURITY PROPERTY
+// WHY THE URL NAMES NO BUSINESS
 // -----------------------------------------------------------------------------
 //
-//   1. session            -> no session, no flow. A callback is a GET an
-//                            attacker can make a browser issue; without this
-//                            step there is no "who" to bind anything to.
-//   2. tenancy            -> the caller must be an active owner/manager OF THE
-//                            BUSINESS IN THE PATH. The path segment is
-//                            attacker-controlled, so it is checked against the
-//                            caller's real membership, never trusted.
-//   3. VERIFY THE STATE   -> before the code is looked at, let alone exchanged.
-//                            See state.ts for the three attacks this stops;
-//                            the shortest version is that an unverified
-//                            callback lets an attacker attach THEIR Facebook
-//                            Page to a merchant's tenant.
+// Meta requires every redirect_uri to EXACTLY match an entry in the app's
+// "Valid OAuth Redirect URIs" (strict mode, no wildcards). A per-business path
+// can never be registered for every merchant, so there is ONE static callback
+// (https://www.giya.ph/api/v1/integrations/meta/callback) and the business is
+// carried in the server-held `state` (state.ts). The business id is therefore
+// read FROM THE VERIFIED STATE, never from the query string or the path.
+//
+// -----------------------------------------------------------------------------
+// THE ORDER OF THE STEPS IS THE SECURITY PROPERTY
+// -----------------------------------------------------------------------------
+//
+//   1. session + role     -> no session, no flow: a callback is a GET an
+//                            attacker can make a browser issue, and the state
+//                            must be bound to a "who". Owner/manager only.
+//   2. VERIFY THE STATE   -> before the code is looked at, let alone exchanged.
+//                            Single-use (atomic GETDEL), bound to the user who
+//                            started the flow. See state.ts for the attacks.
+//   3. tenancy            -> the business the state was minted for must be the
+//                            caller's own managed business. Re-checked here
+//                            because membership can change inside the 10-minute
+//                            window.
 //   4. exchange the code  -> only now, and only server-side.
 //
 // -----------------------------------------------------------------------------
 // WHY THIS ROUTE DOES NOT USE defineHandler
 // -----------------------------------------------------------------------------
 //
-// Two reasons, both about what the caller is. This endpoint is not called by
-// our client; it is called by a BROWSER FOLLOWING A REDIRECT FROM FACEBOOK, and
-// its answer must be another redirect that lands the merchant back on their
-// settings screen. Doc 13's JSON envelope has no meaning to a browser
-// navigation - a merchant would see a page of JSON.
-//
-// Nor is it a public contract despite living under /api/v1: the URL shape is
-// doc 42's, and it is registered with Meta rather than with any client of
-// ours. What is NOT skipped is the discipline: session, tenancy, state, and
-// nothing about a failure in the response.
+// The caller is a BROWSER FOLLOWING A REDIRECT FROM FACEBOOK and the answer must
+// be another redirect back to settings; doc 13's JSON envelope means nothing to
+// a browser navigation. What is NOT skipped is the discipline: session, state,
+// tenancy, and nothing about a failure in the response.
 //
 // -----------------------------------------------------------------------------
 // WHAT THE MERCHANT SEES WHEN SOMETHING GOES WRONG
 // -----------------------------------------------------------------------------
 //
 // A redirect to /business/settings carrying a COARSE outcome and nothing else.
-// "State unknown", "state for another business" and "state for another user"
-// are three different facts about our storage, and telling whoever is probing
-// this endpoint which one applies turns a closed door into an oracle - the
-// same rule src/lib/queue/verify.ts states as its rule 4. The precise reason
-// goes to the server log.
+// "State unknown" and "state for another user" are different facts about our
+// storage; telling a prober which applies turns a closed door into an oracle
+// (src/lib/queue/verify.ts rule 4). The precise reason goes to the server log.
+// Neither the code nor any token is ever logged.
 
 /** Where the merchant lands afterwards, with the outcome as a query flag. */
 const SETTINGS_PATH = "/business/settings";
@@ -86,13 +87,8 @@ function fail(request: NextRequest, outcome: Outcome, logReason: string): NextRe
   return back(request, { meta: outcome });
 }
 
-export async function GET(
-  request: NextRequest,
-  context: { params: Promise<{ businessId: string }> },
-): Promise<NextResponse> {
-  const { businessId } = await context.params;
-
-  // --- 1 + 2. session and tenancy -----------------------------------------
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  // --- 1. session and role ------------------------------------------------
   // resolveStaffContext reads the caller's membership under their OWN session
   // and returns null for no session, no active membership, or a role outside
   // the owner/manager pair.
@@ -105,10 +101,8 @@ export async function GET(
     console.error("[integrations/meta/callback] membership read failed", error);
     return back(request, { meta: "unavailable" });
   }
-  if (staff === null || staff.businessId !== businessId) {
-    // The two cases are collapsed on purpose: "you are not signed in" and
-    // "that is not your business" are the same answer to someone probing.
-    return fail(request, "denied", `callback for ${businessId} from a caller who cannot manage it`);
+  if (staff === null) {
+    return fail(request, "denied", "callback from a caller who cannot manage a business");
   }
 
   const query = request.nextUrl.searchParams;
@@ -123,14 +117,17 @@ export async function GET(
     return back(request, { meta: "cancelled" });
   }
 
-  // --- 3. THE STATE, BEFORE ANYTHING ELSE ---------------------------------
-  const state = await verifyState({
-    state: query.get("state"),
-    businessId,
-    userId: staff.userId,
-  });
+  // --- 2. THE STATE, BEFORE ANYTHING ELSE ---------------------------------
+  const state = await verifyState({ state: query.get("state"), userId: staff.userId });
   if (!state.ok) {
-    return fail(request, "rejected", `state rejected for ${businessId}: ${state.reason}`);
+    return fail(request, "rejected", `state rejected: ${state.reason}`);
+  }
+
+  // --- 3. tenancy, from the state -----------------------------------------
+  // The business comes from what WE stored; it must still be the caller's own.
+  const businessId = state.businessId;
+  if (staff.businessId !== businessId) {
+    return fail(request, "denied", `state for ${businessId} completed by a non-manager of it`);
   }
 
   const code = query.get("code");
@@ -143,16 +140,13 @@ export async function GET(
   // --- 4. exchange, server-side -------------------------------------------
   // The redirect_uri from the STORED state, not rebuilt from this request:
   // Meta requires it to be byte-identical to the one the dialog was opened
-  // with, and a value derived from the incoming request is a value the caller
-  // influences. `callbackUrl` is referenced here only so the two constructions
-  // cannot silently diverge.
-  const redirectUri = state.redirectUri || callbackUrl(request.nextUrl.origin, businessId);
-
+  // with, and a value derived from the incoming request is one the caller
+  // influences.
   const result = await completeCallback({
     businessId,
     userId: staff.userId,
     code,
-    redirectUri,
+    redirectUri: state.redirectUri,
   });
 
   if (!result.ok) {

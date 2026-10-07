@@ -51,9 +51,16 @@ import { issueState } from "./state";
 // discovers it has nowhere safe to put the token has already obtained a real
 // credential it must now discard.
 
-/** Where Meta sends the merchant back. Must match the token exchange exactly. */
-export function callbackUrl(origin: string, businessId: string): string {
-  return `${origin}/api/v1/businesses/${businessId}/integrations/meta/callback`;
+/**
+ * Where Meta sends the merchant back. Must match the token exchange exactly.
+ *
+ * ONE static path for every merchant: Meta requires each redirect_uri to equal
+ * an entry in "Valid OAuth Redirect URIs" exactly (strict mode, no wildcards),
+ * so a per-business path could never be registered. The business rides in the
+ * signed `state` instead (state.ts). doc 42.
+ */
+export function callbackUrl(origin: string): string {
+  return `${origin}/api/v1/integrations/meta/callback`;
 }
 
 export type ConnectStart =
@@ -80,7 +87,7 @@ export async function startConnect(input: {
   if (!isMetaConfigured()) return { ok: false, message: NOT_CONFIGURED_MESSAGE };
   if (!isTokenCipherConfigured()) return { ok: false, message: NO_STORAGE_MESSAGE };
 
-  const redirectUri = callbackUrl(input.origin, input.businessId);
+  const redirectUri = callbackUrl(input.origin);
 
   let state: string;
   try {
