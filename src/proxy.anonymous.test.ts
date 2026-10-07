@@ -83,7 +83,7 @@ describe("matcher", () => {
     },
   );
 
-  it.each(["/", "/home", "/offline", "/meta-review", "/b/lugaw-republic", "/business/dashboard"])(
+  it.each(["/", "/home", "/offline", "/privacy", "/b/lugaw-republic", "/business/dashboard"])(
     "still runs on %s",
     (path) => {
       expect(re.test(path)).toBe(true);

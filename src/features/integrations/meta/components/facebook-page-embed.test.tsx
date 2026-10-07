@@ -9,36 +9,33 @@ import { FacebookPageEmbed } from "./facebook-page-embed";
 
 const PAGE = "https://www.facebook.com/Meta";
 
-describe("FacebookPageEmbed", () => {
-  it("renders Meta's oEmbed html unmodified and loads the SDK", () => {
-    render(<FacebookPageEmbed embed={{ status: "ok", html: '<div class="fb-page">oembed</div>' }} pageUrl={PAGE} />);
+describe("FacebookPageEmbed (Facebook Page Plugin)", () => {
+  it("renders the Page Plugin for the given Page and loads the SDK", () => {
+    const { container } = render(<FacebookPageEmbed pageUrl={PAGE} />);
 
-    expect(screen.getByTestId("facebook-page-embed").innerHTML).toBe('<div class="fb-page">oembed</div>');
+    expect(screen.getByTestId("facebook-page-plugin")).toBeInTheDocument();
+    expect(container.querySelector(".fb-page")).toHaveAttribute("data-href", PAGE);
     expect(screen.getByTestId("facebook-jssdk")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Visit Facebook Page" })).toHaveAttribute("href", PAGE);
   });
 
-  it("falls back to the Page Plugin markup for the same URL while oEmbed Read is pending review", () => {
-    const { container } = render(<FacebookPageEmbed embed={{ status: "pending_review" }} pageUrl={PAGE} />);
+  it("never injects raw HTML: the plugin is built from the allowlisted URL", () => {
+    const { container } = render(<FacebookPageEmbed pageUrl={PAGE} />);
 
-    const plugin = container.querySelector(".fb-page");
-    expect(plugin).toHaveAttribute("data-href", PAGE);
-    expect(screen.getByTestId("facebook-page-plugin")).toBeInTheDocument();
+    // The old oEmbed path rendered Meta's HTML via dangerouslySetInnerHTML.
     expect(screen.queryByTestId("facebook-page-embed")).not.toBeInTheDocument();
-    expect(screen.getByTestId("facebook-jssdk")).toBeInTheDocument();
+    expect(container.querySelector("blockquote")).toHaveAttribute("cite", PAGE);
   });
 
   it("attributes the SDK to Giya's app id when one is given", () => {
-    render(<FacebookPageEmbed embed={{ status: "pending_review" }} pageUrl={PAGE} appId="849285887880230" />);
+    render(<FacebookPageEmbed pageUrl={PAGE} appId="849285887880230" />);
 
     expect(screen.getByTestId("facebook-jssdk").getAttribute("data-src")).toMatch(/&appId=849285887880230$/);
   });
 
-  it("shows only the Page link, and no SDK, when the embed is unavailable", () => {
-    const { container } = render(<FacebookPageEmbed embed={{ status: "unavailable" }} pageUrl={PAGE} />);
+  it("loads the SDK without an app id when none is configured", () => {
+    render(<FacebookPageEmbed pageUrl={PAGE} appId={null} />);
 
-    expect(container.querySelector(".fb-page")).toBeNull();
-    expect(screen.queryByTestId("facebook-jssdk")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Visit Facebook Page" })).toBeInTheDocument();
+    expect(screen.getByTestId("facebook-jssdk").getAttribute("data-src")).not.toContain("appId=");
   });
 });

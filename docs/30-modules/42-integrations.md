@@ -181,7 +181,6 @@ Each mode is drilled in staging before launch (`../50-ops/50-environments-deploy
 | `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET` | server | Resend |
 | `META_APP_ID`, `META_APP_SECRET` | server | Meta Business OAuth [V1] |
 | `META_WEBHOOK_VERIFY_TOKEN` | server | Meta webhook registration handshake (`hub.verify_token`). Deliberately **not** `META_APP_SECRET` reused: the verify token is typed into Meta's app dashboard and is therefore disclosed to everyone who can see that console, while the app secret signs every webhook. Unset means the handshake is refused. |
-| `META_CLIENT_TOKEN` | server | Meta oEmbed Read (`src/lib/integrations/meta-oembed.ts`): App Dashboard → Settings → Advanced → Client token, sent as the `META_APP_ID\|META_CLIENT_TOKEN` app token in the `Authorization` header. Falls back to `META_APP_SECRET`; with neither, Facebook Page embeds degrade to a plain "Visit Facebook Page" link. Until App Review approves oEmbed Read, Graph answers error #10 and the card renders the review-free Page Plugin instead (stated on `/meta-review`); after approval, redeploy once so the 24h fetch cache does not keep serving the fallback. Reviewer page: `/meta-review`. |
 | `INTEGRATION_TOKEN_AES_KEY` | server | `integration_connections` encryption (key-id-prefixed, `../50-ops/50-environments-deployment.md` rotation) |
 | `PAYMONGO_SECRET_KEY`, `PAYMONGO_WEBHOOK_SECRET` | server | [SCALE] placeholder |
 

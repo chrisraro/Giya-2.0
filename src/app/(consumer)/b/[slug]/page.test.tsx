@@ -17,11 +17,9 @@ const mocks = vi.hoisted(() => ({
   getPublicMenu: vi.fn(),
   getPublicRewards: vi.fn(),
   getMyBalanceForBusiness: vi.fn(),
-  getFacebookPageEmbed: vi.fn(),
 }));
 
-vi.mock("@/lib/integrations/meta-oembed", () => ({
-  getFacebookPageEmbed: mocks.getFacebookPageEmbed,
+vi.mock("@/lib/integrations/meta-sdk", () => ({
   getMetaAppIdForSdk: () => null,
 }));
 
@@ -224,56 +222,34 @@ describe("public business page affordability", () => {
   });
 });
 
-describe("public business page Facebook embed (Meta oEmbed Read)", () => {
+describe("public business page Facebook Page (Page Plugin)", () => {
   beforeEach(() => {
     mocks.getUser.mockResolvedValue({ data: { user: null } });
     mocks.getPublicRewards.mockResolvedValue([]);
   });
 
-  it("renders the business's own Page from the oEmbed html", async () => {
+  it("shows the business's own Page through the Page Plugin", async () => {
     mocks.getBusinessBySlug.mockResolvedValue(
       business({ facebookUrl: "https://www.facebook.com/kapediaria" }),
     );
-    mocks.getFacebookPageEmbed.mockResolvedValue({ status: "ok", html: '<div class="fb-page">embed</div>' });
 
-    render(await PublicBusinessPage({ params: params() }));
+    const { container } = render(await PublicBusinessPage({ params: params() }));
 
-    expect(mocks.getFacebookPageEmbed).toHaveBeenCalledWith("https://www.facebook.com/kapediaria");
-    expect(screen.getByTestId("facebook-page-embed")).toHaveTextContent("embed");
+    expect(screen.getByTestId("facebook-page-plugin")).toBeInTheDocument();
+    expect(container.querySelector(".fb-page")).toHaveAttribute(
+      "data-href",
+      "https://www.facebook.com/kapediaria",
+    );
     expect(screen.getByRole("link", { name: "Visit Facebook Page" })).toHaveAttribute(
       "href",
       "https://www.facebook.com/kapediaria",
     );
   });
 
-  it("falls back to the Page link alone when the embed could not be fetched", async () => {
-    mocks.getBusinessBySlug.mockResolvedValue(
-      business({ facebookUrl: "https://www.facebook.com/kapediaria" }),
-    );
-    mocks.getFacebookPageEmbed.mockResolvedValue({ status: "unavailable" });
-
+  it("shows no Facebook section when the business has no Page", async () => {
     render(await PublicBusinessPage({ params: params() }));
 
-    expect(screen.queryByTestId("facebook-page-embed")).not.toBeInTheDocument();
     expect(screen.queryByTestId("facebook-page-plugin")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Visit Facebook Page" })).toBeInTheDocument();
-  });
-
-  it("shows the business's Page through the Page Plugin while oEmbed Read is pending review", async () => {
-    mocks.getBusinessBySlug.mockResolvedValue(
-      business({ facebookUrl: "https://www.facebook.com/kapediaria" }),
-    );
-    mocks.getFacebookPageEmbed.mockResolvedValue({ status: "pending_review" });
-
-    render(await PublicBusinessPage({ params: params() }));
-
-    expect(screen.getByTestId("facebook-page-plugin")).toBeInTheDocument();
-  });
-
-  it("shows no Facebook section and calls no Meta API when the business has no Page", async () => {
-    render(await PublicBusinessPage({ params: params() }));
-
-    expect(mocks.getFacebookPageEmbed).not.toHaveBeenCalled();
     expect(screen.queryByRole("link", { name: "Visit Facebook Page" })).not.toBeInTheDocument();
   });
 });
