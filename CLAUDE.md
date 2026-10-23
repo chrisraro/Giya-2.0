@@ -78,3 +78,8 @@ beat module docs; `docs/20-data/` is the schema of record.
 - Doc 14 mentions Husky, commitlint, Prettier and CI — none exist in the repo yet.
 - Doc 14 says migrations are `{timestamp}_slug.sql`; the repo uses `NNNN_slug.sql`. Follow the repo.
 - No remote deploy yet; secrets live in `.env.local` (gitignored).
+
+<!-- vault-link:start -->
+## KOS context
+Before exploring this repo, read `C:\KOS\02 - Projects\Active\Giya 2.0\PROJECT-CONTEXT.md` (and `handoff.md` in that folder if present). When you finish meaningful work: log it with `python "C:\KOS\00 - System\Automations\Dev-Metrics\Scripts\log_to_daily.py" --project "Giya 2.0" --agent claude "<one line>"`, and refresh that folder's `handoff.md` (replace, don't append). Durable decisions go in `DECISIONS.md` there only after the user approves; mark anything AI-written as draft.
+<!-- vault-link:end -->
